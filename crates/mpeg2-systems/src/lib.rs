@@ -9,4 +9,4 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-pub mod codec;
+pub mod field;

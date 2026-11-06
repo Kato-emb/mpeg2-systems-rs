@@ -103,7 +103,7 @@ fn check_width(width: u32) -> Result<(), Error> {
 /// # Examples
 ///
 /// ```
-/// use mpeg2_systems::codec::{Error, FieldReader};
+/// use mpeg2_systems::field::{Error, FieldReader};
 ///
 /// // The four header bytes of a null Transport Packet
 /// let mut reader = FieldReader::new(&[0x47, 0x1f, 0xff, 0x10]);
@@ -262,7 +262,7 @@ impl<'input> FieldReader<'input> {
 /// # Examples
 ///
 /// ```
-/// use mpeg2_systems::codec::{Error, FieldWriter};
+/// use mpeg2_systems::field::{Error, FieldWriter};
 ///
 /// // The four header bytes of a null Transport Packet
 /// let mut packet = Vec::new();
