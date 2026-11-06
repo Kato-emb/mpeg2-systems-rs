@@ -21,11 +21,6 @@ pub enum Error {
         /// Bits of the input left unread before the field
         remaining_bits: u64,
     },
-    /// A field width outside 1 to 64 bits was asked for
-    InvalidWidth {
-        /// The width asked for, in bits
-        width: u32,
-    },
     /// A field of whole bytes was asked for while the position is inside a byte
     NotByteAligned {
         /// Bits of the current byte already read or written, 1 to 7
@@ -56,9 +51,6 @@ impl fmt::Display for Error {
                 "field of {required_bits} bits runs past the end of the input, \
                  which has {remaining_bits} bits left"
             ),
-            Self::InvalidWidth { width } => {
-                write!(formatter, "field width of {width} bits is outside 1 to 64")
-            }
             Self::NotByteAligned { bit_offset } => write!(
                 formatter,
                 "field of whole bytes starts at bit {bit_offset} of a byte"
@@ -79,26 +71,19 @@ impl fmt::Display for Error {
 
 impl core::error::Error for Error {}
 
-/// Refuses a field width outside 1 to 64 bits
-fn check_width(width: u32) -> Result<(), Error> {
-    if (1..=u64::BITS).contains(&width) {
-        Ok(())
-    } else {
-        Err(Error::InvalidWidth { width })
-    }
-}
-
 /// Cursor reading the fields of a syntax element off the front of its bytes
 ///
 /// Each field is an unsigned integer of 1 to 64 bits, most significant bit
 /// first (`uimsbf`, and `bslbf` read as an integer), at whatever bit the field
-/// before it ended. A run of whole bytes, such as a payload or a
-/// `private_data_byte` loop, is borrowed from the input once the position is
-/// on a byte boundary.
+/// before it ended. The width is a constant of the syntax table, so it is a
+/// const parameter, and a width outside 1 to 64 bits, or wider than the
+/// integer it is read into, does not compile. A run of whole bytes, such as a
+/// payload or a `private_data_byte` loop, is borrowed from the input once the
+/// position is on a byte boundary.
 ///
 /// A read that fails leaves the position where it was. Every read is bounded
-/// by the input, so no width or length read from the input can take the
-/// cursor past its end.
+/// by the input, so no length read from the input can take the cursor past its
+/// end.
 ///
 /// # Examples
 ///
@@ -107,23 +92,22 @@ fn check_width(width: u32) -> Result<(), Error> {
 ///
 /// // The four header bytes of a null Transport Packet
 /// let mut reader = FieldReader::new(&[0x47, 0x1f, 0xff, 0x10]);
-/// assert_eq!(reader.read_bits(8), Ok(0x47));
+/// assert_eq!(reader.read_u8::<8>(), Ok(0x47));
 /// assert_eq!(reader.read_bool(), Ok(false));
 /// assert_eq!(reader.read_bool(), Ok(false));
 /// assert_eq!(reader.read_bool(), Ok(false));
-/// assert_eq!(reader.read_bits(13), Ok(0x1fff));
+/// assert_eq!(reader.read_u16::<13>(), Ok(0x1fff));
 ///
 /// // A field longer than what is left names both
 /// assert_eq!(
-///     reader.read_bits(9),
+///     reader.read_bits::<9>(),
 ///     Err(Error::Truncated { required_bits: 9, remaining_bits: 8 })
 /// );
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FieldReader<'input> {
     input: &'input [u8],
-    byte_offset: usize,
-    bit_offset: u32,
+    position_bits: u64,
 }
 
 impl<'input> FieldReader<'input> {
@@ -132,18 +116,30 @@ impl<'input> FieldReader<'input> {
     pub fn new(input: &'input [u8]) -> Self {
         Self {
             input,
-            byte_offset: 0,
-            bit_offset: 0,
+            position_bits: 0,
         }
+    }
+
+    /// Returns the index of the byte the position is in
+    fn byte_offset(&self) -> usize {
+        // Why not an error: the position never passes the end of the input,
+        // whose length is a usize, so the conversion cannot fail.
+        usize::try_from(self.position_bits / 8).unwrap_or(usize::MAX)
+    }
+
+    /// Returns how many bits of the byte the position is in are already read
+    fn bit_offset(&self) -> u32 {
+        let [.., bit_offset] = (self.position_bits % 8).to_be_bytes();
+        u32::from(bit_offset)
     }
 
     /// Returns how many bits of the input are left unread
     #[must_use]
     pub fn remaining_bits(&self) -> u64 {
-        u64::try_from(self.input.len().saturating_sub(self.byte_offset))
+        u64::try_from(self.input.len())
             .unwrap_or(u64::MAX)
             .saturating_mul(8)
-            .saturating_sub(u64::from(self.bit_offset))
+            .saturating_sub(self.position_bits)
     }
 
     /// Returns how many whole bytes of the input are left unread
@@ -153,59 +149,103 @@ impl<'input> FieldReader<'input> {
     pub fn remaining_bytes(&self) -> usize {
         self.input
             .len()
-            .saturating_sub(self.byte_offset)
-            .saturating_sub(usize::from(self.bit_offset != 0))
+            .saturating_sub(self.byte_offset())
+            .saturating_sub(usize::from(!self.is_byte_aligned()))
     }
 
     /// Returns whether the position is on a byte boundary
     #[must_use]
     pub fn is_byte_aligned(&self) -> bool {
-        self.bit_offset == 0
+        self.position_bits.is_multiple_of(8)
     }
 
-    /// Reads the next field as an unsigned integer of `width` bits
+    /// Reads the next field as an unsigned integer of `WIDTH` bits
+    ///
+    /// `WIDTH` outside 1 to 64 does not compile.
     ///
     /// # Errors
     ///
-    /// * [`InvalidWidth`](Error::InvalidWidth): `width` is outside 1 to 64.
     /// * [`Truncated`](Error::Truncated): the input ends inside the field.
-    pub fn read_bits(&mut self, width: u32) -> Result<u64, Error> {
-        check_width(width)?;
+    pub fn read_bits<const WIDTH: u32>(&mut self) -> Result<u64, Error> {
+        const {
+            assert!(
+                WIDTH >= 1 && WIDTH <= u64::BITS,
+                "a field is 1 to 64 bits wide"
+            )
+        };
         let remaining_bits = self.remaining_bits();
-        if u64::from(width) > remaining_bits {
+        if u64::from(WIDTH) > remaining_bits {
             return Err(Error::Truncated {
-                required_bits: u64::from(width),
+                required_bits: u64::from(WIDTH),
                 remaining_bits,
             });
         }
 
         // Why not u64: a 64-bit field that starts inside a byte spans 9 bytes.
         // The bits up to `end_bit` are at most 7 + 64, so a u128 holds them.
-        let end_bit = self.bit_offset.saturating_add(width);
+        let end_bit = self.bit_offset().saturating_add(WIDTH);
         let mut window = 0_u128;
         let mut loaded_bits = 0_u32;
-        let mut loaded_bytes = 0_usize;
-        for byte in self.input.iter().skip(self.byte_offset) {
+        for byte in self.input.iter().skip(self.byte_offset()) {
             if loaded_bits >= end_bit {
                 break;
             }
             window = window.wrapping_shl(8) | u128::from(*byte);
             loaded_bits = loaded_bits.wrapping_add(8);
-            loaded_bytes = loaded_bytes.wrapping_add(1);
         }
 
         let [_, _, _, _, _, _, _, _, low @ ..] = window
             .wrapping_shr(loaded_bits.wrapping_sub(end_bit))
             .to_be_bytes();
-        let value = u64::from_be_bytes(low) & u64::MAX.wrapping_shr(u64::BITS.wrapping_sub(width));
-
-        self.bit_offset = end_bit.rem_euclid(8);
-        self.byte_offset = self
-            .byte_offset
-            .saturating_add(loaded_bytes)
-            .saturating_sub(usize::from(self.bit_offset != 0));
+        let value = u64::from_be_bytes(low) & u64::MAX.wrapping_shr(u64::BITS.wrapping_sub(WIDTH));
+        self.position_bits = self.position_bits.saturating_add(u64::from(WIDTH));
 
         Ok(value)
+    }
+
+    /// Reads the next field as a `u8` of `WIDTH` bits
+    ///
+    /// `WIDTH` outside 1 to 8 does not compile.
+    ///
+    /// # Errors
+    ///
+    /// * [`Truncated`](Error::Truncated): the input ends inside the field.
+    pub fn read_u8<const WIDTH: u32>(&mut self) -> Result<u8, Error> {
+        const { assert!(WIDTH <= u8::BITS, "the field is wider than a u8") };
+        // Why not try_from: WIDTH fits in the low byte, so its error is unreachable.
+        let [.., low] = self.read_bits::<WIDTH>()?.to_be_bytes();
+
+        Ok(low)
+    }
+
+    /// Reads the next field as a `u16` of `WIDTH` bits
+    ///
+    /// `WIDTH` outside 1 to 16 does not compile.
+    ///
+    /// # Errors
+    ///
+    /// * [`Truncated`](Error::Truncated): the input ends inside the field.
+    pub fn read_u16<const WIDTH: u32>(&mut self) -> Result<u16, Error> {
+        const { assert!(WIDTH <= u16::BITS, "the field is wider than a u16") };
+        // Why not try_from: WIDTH fits in the low 2 bytes, so its error is unreachable.
+        let [.., high, low] = self.read_bits::<WIDTH>()?.to_be_bytes();
+
+        Ok(u16::from_be_bytes([high, low]))
+    }
+
+    /// Reads the next field as a `u32` of `WIDTH` bits
+    ///
+    /// `WIDTH` outside 1 to 32 does not compile.
+    ///
+    /// # Errors
+    ///
+    /// * [`Truncated`](Error::Truncated): the input ends inside the field.
+    pub fn read_u32<const WIDTH: u32>(&mut self) -> Result<u32, Error> {
+        const { assert!(WIDTH <= u32::BITS, "the field is wider than a u32") };
+        // Why not try_from: WIDTH fits in the low 4 bytes, so its error is unreachable.
+        let [_, _, _, _, low @ ..] = self.read_bits::<WIDTH>()?.to_be_bytes();
+
+        Ok(u32::from_be_bytes(low))
     }
 
     /// Reads the next field as a single bit, set or clear
@@ -214,7 +254,7 @@ impl<'input> FieldReader<'input> {
     ///
     /// * [`Truncated`](Error::Truncated): the input has no bit left.
     pub fn read_bool(&mut self) -> Result<bool, Error> {
-        Ok(self.read_bits(1)? == 1)
+        Ok(self.read_bits::<1>()? == 1)
     }
 
     /// Borrows the next field, a run of `length` whole bytes
@@ -225,21 +265,22 @@ impl<'input> FieldReader<'input> {
     ///   byte.
     /// * [`Truncated`](Error::Truncated): the input ends inside the field.
     pub fn read_bytes(&mut self, length: usize) -> Result<&'input [u8], Error> {
-        if self.bit_offset != 0 {
+        if !self.is_byte_aligned() {
             return Err(Error::NotByteAligned {
-                bit_offset: self.bit_offset,
+                bit_offset: self.bit_offset(),
             });
         }
 
+        let required_bits = u64::try_from(length).unwrap_or(u64::MAX).saturating_mul(8);
         let (field, _) = self
             .input
-            .get(self.byte_offset..)
+            .get(self.byte_offset()..)
             .and_then(|rest| rest.split_at_checked(length))
             .ok_or_else(|| Error::Truncated {
-                required_bits: u64::try_from(length).unwrap_or(u64::MAX).saturating_mul(8),
+                required_bits,
                 remaining_bits: self.remaining_bits(),
             })?;
-        self.byte_offset = self.byte_offset.saturating_add(length);
+        self.position_bits = self.position_bits.saturating_add(required_bits);
 
         Ok(field)
     }
@@ -248,10 +289,10 @@ impl<'input> FieldReader<'input> {
 /// Cursor appending the fields of a syntax element to a caller's buffer
 ///
 /// The mirror of [`FieldReader`]: each field is an unsigned integer of 1 to 64
-/// bits, most significant bit first, and a run of whole bytes is appended once
-/// the position is on a byte boundary. A byte reaches the buffer as soon as its
-/// last bit is written; the bits of a byte not yet complete are held by the
-/// cursor.
+/// bits, most significant bit first, with the width a const parameter, and a
+/// run of whole bytes is appended once the position is on a byte boundary. A
+/// byte reaches the buffer as soon as its last bit is written; the bits of a
+/// byte not yet complete are held by the cursor.
 ///
 /// A write that fails leaves the buffer and the position as they were. The
 /// cursor is ended with [`finish`](Self::finish), which refuses a byte only
@@ -267,21 +308,21 @@ impl<'input> FieldReader<'input> {
 /// // The four header bytes of a null Transport Packet
 /// let mut packet = Vec::new();
 /// let mut writer = FieldWriter::new(&mut packet);
-/// writer.write_bits(8, 0x47)?;
+/// writer.write_bits::<8>(0x47_u8)?;
 /// writer.write_bool(false)?;
 /// writer.write_bool(false)?;
 /// writer.write_bool(false)?;
-/// writer.write_bits(13, 0x1fff)?;
-/// writer.write_bits(2, 0b00)?;
-/// writer.write_bits(2, 0b01)?;
-/// writer.write_bits(4, 0)?;
+/// writer.write_bits::<13>(0x1fff_u16)?;
+/// writer.write_bits::<2>(0b00_u8)?;
+/// writer.write_bits::<2>(0b01_u8)?;
+/// writer.write_bits::<4>(0_u8)?;
 /// writer.finish()?;
 /// assert_eq!(packet, [0x47, 0x1f, 0xff, 0x10]);
 ///
 /// // A value wider than its field is refused
 /// let mut writer = FieldWriter::new(&mut packet);
 /// assert_eq!(
-///     writer.write_bits(13, 0x2000),
+///     writer.write_bits::<13>(0x2000_u16),
 ///     Err(Error::ValueTooWide { width: 13, value: 0x2000 })
 /// );
 /// # Ok::<(), Error>(())
@@ -312,23 +353,33 @@ impl<'output> FieldWriter<'output> {
         self.pending_bits == 0
     }
 
-    /// Writes the next field as an unsigned integer of `width` bits
+    /// Writes the next field as an unsigned integer of `WIDTH` bits
+    ///
+    /// `WIDTH` outside 1 to 64 does not compile.
     ///
     /// # Errors
     ///
-    /// * [`InvalidWidth`](Error::InvalidWidth): `width` is outside 1 to 64.
     /// * [`ValueTooWide`](Error::ValueTooWide): `value` has a bit set above
-    ///   `width`.
-    pub fn write_bits(&mut self, width: u32, value: u64) -> Result<(), Error> {
-        check_width(width)?;
-        if value.checked_shr(width).unwrap_or(0) != 0 {
-            return Err(Error::ValueTooWide { width, value });
+    ///   `WIDTH`.
+    pub fn write_bits<const WIDTH: u32>(&mut self, value: impl Into<u64>) -> Result<(), Error> {
+        const {
+            assert!(
+                WIDTH >= 1 && WIDTH <= u64::BITS,
+                "a field is 1 to 64 bits wide"
+            )
+        };
+        let value = value.into();
+        if value.checked_shr(WIDTH).unwrap_or(0) != 0 {
+            return Err(Error::ValueTooWide {
+                width: WIDTH,
+                value,
+            });
         }
 
         // Why not u64: the bits held back from the last byte, at most 7, sit
         // above a field of up to 64 bits.
-        let window = u128::from(self.pending).wrapping_shl(width) | u128::from(value);
-        let mut unwritten_bits = self.pending_bits.saturating_add(width);
+        let window = u128::from(self.pending).wrapping_shl(WIDTH) | u128::from(value);
+        let mut unwritten_bits = self.pending_bits.saturating_add(WIDTH);
         while unwritten_bits >= 8 {
             unwritten_bits = unwritten_bits.wrapping_sub(8);
             let [.., byte] = window.wrapping_shr(unwritten_bits).to_be_bytes();
@@ -352,7 +403,7 @@ impl<'output> FieldWriter<'output> {
     /// Never fails; the `Result` keeps it in step with
     /// [`write_bits`](Self::write_bits) under `?`.
     pub fn write_bool(&mut self, value: bool) -> Result<(), Error> {
-        self.write_bits(1, u64::from(value))
+        self.write_bits::<1>(value)
     }
 
     /// Writes the next field, a run of whole bytes
@@ -403,14 +454,14 @@ mod tests {
         let mut reader = FieldReader::new(&[0x47, 0x41, 0x00, 0x39]);
 
         let fields = [
-            reader.read_bits(8),
-            reader.read_bits(1),
-            reader.read_bits(1),
-            reader.read_bits(1),
-            reader.read_bits(13),
-            reader.read_bits(2),
-            reader.read_bits(2),
-            reader.read_bits(4),
+            reader.read_bits::<8>(),
+            reader.read_bits::<1>(),
+            reader.read_bits::<1>(),
+            reader.read_bits::<1>(),
+            reader.read_bits::<13>(),
+            reader.read_bits::<2>(),
+            reader.read_bits::<2>(),
+            reader.read_bits::<4>(),
         ];
 
         assert_eq!(
@@ -430,23 +481,38 @@ mod tests {
     }
 
     #[test]
+    fn a_field_reads_into_the_integer_type_its_width_fits() {
+        let mut reader = FieldReader::new(&[0x47, 0x41, 0x00, 0x12, 0x34, 0x56, 0x78]);
+
+        assert_eq!(
+            (
+                reader.read_u8::<8>(),
+                reader.read_u8::<3>(),
+                reader.read_u16::<13>(),
+                reader.read_u32::<32>()
+            ),
+            (Ok(0x47), Ok(0b010), Ok(0x0100), Ok(0x1234_5678))
+        );
+    }
+
+    #[test]
     fn a_64_bit_field_starting_inside_a_byte_reads_whole() {
         let mut reader =
             FieldReader::new(&[0b1011_1111, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xe5]);
 
-        assert_eq!(reader.read_bits(3), Ok(0b101));
-        assert_eq!(reader.read_bits(64), Ok(u64::MAX));
-        assert_eq!(reader.read_bits(5), Ok(0b0_0101));
+        assert_eq!(reader.read_bits::<3>(), Ok(0b101));
+        assert_eq!(reader.read_bits::<64>(), Ok(u64::MAX));
+        assert_eq!(reader.read_bits::<5>(), Ok(0b0_0101));
     }
 
     #[test]
     fn a_field_running_past_the_input_names_its_width_and_what_is_left() {
         let mut reader = FieldReader::new(&[0xff, 0xff]);
-        reader.read_bits(3).unwrap();
+        reader.read_bits::<3>().unwrap();
         let before = reader.clone();
 
         assert_eq!(
-            reader.read_bits(14),
+            reader.read_bits::<14>(),
             Err(Error::Truncated {
                 required_bits: 14,
                 remaining_bits: 13
@@ -456,29 +522,16 @@ mod tests {
     }
 
     #[test]
-    fn a_width_outside_1_to_64_bits_is_refused() {
-        let mut reader = FieldReader::new(&[0; 16]);
-
-        assert_eq!(
-            [reader.read_bits(0), reader.read_bits(65)],
-            [
-                Err(Error::InvalidWidth { width: 0 }),
-                Err(Error::InvalidWidth { width: 65 })
-            ]
-        );
-    }
-
-    #[test]
     fn bytes_are_borrowed_only_from_a_byte_boundary() {
         let input = [0xa5, 0x01, 0x02, 0x03];
         let mut reader = FieldReader::new(&input);
 
-        assert_eq!(reader.read_bits(4), Ok(0xa));
+        assert_eq!(reader.read_bits::<4>(), Ok(0xa));
         assert_eq!(
             reader.read_bytes(1),
             Err(Error::NotByteAligned { bit_offset: 4 })
         );
-        assert_eq!(reader.read_bits(4), Ok(0x5));
+        assert_eq!(reader.read_bits::<4>(), Ok(0x5));
         assert_eq!(reader.read_bytes(2), Ok(&input[1..3]));
         assert_eq!(
             reader.read_bytes(2),
@@ -492,7 +545,7 @@ mod tests {
     #[test]
     fn a_partly_read_byte_counts_toward_the_bits_left_but_not_the_bytes() {
         let mut reader = FieldReader::new(&[0, 0, 0]);
-        reader.read_bits(3).unwrap();
+        reader.read_bits::<3>().unwrap();
 
         assert_eq!(
             (
@@ -510,14 +563,14 @@ mod tests {
         let mut output = Vec::new();
         let mut writer = FieldWriter::new(&mut output);
 
-        writer.write_bits(8, 0x47).unwrap();
+        writer.write_bits::<8>(0x47_u8).unwrap();
         writer.write_bool(false).unwrap();
         writer.write_bool(true).unwrap();
         writer.write_bool(false).unwrap();
-        writer.write_bits(13, 0x0100).unwrap();
-        writer.write_bits(2, 0).unwrap();
-        writer.write_bits(2, 0b11).unwrap();
-        writer.write_bits(4, 9).unwrap();
+        writer.write_bits::<13>(0x0100_u16).unwrap();
+        writer.write_bits::<2>(0_u8).unwrap();
+        writer.write_bits::<2>(0b11_u8).unwrap();
+        writer.write_bits::<4>(9_u8).unwrap();
         writer.write_bytes(&[0xb7]).unwrap();
 
         assert_eq!(writer.finish(), Ok(()));
@@ -527,24 +580,34 @@ mod tests {
     #[cfg(feature = "alloc")]
     #[test]
     fn fields_written_at_any_bit_position_read_back_as_written() {
-        let fields: [(u32, u64); 5] = [
-            (3, 0b101),
-            (64, 0x8123_4567_89ab_cdef),
-            (33, 0x1_2345_6789),
-            (1, 1),
-            (3, 0b011),
-        ];
         let mut output = Vec::new();
         let mut writer = FieldWriter::new(&mut output);
-        for (width, value) in fields {
-            writer.write_bits(width, value).unwrap();
-        }
+        writer.write_bits::<3>(0b101_u8).unwrap();
+        writer.write_bits::<64>(0x8123_4567_89ab_cdef_u64).unwrap();
+        writer.write_bits::<33>(0x1_2345_6789_u64).unwrap();
+        writer.write_bool(true).unwrap();
+        writer.write_bits::<3>(0b011_u8).unwrap();
         writer.finish().unwrap();
 
         let mut reader = FieldReader::new(&output);
-        let read_back = fields.map(|(width, _)| (width, reader.read_bits(width).unwrap()));
+        let read_back = [
+            reader.read_bits::<3>(),
+            reader.read_bits::<64>(),
+            reader.read_bits::<33>(),
+            reader.read_bits::<1>(),
+            reader.read_bits::<3>(),
+        ];
 
-        assert_eq!(read_back, fields);
+        assert_eq!(
+            read_back,
+            [
+                Ok(0b101),
+                Ok(0x8123_4567_89ab_cdef),
+                Ok(0x1_2345_6789),
+                Ok(1),
+                Ok(0b011)
+            ]
+        );
         assert_eq!(reader.remaining_bits(), 0);
     }
 
@@ -553,16 +616,16 @@ mod tests {
     fn a_value_wider_than_its_field_is_refused_before_a_bit_is_written() {
         let mut output = Vec::new();
         let mut writer = FieldWriter::new(&mut output);
-        writer.write_bits(3, 0b111).unwrap();
+        writer.write_bits::<3>(0b111_u8).unwrap();
 
         assert_eq!(
-            writer.write_bits(13, 0x2000),
+            writer.write_bits::<13>(0x2000_u16),
             Err(Error::ValueTooWide {
                 width: 13,
                 value: 0x2000
             })
         );
-        writer.write_bits(5, 0).unwrap();
+        writer.write_bits::<5>(0_u8).unwrap();
         writer.finish().unwrap();
         assert_eq!(output, [0b1110_0000]);
     }
@@ -572,8 +635,8 @@ mod tests {
     fn writing_cannot_finish_or_append_bytes_inside_a_byte() {
         let mut output = Vec::new();
         let mut writer = FieldWriter::new(&mut output);
-        writer.write_bits(8, 0x47).unwrap();
-        writer.write_bits(3, 0).unwrap();
+        writer.write_bits::<8>(0x47_u8).unwrap();
+        writer.write_bits::<3>(0_u8).unwrap();
 
         assert_eq!(
             writer.write_bytes(&[0]),
