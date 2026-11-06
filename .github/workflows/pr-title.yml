@@ -1,0 +1,50 @@
+name: PR title
+
+# `edited` re-validates on title edits, which fire no new commit.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  pr-title:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # The convention, and what each type means for the CHANGELOG and the
+          # version, is CONTRIBUTING.md "Pull request titles"; keep the two in step.
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            docs
+            test
+            build
+            ci
+            chore
+            revert
+          # A scope is optional, but one that is given must be listed here, so
+          # one part of the code is not named two ways in the CHANGELOG.
+          scopes: |
+            ts
+            ps
+            pes
+            psi
+            descriptor
+            demux
+            mux
+            arib
+            xtask
+            deps
+          # Imperative, starting lower-case (or with a backticked identifier),
+          # with no trailing period: it becomes a CHANGELOG bullet as written.
+          subjectPattern: '^[a-z`].*[^.]$'
+          subjectPatternError: >-
+            The subject "{subject}" must start with a lower-case imperative verb
+            (or a backticked identifier) and must not end with a period.
