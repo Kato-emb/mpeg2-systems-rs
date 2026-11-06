@@ -1,0 +1,171 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+# How it is raised: CONTRIBUTING.md "Minimum supported Rust version".
+rust-version = "1.88"
+authors = ["Ryohei Kato <r-kato@musen.co.jp>"]
+repository = "https://github.com/Kato-emb/mpeg2-systems-rs"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["mpegts", "mpeg2ts", "demux", "mux", "iso-13818"]
+categories = ["multimedia::video", "no-std", "parser-implementations"]
+
+[workspace.dependencies]
+mpeg2-systems = { path = "crates/mpeg2-systems", version = "0.0.0", default-features = false }
+
+# This is the one lint table: a target that must relax a lint, such as an
+# example that prints, does so at the site with `#[expect(lint, reason = "...")]`
+# rather than carrying a copy of this table that drifts out of step.
+[workspace.lints.rust]
+# Memory safety: the demuxers are fed untrusted broadcast streams, so safety
+# must not rest on reviewing unsafe blocks. forbid (not deny) cannot be lifted
+# by an attribute; introducing unsafe requires editing this file, which always
+# reaches review.
+unsafe_code = "forbid"
+
+# Public API surface: everything a user can reach must be documented and
+# Debug-printable, and `pub` must be honest — items that look public but are
+# not usable from outside get flagged.
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unnameable_types = "warn"
+
+# Dead weight: constructs that compile but say nothing (no-op casts, stale
+# lifetimes, redundant paths) accumulate as noise and hide real changes.
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+unused_lifetimes = "warn"
+redundant_lifetimes = "warn"
+unused_qualifications = "warn"
+
+# Idioms: a lifetime elided in a path (`TransportPacket` for
+# `TransportPacket<'_>`) hides that the type borrows the input, which every
+# syntax type does. Priority -1 lets a lint of the group be set apart.
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+# Identifiers: public names are specification vocabulary, which is ASCII; a
+# non-ASCII identifier can only be a mistake or a confusable.
+non_ascii_idents = "forbid"
+
+[workspace.lints.clippy]
+# Panic freedom: malformed input must surface as an error event or an Err,
+# never abort the caller. Every implicit panic path — unwrap, indexing,
+# unchecked arithmetic — is a denial-of-service vector when the input is a
+# broadcast stream.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+# indexing_slicing does not see a `str` sliced off a UTF-8 character boundary,
+# and the lints above do not see assert!.
+string_slice = "deny"
+panic_in_result_fn = "deny"
+
+# Lossy numeric conversion: wire fields have fixed widths (a 13-bit PID, a
+# 33-bit PTS, a 42-bit PCR); a silent `as` that truncates or flips sign
+# corrupts values without any error. Convert with From/TryFrom so loss is
+# impossible or explicitly handled.
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_precision_loss = "deny"
+cast_sign_loss = "deny"
+# The lossless `as` too, so every conversion reads From/TryFrom, and a range
+# check written by hand gives way to TryFrom.
+cast_lossless = "deny"
+checked_conversions = "deny"
+
+# Integer time: PTS, DTS, PCR and SCR are 33-bit and 42-bit counts of a 90 kHz
+# or 27 MHz clock; a float holds neither exactly, and the rounding error is
+# too small for a test to catch and too large for a decoder to ignore.
+float_arithmetic = "deny"
+
+# Byte order: MPEG-2 Systems is big-endian on the wire; a symmetric le/ne
+# mistake in encode+decode cancels out in round-trip tests, so this bug class
+# must be caught by lint.
+host_endian_bytes = "deny"
+little_endian_bytes = "deny"
+
+# Deterministic output: a program stream map and a system header list their
+# streams in a fixed order; iterating a hash type would make the byte stream
+# differ between runs while a tolerant decoder still round-trips it. The
+# library is no_std and uses BTreeMap; this holds xtask and examples to it.
+iter_over_hash_type = "deny"
+
+# Debugging leftovers: dbg! must not ship. print!/eprint! need no lint, since
+# the library crates are no_std and have none, while the programs that do have
+# them, such as examples and xtask, print on purpose.
+dbg_macro = "deny"
+
+# Inlining: #[inline(always)] overrides the compiler and can bloat or slow the
+# code, so it is taken only with a benchmark comparison in the #[expect] reason.
+# Plain #[inline] is rarely needed: generic functions and small leaf functions
+# already inline across crates.
+inline_always = "deny"
+
+# Source layout and naming: one uniform module layout (foo.rs + foo/, never
+# foo/mod.rs) so file names map one-to-one to module paths; single-char idents
+# are the mechanized half of the no-abbreviation rule in AGENTS.md.
+mod_module_files = "deny"
+min_ident_chars = "deny"
+
+# Lint suppression: a lint is relaxed with #[expect], which itself fails once
+# the code no longer trips the lint, so a stale exemption cannot linger; and
+# every exemption states why at the site.
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+# API evolution: syntax types grow fields and newtypes grow constants as
+# ISO/IEC 13818-1 is revised, so public types must stay extensible without a
+# semver break; on the consuming side, a `_` arm would silently absorb
+# variants added later — matches must break loudly instead. The state-machine
+# rule of AGENTS.md (one match per state × observation) relies on the last.
+exhaustive_structs = "deny"
+exhaustive_enums = "deny"
+wildcard_enum_match_arm = "deny"
+
+# Public API ergonomics: a value-returning method whose result is dropped is
+# almost always a mistake (`encoded_len()`, `pid()`), and an argument taken by
+# value and only read forces a clone on the caller; the per-packet path must
+# not pay that. Small Copy values go by value, large ones by reference.
+must_use_candidate = "warn"
+return_self_not_must_use = "warn"
+needless_pass_by_value = "warn"
+trivially_copy_pass_by_ref = "warn"
+large_types_passed_by_value = "warn"
+
+# no_std: std in a library crate already fails to compile, so std_instead_of_*
+# would only fire in the programs that link std. What remains is reaching
+# through alloc for what core provides, which ties code to the alloc feature
+# for nothing.
+alloc_instead_of_core = "warn"
+
+# Test placement: unit tests live in #[cfg(test)] modules, keeping test-only
+# code out of the shipped item namespace.
+tests_outside_test_module = "warn"
+
+# Doc quality: rendered docs are the public contract — error/panic sections
+# and clean markdown are part of it, and they ship to docs.rs as written.
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+too_long_first_doc_paragraph = "warn"
+doc_markdown = "warn"
+doc_link_with_quotes = "warn"
+
+# Package metadata: a published crate carries what crates.io shows; crates with
+# `publish = false` are exempt.
+cargo_common_metadata = "warn"
+
+[workspace.lints.rustdoc]
+# Doc quality: allow-by-default in rustdoc, so the docs job's -D warnings alone
+# never fires them — a crate page with no overview, or an unclosed backtick,
+# would ship to docs.rs as written.
+missing_crate_level_docs = "warn"
+unescaped_backticks = "warn"

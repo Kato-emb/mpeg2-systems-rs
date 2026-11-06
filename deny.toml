@@ -1,0 +1,45 @@
+# Supply-chain policy. CI runs `cargo deny check` on every pull request and
+# `cargo deny check advisories` weekly, since an advisory can be published
+# against a dependency without any change on our side.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# Only permissive licenses compatible with the project's `MIT OR Apache-2.0`
+# distribution. Adding a license here is a review-required change.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "0BSD",
+    "CC0-1.0",
+]
+confidence-threshold = 0.9
+# The list is the policy, not an inventory of what the graph holds today.
+unused-allowed-license = "allow"
+# libFuzzer, which this crate bundles, is NCSA-licensed. Only the fuzz targets
+# depend on it, and they are never distributed. CI checks their graph against
+# this file as well, and the workspace's graph never holds the crate.
+exceptions = [{ allow = ["NCSA"], crate = "libfuzzer-sys" }]
+unused-license-exception = "allow"
+
+[bans]
+wildcards = "deny"
+# A path dependency carries no version requirement; the wildcard ban is aimed
+# at registry crates.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
