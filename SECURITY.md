@@ -1,8 +1,9 @@
 # Security policy
 
-This library reads files from untrusted sources. A panic, an unbounded
-allocation, an infinite loop, or excessive work on crafted input is a
-vulnerability, and so is output that a conforming reader would misinterpret.
+This library reads streams from untrusted sources, such as broadcast transport
+streams. A panic, an unbounded allocation, an infinite loop, or excessive work
+on crafted input is a vulnerability, and so is output that a conforming reader
+would misinterpret.
 
 ## Reporting a vulnerability
 

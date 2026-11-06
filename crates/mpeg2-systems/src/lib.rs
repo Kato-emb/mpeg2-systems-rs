@@ -5,10 +5,3 @@
 //! under construction and holds nothing yet.
 
 #![no_std]
-
-#[cfg(feature = "alloc")]
-#[expect(
-    unused_extern_crates,
-    reason = "nothing allocates yet; the first item that does lifts this"
-)]
-extern crate alloc;
