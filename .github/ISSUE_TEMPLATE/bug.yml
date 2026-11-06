@@ -1,0 +1,32 @@
+name: Bug report
+description: A stream that is read or written wrongly, or an API that does not do what its documentation states
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead, with any error value.
+    validations:
+      required: true
+  - type: textarea
+    id: input
+    attributes:
+      label: Input
+      description: >-
+        The smallest stream or byte sequence that reproduces it — attached,
+        linked, or as a hex dump of the packets involved. Say if it may be added
+        to the test suite.
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: The code that drives the library.
+      render: rust
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The crate version or commit, and `rustc -V`.
+    validations:
+      required: true

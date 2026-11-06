@@ -1,0 +1,16 @@
+name: Feature request
+description: A table, a descriptor, a stream type, or a capability the library does not have
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What you need
+      description: What you are trying to do and what stops you today.
+    validations:
+      required: true
+  - type: input
+    id: specification
+    attributes:
+      label: Specification
+      description: The specification and clause that define it, e.g. ISO/IEC 13818-1 §2.4.4.
