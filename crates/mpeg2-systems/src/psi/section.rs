@@ -19,6 +19,9 @@ const SYNTAX_LENGTH: usize = 5;
 /// Bytes of `CRC_32`
 const CRC_32_LENGTH: usize = 4;
 
+/// The `reserved` bits a new section has, and a PSI table requires
+const RESERVED: u8 = 0b11;
+
 /// Failure to read or write a section
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -72,6 +75,12 @@ pub enum Error {
         /// The `table_id` of the section
         table_id: TableId,
     },
+    /// A section of a PSI table to write has a `reserved` field that is not
+    /// `'11'`
+    Reserved {
+        /// The `table_id` of the section
+        table_id: TableId,
+    },
 }
 
 impl fmt::Display for Error {
@@ -109,6 +118,11 @@ impl fmt::Display for Error {
                 "section_syntax_indicator of table_id {:#04x} must be '1'",
                 table_id.get()
             ),
+            Self::Reserved { table_id } => write!(
+                formatter,
+                "the reserved bits of table_id {:#04x} must be '11'",
+                table_id.get()
+            ),
             Self::PrivateIndicator { table_id } => write!(
                 formatter,
                 "the bit after section_syntax_indicator of table_id {:#04x} must be '0'",
@@ -128,7 +142,8 @@ impl core::error::Error for Error {
             | Self::Crc32 { .. }
             | Self::SectionNumber { .. }
             | Self::SectionSyntaxIndicator { .. }
-            | Self::PrivateIndicator { .. } => None,
+            | Self::PrivateIndicator { .. }
+            | Self::Reserved { .. } => None,
         }
     }
 }
@@ -145,6 +160,9 @@ impl core::error::Error for Error {
 pub struct SectionSyntax {
     /// Field the table defines, such as `transport_stream_id`
     pub table_id_extension: u16,
+    /// The 2 bits between `table_id_extension` and `version_number`,
+    /// `reserved` in a `private_section` and kept as read (see [`Section`])
+    pub reserved_before_version_number: u8,
     /// Version of the table
     pub version_number: VersionNumber,
     /// Whether the table applies now rather than next
@@ -156,7 +174,7 @@ pub struct SectionSyntax {
 }
 
 impl SectionSyntax {
-    /// Creates the fields from their values
+    /// Creates the fields from their values, the reserved bits `'11'`
     #[must_use]
     pub const fn new(
         table_id_extension: u16,
@@ -167,6 +185,7 @@ impl SectionSyntax {
     ) -> Self {
         Self {
             table_id_extension,
+            reserved_before_version_number: RESERVED,
             version_number,
             current_next_indicator,
             section_number,
@@ -199,6 +218,12 @@ impl SectionSyntax {
 /// it is written, so it is not a field. A table the crate does not
 /// interpret is kept whole as its body. The crate does not gather a section
 /// from Transport Packets; the demultiplexer does.
+///
+/// The 2 bits before `section_length`, and the 2 before `version_number`,
+/// are `reserved` in a `private_section`, but `Metadata_section` gives them
+/// meanings of its own (§2.12.6), so the bits read are kept and written
+/// back. A new section has them `'11'`, which PAT, CAT, PMT and the
+/// transport stream description table require.
 ///
 /// # Examples
 ///
@@ -233,6 +258,9 @@ pub struct Section<'input> {
     /// The bit after `section_syntax_indicator`: `private_indicator` in a
     /// private section, `'0'` in PAT, CAT and PMT
     pub private_indicator: bool,
+    /// The 2 bits between `private_indicator` and `section_length`, kept as
+    /// read
+    pub reserved_before_section_length: u8,
     /// `table_id_extension` to `last_section_number`, present when
     /// `section_syntax_indicator` is `'1'`
     pub syntax: Option<SectionSyntax>,
@@ -248,6 +276,7 @@ impl<'input> Section<'input> {
         Self {
             table_id,
             private_indicator: false,
+            reserved_before_section_length: RESERVED,
             syntax: None,
             body,
         }
@@ -292,11 +321,11 @@ impl<'input> Section<'input> {
                 TableId(reader.read_u8::<8>()?),
                 reader.read_bool()?,
                 reader.read_bool()?,
-                reader.read_bits::<2>()?,
+                reader.read_u8::<2>()?,
                 reader.read_u16::<12>()?,
             ))
         };
-        let (table_id, section_syntax_indicator, private_indicator, _, section_length) =
+        let (table_id, section_syntax_indicator, private_indicator, reserved, section_length) =
             prefix().map_err(|error| Error::Field {
                 field: "section_length",
                 error,
@@ -321,20 +350,23 @@ impl<'input> Section<'input> {
 
         let mut section = Self::new(table_id, rest);
         section.private_indicator = private_indicator;
+        section.reserved_before_section_length = reserved;
         if !section_syntax_indicator {
             return Ok(section);
         }
 
         let mut syntax = || {
             let table_id_extension = reader.read_u16::<16>()?;
-            reader.read_bits::<2>()?;
-            Ok(SectionSyntax::new(
+            let reserved = reader.read_u8::<2>()?;
+            let mut syntax = SectionSyntax::new(
                 table_id_extension,
                 VersionNumber(reader.read_u8::<5>()?),
                 reader.read_bool()?,
                 reader.read_u8::<8>()?,
                 reader.read_u8::<8>()?,
-            ))
+            );
+            syntax.reserved_before_version_number = reserved;
+            Ok(syntax)
         };
         let syntax = syntax().map_err(|error| Error::Field {
             field: "last_section_number",
@@ -388,6 +420,9 @@ impl<'input> Section<'input> {
     ///   of a PSI table without [`syntax`](Self::syntax).
     /// * [`PrivateIndicator`](Error::PrivateIndicator): a section of a PSI
     ///   table with `private_indicator` set.
+    /// * [`Reserved`](Error::Reserved): a section of a PSI table with
+    ///   `reserved` bits other than `'11'`.
+    /// * [`Field`](Error::Field): a `reserved` field wider than 2 bits.
     /// * [`SectionLength`](Error::SectionLength): `section_length` would be
     ///   larger than [`TableId::max_section_length`].
     /// * [`SectionNumber`](Error::SectionNumber): `section_number` is past
@@ -404,6 +439,12 @@ impl<'input> Section<'input> {
             }
             if self.private_indicator {
                 return Err(Error::PrivateIndicator { table_id });
+            }
+            let syntax_reserved = self
+                .syntax
+                .map_or(RESERVED, |syntax| syntax.reserved_before_version_number);
+            if self.reserved_before_section_length != RESERVED || syntax_reserved != RESERVED {
+                return Err(Error::Reserved { table_id });
             }
         }
         let section_length = self.section_length();
@@ -427,11 +468,11 @@ impl<'input> Section<'input> {
             writer.write_bits::<8>(table_id.get())?;
             writer.write_bool(syntax.is_some())?;
             writer.write_bool(self.private_indicator)?;
-            writer.write_bits::<2>(0b11_u8)?;
+            writer.write_bits::<2>(self.reserved_before_section_length)?;
             writer.write_bits::<12>(length)?;
             if let Some(syntax) = syntax {
                 writer.write_bits::<16>(syntax.table_id_extension)?;
-                writer.write_bits::<2>(0b11_u8)?;
+                writer.write_bits::<2>(syntax.reserved_before_version_number)?;
                 writer.write_bits::<5>(syntax.version_number.get())?;
                 writer.write_bool(syntax.current_next_indicator)?;
                 writer.write_bits::<8>(syntax.section_number)?;
@@ -557,6 +598,18 @@ mod tests {
 
     #[cfg(feature = "alloc")]
     #[test]
+    fn the_bits_a_metadata_section_gives_meaning_to_are_written_back_as_read() {
+        let bytes = [
+            0x06, 0x80, 0x0a, 0x01, 0xff, 0x41, 0x01, 0x01, 0xaa, 0x11, 0x10, 0x9b, 0x1f,
+        ];
+        let mut written = Vec::new();
+        Section::read(&bytes).unwrap().write(&mut written).unwrap();
+
+        assert_eq!(written, bytes);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
     fn a_section_with_the_syntax_fields_is_written_with_its_crc_32() {
         let mut written = Vec::new();
         long_private_section().write(&mut written).unwrap();
@@ -585,6 +638,16 @@ mod tests {
             1,
         ));
         let forbidden = Section::new(TableId::FORBIDDEN, &[]);
+        let mut cleared_reserved = long_private_section();
+        cleared_reserved.table_id = TableId::TS_PROGRAM_MAP;
+        cleared_reserved.private_indicator = false;
+        cleared_reserved.reserved_before_section_length = 0b00;
+        let mut cleared_syntax_reserved = long_private_section();
+        cleared_syntax_reserved.table_id = TableId::TS_PROGRAM_MAP;
+        cleared_syntax_reserved.private_indicator = false;
+        if let Some(syntax) = &mut cleared_syntax_reserved.syntax {
+            syntax.reserved_before_version_number = 0b01;
+        }
         let mut written = Vec::new();
 
         assert_eq!(
@@ -595,6 +658,8 @@ mod tests {
                 private_pat.write(&mut written),
                 reversed.write(&mut written),
                 forbidden.write(&mut written),
+                cleared_reserved.write(&mut written),
+                cleared_syntax_reserved.write(&mut written),
             ],
             [
                 Err(Error::SectionLength {
@@ -616,6 +681,12 @@ mod tests {
                     last_section_number: 1
                 }),
                 Err(Error::ForbiddenTableId),
+                Err(Error::Reserved {
+                    table_id: TableId::TS_PROGRAM_MAP
+                }),
+                Err(Error::Reserved {
+                    table_id: TableId::TS_PROGRAM_MAP
+                }),
             ]
         );
         assert_eq!(written, []);

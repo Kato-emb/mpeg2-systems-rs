@@ -12,6 +12,22 @@ use core::fmt;
 /// the table assigns one by one are associated constants; `0x40` to `0xFE`
 /// are user private, which [`is_user_private`](Self::is_user_private) tests,
 /// and `0xFF` is forbidden.
+///
+/// # Examples
+///
+/// ```
+/// use mpeg2_systems::psi::TableId;
+///
+/// // A PMT section, bounded as a PSI table
+/// let pmt = TableId::from(0x02);
+/// assert_eq!(pmt, TableId::TS_PROGRAM_MAP);
+/// assert_eq!(pmt.max_section_length(), 1021);
+///
+/// // A user private table, bounded as a private section
+/// let private = TableId::from(0x80);
+/// assert!(private.is_user_private());
+/// assert_eq!(private.max_section_length(), 4093);
+/// ```
 #[doc(alias = "table_id")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TableId(u8);
@@ -91,6 +107,23 @@ impl From<u8> for TableId {
 /// The version is incremented by 1 modulo 32 at each change. The crate reads
 /// and writes it; telling a new version from a repeated one is the
 /// demultiplexer's.
+///
+/// # Examples
+///
+/// ```
+/// use mpeg2_systems::psi::{VersionNumber, VersionNumberOutOfRange};
+///
+/// // The last version wraps to the first
+/// let last = VersionNumber::try_from(31)?;
+/// assert_eq!(last.next().get(), 0);
+///
+/// // A value of more than 5 bits is refused
+/// assert_eq!(
+///     VersionNumber::try_from(32).map_err(VersionNumberOutOfRange::value),
+///     Err(32)
+/// );
+/// # Ok::<(), VersionNumberOutOfRange>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VersionNumber(u8);
 
