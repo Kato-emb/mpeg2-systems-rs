@@ -77,7 +77,7 @@ mod tests {
 
     #[cfg(feature = "alloc")]
     #[test]
-    fn the_pmt_ffmpeg_wrote_lists_its_video_and_audio_and_the_pid_of_its_pcr() {
+    fn the_pmt_ffmpeg_wrote_lists_its_video_and_audio_without_descriptors() {
         let bytes = first_section_on(pid(0x1000));
         let section = Section::read(&bytes).unwrap();
         let pmt = TsProgramMapSection::try_from(&section).unwrap();
@@ -88,12 +88,14 @@ mod tests {
             (
                 pmt.program_number,
                 pmt.pcr_pid,
+                pmt.program_info.is_empty(),
                 pmt.elementary_streams.iter().collect::<Result<Vec<_>, _>>(),
                 written.as_slice()
             ),
             (
                 1,
                 Some(pid(0x0100)),
+                true,
                 Ok(vec![
                     ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, pid(0x0100)),
                     ElementaryStream::new(StreamType::ISO_IEC_11172_3_AUDIO, pid(0x0101)),

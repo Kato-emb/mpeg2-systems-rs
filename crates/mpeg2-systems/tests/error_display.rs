@@ -7,7 +7,7 @@ mod tests {
 
     use mpeg2_systems::psi::{cat, pat, pmt, section};
     use mpeg2_systems::ts::{adaptation_field, packet};
-    use mpeg2_systems::{field, pes};
+    use mpeg2_systems::{descriptor, field, pes};
 
     #[test]
     fn an_error_that_wraps_another_does_not_repeat_its_message() {
@@ -19,7 +19,11 @@ mod tests {
             field: "section_length",
             error: cause,
         };
-        let errors: [&dyn Error; 10] = [
+        let descriptor = descriptor::Error::Field {
+            field: "descriptor_length",
+            error: cause,
+        };
+        let errors: [&dyn Error; 13] = [
             &packet::Error::AdaptationField(adaptation_field::Error::Field {
                 field: "PCR",
                 error: cause,
@@ -48,6 +52,9 @@ mod tests {
             },
             &pmt::Error::Section(section),
             &cat::Error::Section(section),
+            &descriptor,
+            &pmt::Error::Descriptor(descriptor),
+            &cat::Error::Descriptor(descriptor),
         ];
 
         assert_eq!(
@@ -58,7 +65,7 @@ mod tests {
                     source.is_some_and(|source| error.to_string().contains(&source)),
                 )
             }),
-            [(true, false); 10]
+            [(true, false); 13]
         );
     }
 }

@@ -8,6 +8,7 @@ use core::fmt;
 use super::section::SectionSyntax;
 use super::section::{self, Section};
 use super::{TableId, VersionNumber};
+use crate::descriptor::{self, DescriptorLoop};
 #[cfg(feature = "alloc")]
 use crate::field::FieldWriter;
 use crate::field::{self, FieldReader};
@@ -68,6 +69,8 @@ pub enum Error {
         /// The bytes of descriptors given
         length: usize,
     },
+    /// A descriptor to write is refused
+    Descriptor(descriptor::Error),
     /// The section to write is refused as a section
     Section(section::Error),
 }
@@ -109,6 +112,7 @@ impl fmt::Display for Error {
                 formatter,
                 "ES_info_length {length} exceeds 1023, which its first two bits '00' allow"
             ),
+            Self::Descriptor(_) => write!(formatter, "a descriptor could not be written"),
             Self::Section(_) => write!(
                 formatter,
                 "the TS program map section could not be written as a section"
@@ -121,6 +125,7 @@ impl core::error::Error for Error {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Field { error, .. } => Some(error),
+            Self::Descriptor(error) => Some(error),
             Self::Section(error) => Some(error),
             Self::TableId { .. }
             | Self::SectionSyntaxIndicator
@@ -129,6 +134,12 @@ impl core::error::Error for Error {
             | Self::ElementaryPid { .. }
             | Self::EsInfoLength { .. } => None,
         }
+    }
+}
+
+impl From<descriptor::Error> for Error {
+    fn from(error: descriptor::Error) -> Self {
+        Self::Descriptor(error)
     }
 }
 
@@ -150,8 +161,7 @@ impl From<section::Error> for Error {
 /// defined in a single section, so `section_number` and
 /// `last_section_number` are 0 in every section written.
 ///
-/// The descriptors are kept as bytes. `PCR_PID` 0x1FFF, a program without a
-/// PCR, is `None`.
+/// `PCR_PID` 0x1FFF, a program without a PCR, is `None`.
 ///
 /// # Examples
 ///
@@ -201,8 +211,8 @@ pub struct TsProgramMapSection<'input> {
     /// PID of the Transport Packets carrying the PCR of the program, `None`
     /// for 0x1FFF
     pub pcr_pid: Option<Pid>,
-    /// The descriptors of the program, as bytes
-    pub program_info: &'input [u8],
+    /// The descriptors of the program
+    pub program_info: DescriptorLoop<'input>,
     /// The program elements and their PIDs
     pub elementary_streams: ElementaryStreamLoop<'input>,
 }
@@ -219,7 +229,7 @@ impl<'input> TsProgramMapSection<'input> {
             section_number: 0,
             last_section_number: 0,
             pcr_pid: None,
-            program_info: &[],
+            program_info: DescriptorLoop(&[]),
             elementary_streams: ElementaryStreamLoop(&[]),
         }
     }
@@ -229,7 +239,7 @@ impl<'input> TsProgramMapSection<'input> {
     pub const fn encoded_len(&self) -> usize {
         super::LONG_SECTION_OVERHEAD
             .saturating_add(4)
-            .saturating_add(self.program_info.len())
+            .saturating_add(self.program_info.0.len())
             .saturating_add(self.elementary_streams.0.len())
     }
 
@@ -251,6 +261,9 @@ impl<'input> TsProgramMapSection<'input> {
     ///   `0x0010` to `0x1FFE`.
     /// * [`Field`](Error::Field): the elementary stream loop ends inside an
     ///   entry.
+    /// * [`Descriptor`](Error::Descriptor): a descriptor loop ends inside a
+    ///   descriptor, or a descriptor is refused by
+    ///   [`RawDescriptor::write`](crate::descriptor::RawDescriptor::write).
     #[cfg(feature = "alloc")]
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
         super::check_section_length(TableId::TS_PROGRAM_MAP, self.encoded_len())?;
@@ -268,7 +281,7 @@ impl<'input> TsProgramMapSection<'input> {
 
         let mut body = Vec::with_capacity(
             PROGRAM_HEADER_LENGTH
-                .saturating_add(self.program_info.len())
+                .saturating_add(self.program_info.0.len())
                 .saturating_add(self.elementary_streams.0.len()),
         );
         let mut writer = FieldWriter::new(&mut body);
@@ -278,14 +291,15 @@ impl<'input> TsProgramMapSection<'input> {
             writer.write_bits::<3>(0b111_u8)?;
             writer.write_bits::<13>(self.pcr_pid.unwrap_or(Pid::NULL).get())?;
             writer.write_bits::<4>(0b1111_u8)?;
-            writer.write_bits::<12>(u64::try_from(self.program_info.len()).unwrap_or(u64::MAX))?;
-            writer.write_bytes(self.program_info)?;
+            writer
+                .write_bits::<12>(u64::try_from(self.program_info.0.len()).unwrap_or(u64::MAX))?;
             writer.finish()
         })()
         .map_err(|error| Error::Field {
             field: "program header",
             error,
         })?;
+        DescriptorLoop::write_entries(self.program_info, &mut body)?;
         elementary_stream::write_entries(self.elementary_streams, &mut body)?;
 
         let mut section = Section::new(TableId::TS_PROGRAM_MAP, &body);
@@ -348,7 +362,7 @@ impl<'input> TryFrom<&Section<'input>> for TsProgramMapSection<'input> {
             section_number: syntax.section_number,
             last_section_number: syntax.last_section_number,
             pcr_pid: Some(Pid(pcr_pid)).filter(|pid| *pid != Pid::NULL),
-            program_info,
+            program_info: DescriptorLoop(program_info),
             // Why not an error: the fields before end on a byte boundary.
             elementary_streams: ElementaryStreamLoop::from(
                 reader
@@ -368,6 +382,9 @@ mod tests {
     #[cfg(feature = "alloc")]
     use super::ElementaryStreamLoop;
     use super::{ElementaryStream, Error, TsProgramMapSection};
+    #[cfg(feature = "alloc")]
+    use crate::descriptor;
+    use crate::descriptor::DescriptorLoop;
     use crate::field;
     #[cfg(feature = "alloc")]
     use crate::psi::section;
@@ -397,7 +414,7 @@ mod tests {
 
     fn streams() -> [ElementaryStream<'static>; 2] {
         let mut video = ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x0100));
-        video.es_info = &ES_INFO;
+        video.es_info = DescriptorLoop::from(ES_INFO.as_slice());
         [
             video,
             ElementaryStream::new(StreamType::ISO_IEC_13818_7_AUDIO, pid(0x0101)),
@@ -436,7 +453,7 @@ mod tests {
                 100,
                 2,
                 Some(pid(0x0100)),
-                PROGRAM_INFO.as_slice(),
+                DescriptorLoop::from(PROGRAM_INFO.as_slice()),
                 [Some(Ok(video)), Some(Ok(audio)), None]
             )
         );
@@ -449,7 +466,7 @@ mod tests {
         ElementaryStreamLoop::write_from(streams(), &mut entries).unwrap();
         let mut pmt = TsProgramMapSection::new(100, VersionNumber::try_from(2).unwrap());
         pmt.pcr_pid = Some(pid(0x0100));
-        pmt.program_info = &PROGRAM_INFO;
+        pmt.program_info = DescriptorLoop::from(PROGRAM_INFO.as_slice());
         pmt.elementary_streams = ElementaryStreamLoop::from(entries.as_slice());
         let mut written = Vec::new();
         pmt.write(&mut written).unwrap();
@@ -557,7 +574,7 @@ mod tests {
         let mut null_pcr_pid = TsProgramMapSection::new(1, version);
         null_pcr_pid.pcr_pid = Some(Pid::NULL);
         let mut long_es_info = ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x0100));
-        long_es_info.es_info = &descriptors;
+        long_es_info.es_info = DescriptorLoop::from(descriptors.as_slice());
         let long_es_info = ElementaryStreamLoop::write_from([long_es_info], &mut Vec::new());
         let reserved_elementary_pid = ElementaryStreamLoop::write_from(
             [ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x000f))],
@@ -569,10 +586,12 @@ mod tests {
         let mut truncated = TsProgramMapSection::new(1, version);
         truncated.elementary_streams = ElementaryStreamLoop::from([0x02, 0xe1].as_slice());
         let mut too_long = TsProgramMapSection::new(1, version);
-        too_long.program_info = &descriptors[..1023];
+        too_long.program_info = DescriptorLoop::from(&descriptors[..1023]);
         let garbage = [0x02; 1100];
         let mut too_long_loop = TsProgramMapSection::new(1, version);
         too_long_loop.elementary_streams = ElementaryStreamLoop::from(garbage.as_slice());
+        let mut truncated_program_info = TsProgramMapSection::new(1, version);
+        truncated_program_info.program_info = DescriptorLoop::from([0x05, 0x04, 0x48].as_slice());
         let mut written = Vec::new();
 
         assert_eq!(
@@ -586,6 +605,7 @@ mod tests {
                 truncated.write(&mut written),
                 too_long.write(&mut written),
                 too_long_loop.write(&mut written),
+                truncated_program_info.write(&mut written),
             ],
             [
                 Err(Error::SectionNumber {
@@ -611,6 +631,10 @@ mod tests {
                 Err(Error::Section(section::Error::SectionLength {
                     section_length: 1113,
                     limit: 1021
+                })),
+                Err(Error::Descriptor(descriptor::Error::Length {
+                    descriptor_length: 4,
+                    available_bytes: 1
                 })),
             ]
         );

@@ -10,6 +10,7 @@
 extern crate alloc;
 
 pub mod crc;
+pub mod descriptor;
 pub mod field;
 pub mod pes;
 pub mod psi;
