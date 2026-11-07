@@ -5,3 +5,7 @@ version = 4
 [[package]]
 name = "mpeg2-systems"
 version = "0.0.0"
+
+[[package]]
+name = "xtask"
+version = "0.0.0"
