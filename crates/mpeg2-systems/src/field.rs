@@ -73,6 +73,8 @@ impl core::error::Error for Error {}
 
 /// Cursor reading the fields of a syntax element off the front of its bytes
 ///
+/// `uimsbf` and `bslbf` fields, ISO/IEC 13818-1 §2.2.6
+///
 /// Each field is an unsigned integer of 1 to 64 bits, most significant bit
 /// first (`uimsbf`, and `bslbf` read as an integer), at whatever bit the field
 /// before it ended. The width is a constant of the syntax table, so it is a
@@ -287,6 +289,8 @@ impl<'input> FieldReader<'input> {
 }
 
 /// Cursor appending the fields of a syntax element to a caller's buffer
+///
+/// `uimsbf` and `bslbf` fields, ISO/IEC 13818-1 §2.2.6
 ///
 /// The mirror of [`FieldReader`]: each field is an unsigned integer of 1 to 64
 /// bits, most significant bit first, with the width a const parameter, and a
