@@ -8,40 +8,72 @@
 
 use core::fmt;
 
-/// Failure to construct a time stamp or a clock reference
-#[non_exhaustive]
+/// Failure to make a [`Timestamp`] of a value 33 bits cannot carry
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Error {
-    /// A time stamp of 2^33 or more, which 33 bits cannot carry
-    Timestamp {
-        /// The value given
-        value: u64,
-    },
-    /// A clock reference base of 2^33 or more, which 33 bits cannot carry
-    ClockReferenceBase {
-        /// The base given
-        base: u64,
-    },
-    /// A clock reference extension of 512 or more, which 9 bits cannot carry
-    ClockReferenceExtension {
-        /// The extension given
-        extension: u16,
-    },
+pub struct TimestampOutOfRange {
+    value: u64,
 }
 
-impl fmt::Display for Error {
+impl TimestampOutOfRange {
+    /// Returns the value given, 2^33 or more
+    #[must_use]
+    pub const fn value(self) -> u64 {
+        self.value
+    }
+}
+
+impl fmt::Display for TimestampOutOfRange {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Timestamp { value } => {
-                write!(formatter, "time stamp {value} does not fit in 33 bits")
-            }
-            Self::ClockReferenceBase { base } => {
-                write!(
-                    formatter,
-                    "clock reference base {base} does not fit in 33 bits"
-                )
-            }
-            Self::ClockReferenceExtension { extension } => write!(
+        write!(
+            formatter,
+            "time stamp {} does not fit in 33 bits",
+            self.value
+        )
+    }
+}
+
+impl core::error::Error for TimestampOutOfRange {}
+
+/// Failure to make a [`ClockReference`] of a base or an extension its bits cannot carry
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ClockReferenceOutOfRange {
+    base: u64,
+    extension: u16,
+}
+
+impl ClockReferenceOutOfRange {
+    /// Returns the base given, which 33 bits may not carry
+    #[must_use]
+    pub const fn base(self) -> u64 {
+        self.base
+    }
+
+    /// Returns the extension given, which 9 bits may not carry
+    #[must_use]
+    pub const fn extension(self) -> u16 {
+        self.extension
+    }
+}
+
+impl fmt::Display for ClockReferenceOutOfRange {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { base, extension } = *self;
+        match (
+            base >= Timestamp::MODULUS,
+            extension >= ClockReference::EXTENSION_LIMIT,
+        ) {
+            (true, true) => write!(
+                formatter,
+                "clock reference base {base} does not fit in 33 bits \
+                 and extension {extension} does not fit in 9 bits"
+            ),
+            (true, false) => write!(
+                formatter,
+                "clock reference base {base} does not fit in 33 bits"
+            ),
+            // Why not a separate arm for (false, false): `new` never makes
+            // an error of two values that fit, so it shares the last arm.
+            (false, true) | (false, false) => write!(
                 formatter,
                 "clock reference extension {extension} does not fit in 9 bits"
             ),
@@ -49,7 +81,7 @@ impl fmt::Display for Error {
     }
 }
 
-impl core::error::Error for Error {}
+impl core::error::Error for ClockReferenceOutOfRange {}
 
 /// Returns the signed distance from `other` to `value` the shorter way round a
 /// circle of `modulus` ticks, the half-way point counting as behind
@@ -85,7 +117,7 @@ const fn shortest_distance(value: u64, other: u64, modulus: u64) -> i64 {
 /// # Examples
 ///
 /// ```
-/// use mpeg2_systems::time::{Error, Timestamp};
+/// use mpeg2_systems::time::{Timestamp, TimestampOutOfRange};
 ///
 /// // One tick before the counter wraps, and five ticks after it
 /// let before_wrap = Timestamp::try_from(Timestamp::MODULUS - 1)?;
@@ -93,12 +125,12 @@ const fn shortest_distance(value: u64, other: u64, modulus: u64) -> i64 {
 /// assert_eq!(after_wrap.distance_from(before_wrap), 5);
 /// assert!(after_wrap.is_after(before_wrap));
 ///
-/// // A value of more than 33 bits is refused
+/// // A value of more than 33 bits is refused, and the error carries it
 /// assert_eq!(
-///     Timestamp::try_from(Timestamp::MODULUS),
-///     Err(Error::Timestamp { value: Timestamp::MODULUS })
+///     Timestamp::try_from(Timestamp::MODULUS).map_err(TimestampOutOfRange::value),
+///     Err(Timestamp::MODULUS)
 /// );
-/// # Ok::<(), Error>(())
+/// # Ok::<(), TimestampOutOfRange>(())
 /// ```
 #[doc(alias("PTS", "DTS", "TimeStamp", "time stamp"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -132,19 +164,18 @@ impl Timestamp {
 }
 
 impl TryFrom<u64> for Timestamp {
-    type Error = Error;
+    type Error = TimestampOutOfRange;
 
     /// Takes a count of 90 kHz ticks
     ///
     /// # Errors
     ///
-    /// * [`Timestamp`](Error::Timestamp): `value` is 2^33
-    ///   or more.
+    /// [`TimestampOutOfRange`]: `value` is 2^33 or more.
     fn try_from(value: u64) -> Result<Self, Self::Error> {
         if value < Self::MODULUS {
             Ok(Self(value))
         } else {
-            Err(Error::Timestamp { value })
+            Err(TimestampOutOfRange { value })
         }
     }
 }
@@ -165,7 +196,7 @@ impl TryFrom<u64> for Timestamp {
 /// # Examples
 ///
 /// ```
-/// use mpeg2_systems::time::{ClockReference, Error};
+/// use mpeg2_systems::time::{ClockReference, ClockReferenceOutOfRange};
 ///
 /// // Two ticks of the base and 100 of the extension
 /// let pcr = ClockReference::new(2, 100)?;
@@ -176,12 +207,10 @@ impl TryFrom<u64> for Timestamp {
 /// let after_wrap = ClockReference::new(0, 5)?;
 /// assert_eq!(after_wrap.distance_from(before_wrap), 6);
 ///
-/// // An extension of more than 9 bits is refused
-/// assert_eq!(
-///     ClockReference::new(0, 512),
-///     Err(Error::ClockReferenceExtension { extension: 512 })
-/// );
-/// # Ok::<(), Error>(())
+/// // An extension of more than 9 bits is refused, and the error carries both fields
+/// let error = ClockReference::new(0, 512).unwrap_err();
+/// assert_eq!((error.base(), error.extension()), (0, 512));
+/// # Ok::<(), ClockReferenceOutOfRange>(())
 /// ```
 #[doc(alias("PCR", "OPCR", "SCR", "ESCR"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -194,19 +223,18 @@ impl ClockReference {
     /// Number of distinct clock references in 27 MHz ticks, 2^33 × 300
     pub const MODULUS: u64 = Timestamp::MODULUS * 300;
 
+    /// Number of values the 9 bits of the extension carry, 2^9
+    const EXTENSION_LIMIT: u16 = 1 << 9;
+
     /// Creates a clock reference from its base and extension fields
     ///
     /// # Errors
     ///
-    /// * [`ClockReferenceBase`](Error::ClockReferenceBase): `base` is 2^33 or more.
-    /// * [`ClockReferenceExtension`](Error::ClockReferenceExtension): `extension` is
-    ///   512 or more.
-    pub const fn new(base: u64, extension: u16) -> Result<Self, Error> {
-        if base >= Timestamp::MODULUS {
-            return Err(Error::ClockReferenceBase { base });
-        }
-        if extension >= 512 {
-            return Err(Error::ClockReferenceExtension { extension });
+    /// [`ClockReferenceOutOfRange`]: `base` is 2^33 or more, or `extension` is
+    /// 512 or more.
+    pub const fn new(base: u64, extension: u16) -> Result<Self, ClockReferenceOutOfRange> {
+        if base >= Timestamp::MODULUS || extension >= Self::EXTENSION_LIMIT {
+            return Err(ClockReferenceOutOfRange { base, extension });
         }
 
         Ok(Self { base, extension })
@@ -272,7 +300,9 @@ impl ClockReference {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClockReference, Error, Timestamp};
+    use super::{ClockReference, ClockReferenceOutOfRange, Timestamp, TimestampOutOfRange};
+    #[cfg(feature = "alloc")]
+    use alloc::string::ToString;
 
     fn timestamp(value: u64) -> Timestamp {
         Timestamp::try_from(value).unwrap()
@@ -291,7 +321,7 @@ mod tests {
             ],
             [
                 Ok(Timestamp::MODULUS - 1),
-                Err(Error::Timestamp {
+                Err(TimestampOutOfRange {
                     value: Timestamp::MODULUS
                 })
             ]
@@ -364,10 +394,36 @@ mod tests {
             ],
             [
                 Ok((Timestamp::MODULUS - 1, 511)),
-                Err(Error::ClockReferenceBase {
-                    base: Timestamp::MODULUS
+                Err(ClockReferenceOutOfRange {
+                    base: Timestamp::MODULUS,
+                    extension: 0
                 }),
-                Err(Error::ClockReferenceExtension { extension: 512 })
+                Err(ClockReferenceOutOfRange {
+                    base: 0,
+                    extension: 512
+                })
+            ]
+        );
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_out_of_range_clock_reference_names_the_field_that_does_not_fit() {
+        let messages = [
+            ClockReference::new(Timestamp::MODULUS, 0),
+            ClockReference::new(0, 512),
+            ClockReference::new(Timestamp::MODULUS, 512),
+        ]
+        .map(|result| result.map_err(|error| error.to_string()));
+
+        assert_eq!(
+            messages,
+            [
+                Err("clock reference base 8589934592 does not fit in 33 bits".to_string()),
+                Err("clock reference extension 512 does not fit in 9 bits".to_string()),
+                Err("clock reference base 8589934592 does not fit in 33 bits \
+                     and extension 512 does not fit in 9 bits"
+                    .to_string()),
             ]
         );
     }
