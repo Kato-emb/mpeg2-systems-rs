@@ -5,6 +5,7 @@
 use alloc::vec::Vec;
 use core::fmt;
 
+use super::Pid;
 use super::adaptation_field::{self, AdaptationField, MAX_ADAPTATION_FIELD_LENGTH};
 #[cfg(feature = "alloc")]
 use crate::field::FieldWriter;
@@ -111,84 +112,6 @@ impl From<adaptation_field::Error> for Error {
         Self::AdaptationField(error)
     }
 }
-
-/// Packet identifier, which names the stream a Transport Packet belongs to
-///
-/// `PID`, ISO/IEC 13818-1 §2.4.3.3, Table 2-3
-///
-/// The PIDs the specification reserves are associated constants. Which PIDs a
-/// program uses is stated in the PSI; the crate does not choose PIDs to
-/// follow.
-///
-/// # Examples
-///
-/// ```
-/// use mpeg2_systems::ts::{Pid, packet::PidOutOfRange};
-///
-/// assert_eq!(Pid::try_from(0x1fff), Ok(Pid::NULL));
-/// assert_eq!(Pid::try_from(0x2000).map_err(PidOutOfRange::value), Err(0x2000));
-/// ```
-#[doc(alias = "PID")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Pid(u16);
-
-impl Pid {
-    /// PID of the program association table
-    pub const PAT: Self = Self(0x0000);
-    /// PID of the conditional access table
-    pub const CAT: Self = Self(0x0001);
-    /// PID of the transport stream description table
-    pub const TSDT: Self = Self(0x0002);
-    /// PID of the IPMP control information table
-    pub const IPMP: Self = Self(0x0003);
-    /// PID of null packets
-    pub const NULL: Self = Self(0x1fff);
-
-    /// Returns the 13-bit value
-    #[must_use]
-    pub const fn get(self) -> u16 {
-        self.0
-    }
-}
-
-impl TryFrom<u16> for Pid {
-    type Error = PidOutOfRange;
-
-    /// Takes a 13-bit value
-    ///
-    /// # Errors
-    ///
-    /// [`PidOutOfRange`]: `value` is 0x2000 or more.
-    fn try_from(value: u16) -> Result<Self, Self::Error> {
-        if value <= Self::NULL.0 {
-            Ok(Self(value))
-        } else {
-            Err(PidOutOfRange { value })
-        }
-    }
-}
-
-/// Failure to make a [`Pid`] of a value 13 bits cannot carry
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PidOutOfRange {
-    value: u16,
-}
-
-impl PidOutOfRange {
-    /// Returns the value given, 0x2000 or more
-    #[must_use]
-    pub const fn value(self) -> u16 {
-        self.value
-    }
-}
-
-impl fmt::Display for PidOutOfRange {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "PID {:#06x} does not fit in 13 bits", self.value)
-    }
-}
-
-impl core::error::Error for PidOutOfRange {}
 
 /// Count of the packets of one PID that carry a payload, modulo 16
 ///
@@ -477,43 +400,38 @@ impl<'input> TransportPacket<'input> {
         }
 
         let mut reader = FieldReader::new(bytes);
-        let field = |name: &'static str, error| Error::Field { field: name, error };
-        let sync_byte = reader
-            .read_u8::<8>()
-            .map_err(|error| field("sync_byte", error))?;
+        // Why not an error naming each field: the packet is 188 bytes long, so
+        // none of these reads can run past its end.
+        let header = (|| {
+            Ok((
+                reader.read_u8::<8>()?,
+                reader.read_bool()?,
+                reader.read_bool()?,
+                reader.read_bool()?,
+                Pid(reader.read_u16::<13>()?),
+                TransportScramblingControl(reader.read_u8::<2>()?),
+                AdaptationFieldControl(reader.read_u8::<2>()?),
+                ContinuityCounter(reader.read_u8::<4>()?),
+                reader.read_bytes(reader.remaining_bytes())?,
+            ))
+        })();
+        let (
+            sync_byte,
+            transport_error_indicator,
+            payload_unit_start_indicator,
+            transport_priority,
+            pid,
+            transport_scrambling_control,
+            adaptation_field_control,
+            continuity_counter,
+            rest,
+        ) = header.map_err(|error| Error::Field {
+            field: "transport_packet header",
+            error,
+        })?;
         if sync_byte != SYNC_BYTE {
             return Err(Error::SyncByte { sync_byte });
         }
-        let transport_error_indicator = reader
-            .read_bool()
-            .map_err(|error| field("transport_error_indicator", error))?;
-        let payload_unit_start_indicator = reader
-            .read_bool()
-            .map_err(|error| field("payload_unit_start_indicator", error))?;
-        let transport_priority = reader
-            .read_bool()
-            .map_err(|error| field("transport_priority", error))?;
-        let pid = Pid(reader
-            .read_u16::<13>()
-            .map_err(|error| field("PID", error))?);
-        let transport_scrambling_control = TransportScramblingControl(
-            reader
-                .read_u8::<2>()
-                .map_err(|error| field("transport_scrambling_control", error))?,
-        );
-        let adaptation_field_control = AdaptationFieldControl(
-            reader
-                .read_u8::<2>()
-                .map_err(|error| field("adaptation_field_control", error))?,
-        );
-        let continuity_counter = ContinuityCounter(
-            reader
-                .read_u8::<4>()
-                .map_err(|error| field("continuity_counter", error))?,
-        );
-        let rest = reader
-            .read_bytes(reader.remaining_bytes())
-            .map_err(|error| field("data_byte", error))?;
 
         let (adaptation_field, payload) = match adaptation_field_control {
             AdaptationFieldControl::PAYLOAD_ONLY => (None, Some(rest)),
@@ -658,7 +576,7 @@ mod tests {
 
     use super::{
         AdaptationFieldControl, ContinuityCounter, ContinuityCounterOutOfRange, Error, Pid,
-        PidOutOfRange, TransportPacket, TransportScramblingControl,
+        TransportPacket, TransportScramblingControl,
     };
     use crate::time::ClockReference;
     use crate::ts::adaptation_field::AdaptationField;
@@ -736,14 +654,6 @@ mod tests {
                 adaptation_field: Some(adaptation_field),
                 payload: bytes.get(12..),
             })
-        );
-    }
-
-    #[test]
-    fn a_pid_takes_any_13_bit_value_and_refuses_a_wider_one() {
-        assert_eq!(
-            [Pid::try_from(0x1fff), Pid::try_from(0x2000)],
-            [Ok(Pid::NULL), Err(PidOutOfRange { value: 0x2000 })]
         );
     }
 

@@ -2,5 +2,6 @@
 
 pub mod adaptation_field;
 pub mod packet;
+pub mod pid;
 
-pub use packet::Pid;
+pub use pid::Pid;
