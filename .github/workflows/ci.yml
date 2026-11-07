@@ -38,10 +38,11 @@ jobs:
           ! grep -rnE '//.*\b(TODO|FIXME)\b' --include='*.rs' . \
             | grep -vE '(TODO|FIXME)\([^)]+\)|#[0-9]+|https?://'
       # The fixtures are made by FFmpeg through xtask, never by this
-      # workspace's own writer, so xtask must not depend on a library crate.
+      # workspace's own writer, so neither xtask nor a build script of it may
+      # depend on a library crate.
       - name: Keep xtask independent of the library crates
         run: |
-          ! cargo tree -p xtask -e normal --prefix none | grep -q '^mpeg2-systems'
+          ! cargo tree -p xtask -e normal,build --prefix none | grep -q '^mpeg2-systems'
 
   # Every feature combination, so a path that only a non-default set of
   # features compiles is linted as well, the alloc-free one among them.

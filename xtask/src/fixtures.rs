@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 /// What `cargo xtask fixtures --help` prints
@@ -72,7 +72,10 @@ pub(crate) fn generate() -> Result<(), String> {
         Err(error) => return Err(format!("ffmpeg could not be run: {error}")),
     }
 
-    let directory = fixtures_directory()?;
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or("xtask has no parent directory")?
+        .join("crates/mpeg2-systems/tests/fixtures");
     fs::create_dir_all(&directory).map_err(|error| format!("{}: {error}", directory.display()))?;
     let transport_stream = directory.join("188.ts");
     ffmpeg("mpegts", &transport_stream)?;
@@ -91,15 +94,6 @@ pub(crate) fn generate() -> Result<(), String> {
     let program_stream = directory.join("program.ps");
     ffmpeg("vob", &program_stream)?;
     first_pack_is_mpeg_2(&read(&program_stream)?)
-}
-
-/// Returns `crates/mpeg2-systems/tests/fixtures/` of this workspace
-fn fixtures_directory() -> Result<PathBuf, String> {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .ok_or("xtask has no parent directory")?;
-
-    Ok(workspace.join("crates/mpeg2-systems/tests/fixtures"))
 }
 
 /// Runs FFmpeg on the two sources, writing `format` to `output`
