@@ -1,0 +1,17 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+description = "Development tasks of the workspace, run as `cargo xtask <task>`"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+# No dependency on the library crates: the fixtures are made by FFmpeg, never
+# by this workspace's own writer. CI checks it.
+[dependencies]
+
+[lints]
+workspace = true

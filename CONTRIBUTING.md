@@ -60,6 +60,8 @@ from FFmpeg, TSDuck or an example in the specification, never by this
 library's own writer, and its bytes are committed. `xtask` depends on no crate
 of this workspace, and CI checks that; regeneration runs on a host that has
 the tools, not in CI.
+`cargo xtask fixtures` regenerates them; `cargo xtask fixtures --help` lists
+what each holds.
 
 ### Benchmarks
 
