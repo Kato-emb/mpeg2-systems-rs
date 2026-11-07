@@ -4,9 +4,9 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use super::{DescriptorTag, Error, RawDescriptor, fixed_body};
 #[cfg(feature = "alloc")]
-use super::{field_error, write_descriptor};
+use super::write_descriptor;
+use super::{DescriptorTag, Error, RawDescriptor, field_error, fixed_body};
 use crate::field::FieldReader;
 
 /// Bytes of the body
@@ -118,10 +118,7 @@ impl TryFrom<&RawDescriptor<'_>> for VideoWindowDescriptor {
                 reader.read_u8::<4>()?,
             ))
         })()
-        .map_err(|error| Error::Field {
-            field: "descriptor body",
-            error,
-        })
+        .map_err(field_error("descriptor body"))
     }
 }
 

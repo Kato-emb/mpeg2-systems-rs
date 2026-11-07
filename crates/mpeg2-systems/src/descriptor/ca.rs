@@ -4,9 +4,10 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use super::{DescriptorTag, Error, RawDescriptor, body_of};
 #[cfg(feature = "alloc")]
-use super::{field_error, write_descriptor};
+use super::write_descriptor;
+use super::{DescriptorTag, Error, RawDescriptor, field_error, prefix_body};
+use crate::field::FieldReader;
 use crate::ts::Pid;
 
 /// Bytes from `CA_system_ID` to `CA_PID`
@@ -123,20 +124,19 @@ impl<'input> TryFrom<&RawDescriptor<'input>> for CaDescriptor<'input> {
     /// * [`BodyLength`](Error::BodyLength): the body is shorter than
     ///   `CA_system_ID` and `CA_PID`.
     fn try_from(raw: &RawDescriptor<'input>) -> Result<Self, Self::Error> {
-        let body = body_of(raw, DescriptorTag::CA)?;
-        let ([system_high, system_low, pid_high, pid_low], private_data_byte) = body
-            .split_first_chunk::<FIXED_LENGTH>()
-            .map(|(fixed, rest)| (*fixed, rest))
-            .ok_or(Error::BodyLength {
-                descriptor_tag: DescriptorTag::CA,
-                length: body.len(),
-            })?;
-
-        Ok(Self {
-            ca_system_id: u16::from_be_bytes([system_high, system_low]),
-            ca_pid: Pid(u16::from_be_bytes([pid_high, pid_low]) & Pid::NULL.get()),
-            private_data_byte,
-        })
+        let (fixed, private_data_byte) = prefix_body::<FIXED_LENGTH>(raw, DescriptorTag::CA)?;
+        let mut reader = FieldReader::new(fixed);
+        // Why not an error per field: the fixed part is as long as the fields.
+        (|| {
+            let ca_system_id = reader.read_u16::<16>()?;
+            reader.read_bits::<3>()?;
+            Ok(Self {
+                ca_system_id,
+                ca_pid: Pid(reader.read_u16::<13>()?),
+                private_data_byte,
+            })
+        })()
+        .map_err(field_error("descriptor body"))
     }
 }
 

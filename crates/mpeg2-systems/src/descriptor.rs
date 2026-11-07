@@ -9,6 +9,10 @@
 //! implements the same `TryFrom` for its types. A tag nobody converts stays a
 //! [`RawDescriptor`] and is written back as read.
 //!
+//! A typed descriptor reads the values its specification reserves or forbids
+//! and keeps them, but its `write` refuses them, so a descriptor read is not
+//! always written back as it came.
+//!
 //! The descriptors of tags 0x02 to 0x0A have a module each: [`video_stream`],
 //! [`audio_stream`], [`hierarchy`], [`registration`],
 //! [`data_stream_alignment`], [`target_background_grid`], [`video_window`],
@@ -204,8 +208,20 @@ pub(crate) fn fixed_body<'input, const LENGTH: usize>(
     })
 }
 
-/// Returns a mapping of a failure to write `field` to an [`Error::Field`]
-#[cfg(feature = "alloc")]
+/// Returns the body of `raw` split after its first `LENGTH` bytes, refusing a
+/// descriptor of another tag than `expected` or a body shorter than `LENGTH`
+pub(crate) fn prefix_body<'input, const LENGTH: usize>(
+    raw: &RawDescriptor<'input>,
+    expected: DescriptorTag,
+) -> Result<(&'input [u8; LENGTH], &'input [u8]), Error> {
+    let body = body_of(raw, expected)?;
+    body.split_first_chunk().ok_or(Error::BodyLength {
+        descriptor_tag: expected,
+        length: body.len(),
+    })
+}
+
+/// Returns a mapping of a failure on `field` to an [`Error::Field`]
 pub(crate) const fn field_error(field: &'static str) -> impl Fn(field::Error) -> Error {
     move |error| Error::Field { field, error }
 }

@@ -3,7 +3,7 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use super::{DescriptorTag, Error, RawDescriptor, body_of};
+use super::{DescriptorTag, Error, RawDescriptor, prefix_body};
 #[cfg(feature = "alloc")]
 use super::{field_error, write_descriptor};
 
@@ -96,13 +96,8 @@ impl<'input> TryFrom<&RawDescriptor<'input>> for RegistrationDescriptor<'input> 
     /// * [`BodyLength`](Error::BodyLength): the body is shorter than
     ///   `format_identifier`.
     fn try_from(raw: &RawDescriptor<'input>) -> Result<Self, Self::Error> {
-        let body = body_of(raw, DescriptorTag::REGISTRATION)?;
-        let (format_identifier, additional_identification_info) = body
-            .split_first_chunk::<FORMAT_IDENTIFIER_LENGTH>()
-            .ok_or(Error::BodyLength {
-                descriptor_tag: DescriptorTag::REGISTRATION,
-                length: body.len(),
-            })?;
+        let (format_identifier, additional_identification_info) =
+            prefix_body::<FORMAT_IDENTIFIER_LENGTH>(raw, DescriptorTag::REGISTRATION)?;
 
         Ok(Self {
             format_identifier: u32::from_be_bytes(*format_identifier),

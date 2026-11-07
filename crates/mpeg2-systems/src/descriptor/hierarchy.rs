@@ -4,9 +4,9 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use super::{DescriptorTag, Error, RawDescriptor, fixed_body};
 #[cfg(feature = "alloc")]
-use super::{field_error, write_descriptor};
+use super::write_descriptor;
+use super::{DescriptorTag, Error, RawDescriptor, field_error, fixed_body};
 use crate::field::{FieldReader, FourBitFieldOutOfRange};
 
 /// Bytes of the body
@@ -218,7 +218,7 @@ impl HierarchyDescriptor {
             })()
             // Why not an error per field: the flags, the type and the
             // reserved bits fit their fields' widths.
-            .map_err(field_error("hierarchy_type"))?;
+            .map_err(field_error("descriptor body"))?;
             writer
                 .write_bits::<6>(self.hierarchy_layer_index)
                 .map_err(field_error("hierarchy_layer_index"))?;
@@ -276,10 +276,7 @@ impl TryFrom<&RawDescriptor<'_>> for HierarchyDescriptor {
                 hierarchy_channel: reader.read_u8::<6>()?,
             })
         })()
-        .map_err(|error| Error::Field {
-            field: "descriptor body",
-            error,
-        })
+        .map_err(field_error("descriptor body"))
     }
 }
 

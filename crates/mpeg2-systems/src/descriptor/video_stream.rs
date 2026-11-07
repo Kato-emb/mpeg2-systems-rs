@@ -4,9 +4,9 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use super::{DescriptorTag, Error, RawDescriptor, body_of};
 #[cfg(feature = "alloc")]
-use super::{field_error, write_descriptor};
+use super::write_descriptor;
+use super::{DescriptorTag, Error, RawDescriptor, body_of, field_error};
 use crate::field::{FieldReader, FourBitFieldOutOfRange, TwoBitFieldOutOfRange};
 
 /// Bytes of the body when `MPEG_1_only_flag` is `'1'`
@@ -14,6 +14,15 @@ const MPEG_1_BODY_LENGTH: usize = 1;
 
 /// Bytes of the body when `MPEG_1_only_flag` is `'0'`
 const MPEG_2_BODY_LENGTH: usize = 3;
+
+/// Returns the bytes of the body `MPEG_1_only_flag` makes
+const fn body_length(mpeg_1_only_flag: bool) -> usize {
+    if mpeg_1_only_flag {
+        MPEG_1_BODY_LENGTH
+    } else {
+        MPEG_2_BODY_LENGTH
+    }
+}
 
 /// Frame rate of a video stream
 ///
@@ -113,11 +122,15 @@ impl TryFrom<u8> for ChromaFormat {
 /// Profile and level of a video stream
 ///
 /// `profile_and_level_indication`, coded as in Rec. ITU-T H.262 | ISO/IEC
-/// 13818-2 §8, Tables 8-1 to 8-3
+/// 13818-2 §8
 ///
 /// The first bit is the escape bit, then 3 bits of profile and 4 of level.
-/// With the escape bit `'0'`, profile `'000'` and level `'0000'` are
-/// reserved; with it `'1'`, the 7 bits name a profile and level of their own.
+/// With the escape bit `'0'`, the profiles `'001'` (High) to `'101'`
+/// (Simple) and the levels `'0100'` (High), `'0110'` (High 1440), `'1000'`
+/// (Main) and `'1010'` (Low) are assigned; with it `'1'`, 0x82 and 0x85 (4:2:2 profile at High and Main Level) and 0x8A,
+/// 0x8B, 0x8D and 0x8E (Multi-view profile at High, High 1440, Main and Low
+/// Level). Every other value is reserved, which
+/// [`is_reserved`](Self::is_reserved) tests.
 ///
 /// # Examples
 ///
@@ -159,6 +172,17 @@ impl ProfileAndLevelIndication {
     #[must_use]
     pub const fn level(self) -> u8 {
         self.0 & 0x0f
+    }
+
+    /// Returns whether Rec. ITU-T H.262 | ISO/IEC 13818-2 reserves the value
+    #[must_use]
+    pub const fn is_reserved(self) -> bool {
+        if self.escape_bit() {
+            !matches!(self.0, 0x82 | 0x85 | 0x8a | 0x8b | 0x8d | 0x8e)
+        } else {
+            !matches!(self.profile(), 0b001..=0b101)
+                || !matches!(self.level(), 0b0100 | 0b0110 | 0b1000 | 0b1010)
+        }
     }
 }
 
@@ -282,13 +306,7 @@ impl VideoStreamDescriptor {
         reason = "every syntax element writes from a reference"
     )]
     pub const fn encoded_len(&self) -> usize {
-        let body_length = if self.mpeg_2.is_some() {
-            MPEG_2_BODY_LENGTH
-        } else {
-            MPEG_1_BODY_LENGTH
-        };
-
-        super::HEADER_LENGTH.saturating_add(body_length)
+        super::HEADER_LENGTH.saturating_add(body_length(self.mpeg_1_only_flag()))
     }
 
     /// Appends the descriptor to `out`, its `reserved` bits all `'1'`
@@ -298,8 +316,8 @@ impl VideoStreamDescriptor {
     /// # Errors
     ///
     /// [`Forbidden`](Error::Forbidden): `frame_rate_code` is 0, forbidden,
-    /// or 9 to 15, reserved; `profile_and_level_indication` has the escape
-    /// bit `'0'` with profile `'000'` or level `'0000'`, reserved;
+    /// or 9 to 15, reserved; `profile_and_level_indication` is reserved
+    /// ([`ProfileAndLevelIndication::is_reserved`]);
     /// `chroma_format` is `'00'`, reserved; or
     /// [`mpeg_2`](Self::mpeg_2) is present without
     /// `constrained_parameter_flag`, which §2.6.3 requires then.
@@ -318,7 +336,7 @@ impl VideoStreamDescriptor {
         }
         if let Some(mpeg_2) = self.mpeg_2 {
             let indication = mpeg_2.profile_and_level_indication;
-            if !indication.escape_bit() && (indication.profile() == 0 || indication.level() == 0) {
+            if indication.is_reserved() {
                 return Err(Error::Forbidden {
                     field: "profile_and_level_indication",
                     value: u32::from(indication.get()),
@@ -338,7 +356,7 @@ impl VideoStreamDescriptor {
             }
         }
 
-        let body_length = self.encoded_len().saturating_sub(super::HEADER_LENGTH);
+        let body_length = body_length(self.mpeg_1_only_flag());
         write_descriptor(out, DescriptorTag::VIDEO_STREAM, body_length, |writer| {
             (|| {
                 writer.write_bool(self.multiple_frame_rate_flag)?;
@@ -372,55 +390,43 @@ impl TryFrom<&RawDescriptor<'_>> for VideoStreamDescriptor {
     ///   `MPEG_1_only_flag` `'1'`, nor 3 bytes with it `'0'`.
     fn try_from(raw: &RawDescriptor<'_>) -> Result<Self, Self::Error> {
         let body = body_of(raw, DescriptorTag::VIDEO_STREAM)?;
-        let mut reader = FieldReader::new(body);
-        // Why not an error per field: the length is checked against
-        // MPEG_1_only_flag before the fields after it are read.
-        let fields = (|| {
-            let multiple_frame_rate_flag = reader.read_bool()?;
-            let frame_rate_code = FrameRateCode(reader.read_u8::<4>()?);
-            let mpeg_1_only_flag = reader.read_bool()?;
-            let mut descriptor = Self::new(frame_rate_code);
-            descriptor.multiple_frame_rate_flag = multiple_frame_rate_flag;
-            descriptor.constrained_parameter_flag = reader.read_bool()?;
-            descriptor.still_picture_flag = reader.read_bool()?;
-            Ok::<_, crate::field::Error>((descriptor, mpeg_1_only_flag))
-        })();
-        let (mut descriptor, mpeg_1_only_flag) = fields.map_err(|_| Error::BodyLength {
-            descriptor_tag: DescriptorTag::VIDEO_STREAM,
-            length: body.len(),
-        })?;
+        let mpeg_1_only_flag = body.first().is_some_and(|flags| flags & 0b100 != 0);
         // Why not take whichever length the body has: MPEG_1_only_flag fixes
         // the length, so a body of the other length contradicts the flag and
         // is corrupt rather than a form to read as it comes.
-        let expected_length = if mpeg_1_only_flag {
-            MPEG_1_BODY_LENGTH
-        } else {
-            MPEG_2_BODY_LENGTH
-        };
-        if body.len() != expected_length {
+        if body.len() != body_length(mpeg_1_only_flag) {
             return Err(Error::BodyLength {
                 descriptor_tag: DescriptorTag::VIDEO_STREAM,
                 length: body.len(),
             });
         }
-        if !mpeg_1_only_flag {
-            descriptor.mpeg_2 = Some(
-                (|| {
-                    let profile_and_level_indication =
-                        ProfileAndLevelIndication(reader.read_u8::<8>()?);
-                    let chroma_format = ChromaFormat(reader.read_u8::<2>()?);
-                    let mut mpeg_2 = Mpeg2Fields::new(profile_and_level_indication, chroma_format);
-                    mpeg_2.frame_rate_extension_flag = reader.read_bool()?;
-                    Ok(mpeg_2)
-                })()
-                .map_err(|error| Error::Field {
-                    field: "descriptor body",
-                    error,
-                })?,
-            );
-        }
 
-        Ok(descriptor)
+        let mut reader = FieldReader::new(body);
+        // Why not an error per field: the body is as long as MPEG_1_only_flag
+        // makes the fields.
+        (|| {
+            let multiple_frame_rate_flag = reader.read_bool()?;
+            let frame_rate_code = FrameRateCode(reader.read_u8::<4>()?);
+            reader.read_bool()?;
+            Ok(Self {
+                multiple_frame_rate_flag,
+                frame_rate_code,
+                constrained_parameter_flag: reader.read_bool()?,
+                still_picture_flag: reader.read_bool()?,
+                mpeg_2: if mpeg_1_only_flag {
+                    None
+                } else {
+                    Some(Mpeg2Fields {
+                        profile_and_level_indication: ProfileAndLevelIndication(
+                            reader.read_u8::<8>()?,
+                        ),
+                        chroma_format: ChromaFormat(reader.read_u8::<2>()?),
+                        frame_rate_extension_flag: reader.read_bool()?,
+                    })
+                },
+            })
+        })()
+        .map_err(field_error("descriptor body"))
     }
 }
 
@@ -500,7 +506,7 @@ mod tests {
 
     #[cfg(feature = "alloc")]
     #[test]
-    fn descriptors_the_specification_does_not_allow_are_refused_before_a_byte_is_written() {
+    fn a_descriptor_is_written_only_with_values_the_specification_allows() {
         let mut forbidden_rate = mpeg_1();
         forbidden_rate.frame_rate_code = FrameRateCode::try_from(0).unwrap();
         let mut reserved_rate = mpeg_1();
@@ -531,6 +537,11 @@ mod tests {
                 reserved_indication(0x00),
                 reserved_indication(0x08),
                 reserved_indication(0x40),
+                reserved_indication(0x68),
+                reserved_indication(0x45),
+                reserved_indication(0x80),
+                reserved_indication(0x8f),
+                reserved_indication(0x85),
             ]
             .map(|descriptor| descriptor.write(&mut written)),
             [
@@ -562,8 +573,25 @@ mod tests {
                     field: "profile_and_level_indication",
                     value: 0x40
                 }),
+                Err(Error::Forbidden {
+                    field: "profile_and_level_indication",
+                    value: 0x68
+                }),
+                Err(Error::Forbidden {
+                    field: "profile_and_level_indication",
+                    value: 0x45
+                }),
+                Err(Error::Forbidden {
+                    field: "profile_and_level_indication",
+                    value: 0x80
+                }),
+                Err(Error::Forbidden {
+                    field: "profile_and_level_indication",
+                    value: 0x8f
+                }),
+                Ok(()),
             ]
         );
-        assert_eq!(written, []);
+        assert_eq!(written, [0x02, 0x03, 0x22, 0x85, 0x5f]);
     }
 }

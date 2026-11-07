@@ -4,9 +4,9 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use super::{DescriptorTag, Error, RawDescriptor, fixed_body};
 #[cfg(feature = "alloc")]
-use super::{field_error, write_descriptor};
+use super::write_descriptor;
+use super::{DescriptorTag, Error, RawDescriptor, field_error, fixed_body};
 use crate::field::{FieldReader, TwoBitFieldOutOfRange};
 
 /// Bytes of the body
@@ -170,10 +170,7 @@ impl TryFrom<&RawDescriptor<'_>> for AudioStreamDescriptor {
                 variable_rate_audio_indicator: reader.read_bool()?,
             })
         })()
-        .map_err(|error| Error::Field {
-            field: "descriptor body",
-            error,
-        })
+        .map_err(field_error("descriptor body"))
     }
 }
 
