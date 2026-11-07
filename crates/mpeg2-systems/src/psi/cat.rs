@@ -43,7 +43,10 @@ impl fmt::Display for Error {
                 formatter,
                 "a CA section must have section_syntax_indicator '1'"
             ),
-            Self::Section(error) => write!(formatter, "{error}"),
+            Self::Section(_) => write!(
+                formatter,
+                "the CA section could not be written as a section"
+            ),
         }
     }
 }

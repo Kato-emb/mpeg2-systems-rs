@@ -131,7 +131,9 @@ impl fmt::Display for Error {
                 formatter,
                 "PTS_DTS_flags '01' is forbidden: a DTS needs a PTS"
             ),
-            Self::Field { field, error } => write!(formatter, "{field}: {error}"),
+            Self::Field { field, .. } => {
+                write!(formatter, "field {field} could not be read or written")
+            }
             Self::EscrExtension { extension } => {
                 write!(formatter, "ESCR_extension {extension} is not below 300")
             }

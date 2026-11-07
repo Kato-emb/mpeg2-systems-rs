@@ -58,7 +58,9 @@ impl fmt::Display for Error {
                 "adaptation_field_length {adaptation_field_length} does not match \
                  the {available_bytes} bytes given"
             ),
-            Self::Field { field, error } => write!(formatter, "{field}: {error}"),
+            Self::Field { field, .. } => {
+                write!(formatter, "field {field} could not be read or written")
+            }
             Self::ClockReferenceExtension { field, extension } => {
                 write!(formatter, "{field} {extension} is not below 300")
             }
@@ -74,7 +76,16 @@ impl fmt::Display for Error {
     }
 }
 
-impl core::error::Error for Error {}
+impl core::error::Error for Error {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Field { error, .. } => Some(error),
+            Self::Length { .. } | Self::ClockReferenceExtension { .. } | Self::TooLong { .. } => {
+                None
+            }
+        }
+    }
+}
 
 /// Longest `adaptation_field_length` a Transport Packet can hold
 pub(crate) const MAX_ADAPTATION_FIELD_LENGTH: usize = 183;
