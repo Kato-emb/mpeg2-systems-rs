@@ -71,6 +71,31 @@ impl fmt::Display for Error {
 
 impl core::error::Error for Error {}
 
+/// Failure to make the value of a 2-bit field of a value 2 bits cannot carry
+///
+/// The value types of 2-bit fields, such as `transport_scrambling_control`
+/// and `PES_scrambling_control`, share it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TwoBitFieldOutOfRange {
+    pub(crate) value: u8,
+}
+
+impl TwoBitFieldOutOfRange {
+    /// Returns the value given, 4 or more
+    #[must_use]
+    pub const fn value(self) -> u8 {
+        self.value
+    }
+}
+
+impl fmt::Display for TwoBitFieldOutOfRange {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "value {} does not fit in 2 bits", self.value)
+    }
+}
+
+impl core::error::Error for TwoBitFieldOutOfRange {}
+
 /// Cursor reading the fields of a syntax element off the front of its bytes
 ///
 /// `uimsbf` and `bslbf` fields, ISO/IEC 13818-1 §2.2.6
