@@ -1,6 +1,38 @@
 //! Program specific information: the sections that tables are carried in
+//!
+//! A [`Section`](section::Section) is read from bytes, its `CRC_32` checked.
+//! A table the crate defines, [`pat`], [`pmt`] or [`cat`], is converted from
+//! a section with `TryFrom`, and a crate that defines tables of its own, for
+//! a body that gives the user private `table_id` values a meaning, converts a
+//! section the same way.
 
+pub mod cat;
+pub mod pat;
+pub mod pmt;
 pub mod section;
+
+/// Bytes of a section with the fields `section_syntax_indicator` `'1'`
+/// announces, besides its body: 3 to `section_length`, 5 to
+/// `last_section_number` and 4 of `CRC_32`
+const LONG_SECTION_OVERHEAD: usize = 12;
+
+/// Refuses a section of `encoded_len` bytes whose `section_length` would be
+/// larger than `table_id` allows, before its loops are walked or a buffer is
+/// sized after them
+#[cfg(feature = "alloc")]
+const fn check_section_length(table_id: TableId, encoded_len: usize) -> Result<(), section::Error> {
+    // `table_id` to `section_length`
+    let section_length = encoded_len.saturating_sub(3);
+    let limit = table_id.max_section_length();
+    if section_length > limit as usize {
+        return Err(section::Error::SectionLength {
+            section_length,
+            limit,
+        });
+    }
+
+    Ok(())
+}
 
 use core::fmt;
 

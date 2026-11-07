@@ -20,7 +20,7 @@ use core::fmt;
 /// ```
 #[doc(alias = "PID")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Pid(pub(super) u16);
+pub struct Pid(pub(crate) u16);
 
 impl Pid {
     /// PID of the program association table
