@@ -12,5 +12,6 @@ extern crate alloc;
 pub mod crc;
 pub mod field;
 pub mod pes;
+pub mod psi;
 pub mod time;
 pub mod ts;
