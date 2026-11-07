@@ -1,16 +1,19 @@
 //! The program association and program map sections of a stream FFmpeg
-//! wrote, converted from their sections and written back
+//! wrote, converted from their sections and written back, and the typed
+//! descriptors of a hand-written program map section
 
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "alloc")]
     use core::num::NonZeroU16;
 
+    use mpeg2_systems::descriptor::maximum_bitrate::MaximumBitrateDescriptor;
+    use mpeg2_systems::descriptor::smoothing_buffer::SmoothingBufferDescriptor;
     #[cfg(feature = "alloc")]
     use mpeg2_systems::psi::pat::{Program, ProgramAssociationSection};
     #[cfg(feature = "alloc")]
-    use mpeg2_systems::psi::pmt::{ElementaryStream, TsProgramMapSection};
-    #[cfg(feature = "alloc")]
+    use mpeg2_systems::psi::pmt::ElementaryStream;
+    use mpeg2_systems::psi::pmt::TsProgramMapSection;
     use mpeg2_systems::psi::section::Section;
     #[cfg(feature = "alloc")]
     use mpeg2_systems::stream_type::StreamType;
@@ -47,6 +50,40 @@ mod tests {
         let [_, high, low] = *section.first_chunk::<3>().unwrap();
         let section_length = usize::from(u16::from_be_bytes([high & 0x0f, low]));
         section.get(..section_length + 3).unwrap().to_vec()
+    }
+
+    /// A PMT whose video stream carries a `maximum_bitrate_descriptor` and a
+    /// `smoothing_buffer_descriptor`, its `CRC_32` computed outside this
+    /// crate
+    const PMT_WITH_ES_INFO: [u8; 34] = [
+        0x02, 0xb0, 0x1f, 0x00, 0x01, 0xc1, 0x00, 0x00, 0xe1, 0x00, 0xf0, 0x00, 0x02, 0xe1, 0x00,
+        0xf0, 0x0d, 0x0e, 0x03, 0xc0, 0x9c, 0x40, 0x10, 0x06, 0xc0, 0x92, 0x7c, 0xc0, 0x05, 0xe0,
+        0xd7, 0x8d, 0x80, 0x52,
+    ];
+
+    #[test]
+    fn a_descriptor_of_the_es_info_of_a_pmt_converts_to_its_type() {
+        let section = Section::read(&PMT_WITH_ES_INFO).unwrap();
+        let pmt = TsProgramMapSection::try_from(&section).unwrap();
+        let stream = pmt.elementary_streams.iter().next().unwrap().unwrap();
+        let mut es_info = stream.es_info.iter();
+
+        assert_eq!(
+            (
+                es_info
+                    .next()
+                    .map(|raw| raw.and_then(|raw| MaximumBitrateDescriptor::try_from(&raw))),
+                es_info
+                    .next()
+                    .map(|raw| raw.and_then(|raw| SmoothingBufferDescriptor::try_from(&raw))),
+                es_info.next()
+            ),
+            (
+                Some(Ok(MaximumBitrateDescriptor::new(40000))),
+                Some(Ok(SmoothingBufferDescriptor::new(37500, 1504))),
+                None
+            )
+        );
     }
 
     #[cfg(feature = "alloc")]
