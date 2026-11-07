@@ -5,11 +5,10 @@
 use alloc::vec::Vec;
 
 use super::{Error, field_error};
-use crate::field::FieldReader;
 #[cfg(feature = "alloc")]
 use crate::field::FieldWriter;
+use crate::field::{FieldReader, TwoBitFieldOutOfRange};
 use crate::time::{ClockReference, Timestamp};
-use crate::ts::packet::TwoBitFieldOutOfRange;
 
 use super::dsm_trick_mode::DsmTrickMode;
 use super::extension::PesExtension;
@@ -57,7 +56,11 @@ impl TryFrom<u8> for PesScramblingControl {
     ///
     /// [`TwoBitFieldOutOfRange`]: `value` is 4 or more.
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        crate::ts::packet::TransportScramblingControl::try_from(value).map(|_| Self(value))
+        if value < 4 {
+            Ok(Self(value))
+        } else {
+            Err(TwoBitFieldOutOfRange { value })
+        }
     }
 }
 

@@ -9,7 +9,7 @@ use super::adaptation_field::{self, AdaptationField, MAX_ADAPTATION_FIELD_LENGTH
 use super::{ContinuityCounter, Pid};
 #[cfg(feature = "alloc")]
 use crate::field::FieldWriter;
-use crate::field::{self, FieldReader};
+use crate::field::{self, FieldReader, TwoBitFieldOutOfRange};
 
 /// Bytes in a Transport Packet
 const PACKET_LENGTH: usize = 188;
@@ -112,28 +112,6 @@ impl From<adaptation_field::Error> for Error {
         Self::AdaptationField(error)
     }
 }
-
-/// Failure to make a 2-bit field of a value 2 bits cannot carry
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TwoBitFieldOutOfRange {
-    value: u8,
-}
-
-impl TwoBitFieldOutOfRange {
-    /// Returns the value given, 4 or more
-    #[must_use]
-    pub const fn value(self) -> u8 {
-        self.value
-    }
-}
-
-impl fmt::Display for TwoBitFieldOutOfRange {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "value {} does not fit in 2 bits", self.value)
-    }
-}
-
-impl core::error::Error for TwoBitFieldOutOfRange {}
 
 /// How the payload of a Transport Packet is scrambled
 ///
