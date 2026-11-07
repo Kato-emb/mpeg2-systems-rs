@@ -1,0 +1,34 @@
+//! Transport Packets of a stream FFmpeg wrote, read and written back
+
+#[cfg(test)]
+mod tests {
+    #[cfg(feature = "alloc")]
+    use mpeg2_systems::ts::packet::TransportPacket;
+
+    /// A Transport Stream of MPEG-2 video and MPEG-1 Layer II audio, written by
+    /// FFmpeg 6.1.1 from its `testsrc` and `sine` sources
+    #[cfg(feature = "alloc")]
+    const STREAM: &[u8] = include_bytes!("fixtures/188.ts");
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn every_packet_of_a_stream_ffmpeg_wrote_is_written_back_byte_for_byte() {
+        let mut written = Vec::new();
+        let mut packets_with_a_pcr = 0_usize;
+        let (packets, rest) = STREAM.as_chunks::<188>();
+        for bytes in packets {
+            let packet = TransportPacket::read(bytes).unwrap();
+            if packet
+                .adaptation_field
+                .as_ref()
+                .is_some_and(|adaptation_field| adaptation_field.program_clock_reference.is_some())
+            {
+                packets_with_a_pcr = packets_with_a_pcr.saturating_add(1);
+            }
+            packet.write(&mut written).unwrap();
+        }
+
+        assert_eq!((written.as_slice(), rest.len()), (STREAM, 0));
+        assert_ne!(packets_with_a_pcr, 0);
+    }
+}
