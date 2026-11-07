@@ -1,6 +1,8 @@
 //! DSM trick mode: the trick mode of a video stream, in the optional PES
 //! header
 
+use core::fmt;
+
 /// Trick mode a video stream is in, and the five bits whose meaning it sets
 ///
 /// `trick_mode_control` and the fields after it, ISO/IEC 13818-1 §2.4.3.7,
@@ -78,8 +80,8 @@ impl From<u8> for DsmTrickMode {
 ///
 /// `trick_mode_control`, ISO/IEC 13818-1 §2.4.3.7, Table 2-24
 ///
-/// Obtained from [`DsmTrickMode::trick_mode_control`]; `'101'` to `'111'`
-/// are reserved.
+/// [`DsmTrickMode::trick_mode_control`] reads it from a trick mode byte;
+/// `'101'` to `'111'` are reserved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TrickModeControl(u8);
 
@@ -104,7 +106,7 @@ impl TrickModeControl {
 
 #[cfg(test)]
 mod tests {
-    use super::{DsmTrickMode, TrickModeControl};
+    use super::{DsmTrickMode, TrickModeControl, TrickModeControlOutOfRange};
 
     /// Returns what each accessor reads from `byte`
     fn fields(
@@ -124,6 +126,20 @@ mod tests {
             mode.frequency_truncation(),
             mode.rep_cntrl(),
         )
+    }
+
+    #[test]
+    fn a_trick_mode_control_takes_any_3_bit_value_and_refuses_a_wider_one() {
+        assert_eq!(
+            [
+                TrickModeControl::try_from(0b111),
+                TrickModeControl::try_from(8)
+            ],
+            [
+                Ok(TrickModeControl(0b111)),
+                Err(TrickModeControlOutOfRange { value: 8 })
+            ]
+        );
     }
 
     #[test]
@@ -176,3 +192,46 @@ mod tests {
         );
     }
 }
+
+impl TryFrom<u8> for TrickModeControl {
+    type Error = TrickModeControlOutOfRange;
+
+    /// Takes a 3-bit value
+    ///
+    /// # Errors
+    ///
+    /// [`TrickModeControlOutOfRange`]: `value` is 8 or more.
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        if value < 8 {
+            Ok(Self(value))
+        } else {
+            Err(TrickModeControlOutOfRange { value })
+        }
+    }
+}
+
+/// Failure to make a [`TrickModeControl`] of a value 3 bits cannot carry
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TrickModeControlOutOfRange {
+    value: u8,
+}
+
+impl TrickModeControlOutOfRange {
+    /// Returns the value given, 8 or more
+    #[must_use]
+    pub const fn value(self) -> u8 {
+        self.value
+    }
+}
+
+impl fmt::Display for TrickModeControlOutOfRange {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "trick_mode_control {} does not fit in 3 bits",
+            self.value
+        )
+    }
+}
+
+impl core::error::Error for TrickModeControlOutOfRange {}

@@ -5,16 +5,21 @@
 use alloc::vec::Vec;
 
 use super::{Error, field_error};
+use crate::field::FieldReader;
 #[cfg(feature = "alloc")]
 use crate::field::FieldWriter;
-use crate::field::{FieldReader, TwoBitFieldOutOfRange};
 use crate::time::{ClockReference, Timestamp};
 
 use super::dsm_trick_mode::DsmTrickMode;
 use super::extension::PesExtension;
+use super::scrambling_control::PesScramblingControl;
 
 /// Bytes from the `'10'` bits to `PES_header_data_length`
 const FIXED_LENGTH: usize = 3;
+
+/// Most `stuffing_byte`s a PES packet header may hold
+#[cfg(feature = "alloc")]
+const MAX_STUFFING_BYTES: usize = 32;
 
 /// The 4 bits before a PTS that no DTS follows
 #[cfg(feature = "alloc")]
@@ -25,44 +30,6 @@ const PTS_PREFIX: u8 = 0b0011;
 /// The 4 bits before a DTS
 #[cfg(feature = "alloc")]
 const DTS_PREFIX: u8 = 0b0001;
-
-/// How the payload of a PES packet is scrambled
-///
-/// `PES_scrambling_control`, ISO/IEC 13818-1 §2.4.3.7, Table 2-23
-///
-/// Only `'00'` has a meaning the specification fixes; the other values are
-/// user-defined. The PES header is never scrambled. The crate does not
-/// descramble.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PesScramblingControl(u8);
-
-impl PesScramblingControl {
-    /// `'00'`, the payload is not scrambled
-    pub const NOT_SCRAMBLED: Self = Self(0b00);
-
-    /// Returns the 2-bit value
-    #[must_use]
-    pub const fn get(self) -> u8 {
-        self.0
-    }
-}
-
-impl TryFrom<u8> for PesScramblingControl {
-    type Error = TwoBitFieldOutOfRange;
-
-    /// Takes a 2-bit value
-    ///
-    /// # Errors
-    ///
-    /// [`TwoBitFieldOutOfRange`]: `value` is 4 or more.
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        if value < 4 {
-            Ok(Self(value))
-        } else {
-            Err(TwoBitFieldOutOfRange { value })
-        }
-    }
-}
 
 /// Optional PES header, the fields between `PES_packet_length` and the payload
 ///
@@ -76,6 +43,28 @@ impl TryFrom<u8> for PesScramblingControl {
 ///
 /// A PTS, a DTS or an ESCR whose `marker_bit`s are not `'1'` is read for its
 /// value, as FFmpeg reads it; the bits are written as `'1'`.
+///
+/// # Examples
+///
+/// ```
+/// use mpeg2_systems::pes::{Error, OptionalHeader};
+/// use mpeg2_systems::time::Timestamp;
+///
+/// // A header that carries a PTS of one second
+/// let mut header = OptionalHeader::new();
+/// header.pts = Some(Timestamp::try_from(90_000).unwrap());
+/// header.data_alignment_indicator = true;
+///
+/// // Written (with the `alloc` feature) and read back, it holds the same values
+/// # #[cfg(feature = "alloc")]
+/// # {
+/// let mut written = Vec::new();
+/// header.write(&mut written)?;
+/// assert_eq!(written, [0x84, 0x80, 0x05, 0x21, 0x00, 0x05, 0xbf, 0x21]);
+/// assert_eq!(OptionalHeader::read(&written)?, header);
+/// # }
+/// # Ok::<(), Error>(())
+/// ```
 #[doc(alias("PES header", "PTS", "DTS"))]
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -291,8 +280,11 @@ impl<'input> OptionalHeader<'input> {
     ///   a PTS.
     /// * [`EscrExtension`](Error::EscrExtension): an ESCR extension of 300 or
     ///   more.
-    /// * [`TooLong`](Error::TooLong): the header, `pack_header_field` or
-    ///   `pes_extension_field` is longer than its length field can state.
+    /// * [`TooLong`](Error::TooLong): more than 32 stuffing bytes, or the
+    ///   header, `pack_header_field` or `pes_extension_field` is longer than
+    ///   its length field can state.
+    /// * [`Forbidden`](Error::Forbidden): `es_rate` of 0, or a trick mode
+    ///   with `rep_cntrl` 0.
     /// * [`Field`](Error::Field): `es_rate`, `additional_copy_info` or a
     ///   field of the extension is wider than its field.
     #[cfg(feature = "alloc")]
@@ -311,6 +303,29 @@ impl<'input> OptionalHeader<'input> {
     fn write_fields(&self, out: &mut Vec<u8>) -> Result<(), Error> {
         if self.dts.is_some() && self.pts.is_none() {
             return Err(Error::ForbiddenPtsDtsFlags);
+        }
+        if self.stuffing_bytes > MAX_STUFFING_BYTES {
+            return Err(Error::TooLong {
+                field: "stuffing_byte",
+                length: self.stuffing_bytes,
+                limit: MAX_STUFFING_BYTES,
+            });
+        }
+        if self.es_rate == Some(0) {
+            return Err(Error::Forbidden {
+                field: "ES_rate",
+                value: 0,
+            });
+        }
+        if self
+            .dsm_trick_mode
+            .and_then(DsmTrickMode::rep_cntrl)
+            .is_some_and(|rep_cntrl| rep_cntrl == 0)
+        {
+            return Err(Error::Forbidden {
+                field: "rep_cntrl",
+                value: 0,
+            });
         }
         if let Some(extension) = self
             .escr
@@ -470,11 +485,12 @@ mod tests {
     #[cfg(feature = "alloc")]
     use alloc::vec::Vec;
 
-    use super::{OptionalHeader, PesScramblingControl};
+    use super::OptionalHeader;
     use crate::field;
     use crate::pes::Error;
     use crate::pes::dsm_trick_mode::DsmTrickMode;
     use crate::pes::extension::{PStdBuffer, PesExtension, ProgramPacketSequenceCounter};
+    use crate::pes::scrambling_control::PesScramblingControl;
     use crate::time::{ClockReference, Timestamp};
 
     /// An optional header with every flag set, two stuffing bytes after its
@@ -588,6 +604,14 @@ mod tests {
         dts_alone.dts = Some(timestamp(0));
         let mut wide_rate = OptionalHeader::new();
         wide_rate.es_rate = Some(1 << 22);
+        let mut zero_rate = OptionalHeader::new();
+        zero_rate.es_rate = Some(0);
+        let mut slow_motion = OptionalHeader::new();
+        slow_motion.dsm_trick_mode = Some(DsmTrickMode::from(0b0010_0000));
+        let mut slow_reverse = OptionalHeader::new();
+        slow_reverse.dsm_trick_mode = Some(DsmTrickMode::from(0b1000_0000));
+        let mut stuffed = OptionalHeader::new();
+        stuffed.stuffing_bytes = 33;
         let mut written = Vec::new();
 
         assert_eq!(
@@ -595,6 +619,10 @@ mod tests {
                 escr.write(&mut written),
                 dts_alone.write(&mut written),
                 wide_rate.write(&mut written),
+                zero_rate.write(&mut written),
+                slow_motion.write(&mut written),
+                slow_reverse.write(&mut written),
+                stuffed.write(&mut written),
             ],
             [
                 Err(Error::EscrExtension { extension: 300 }),
@@ -605,6 +633,23 @@ mod tests {
                         width: 22,
                         value: 1 << 22
                     }
+                }),
+                Err(Error::Forbidden {
+                    field: "ES_rate",
+                    value: 0
+                }),
+                Err(Error::Forbidden {
+                    field: "rep_cntrl",
+                    value: 0
+                }),
+                Err(Error::Forbidden {
+                    field: "rep_cntrl",
+                    value: 0
+                }),
+                Err(Error::TooLong {
+                    field: "stuffing_byte",
+                    length: 33,
+                    limit: 32
                 }),
             ]
         );

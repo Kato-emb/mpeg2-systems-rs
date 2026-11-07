@@ -4,6 +4,8 @@
 pub mod dsm_trick_mode;
 pub mod extension;
 pub mod optional_header;
+pub mod scrambling_control;
+pub mod stream_id;
 
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
@@ -13,6 +15,7 @@ use core::fmt;
 use crate::field::FieldWriter;
 use crate::field::{self, FieldReader};
 pub use optional_header::OptionalHeader;
+pub use stream_id::StreamId;
 
 /// `packet_start_code_prefix`, the 24 bits every PES packet starts with
 const PACKET_START_CODE_PREFIX: u32 = 0x00_0001;
@@ -80,8 +83,15 @@ pub enum Error {
         /// The `stream_id` of the packet
         stream_id: StreamId,
     },
-    /// A packet to write leaves `PES_packet_length` unspecified though it is
-    /// not of a video elementary stream
+    /// A value to write is one the specification forbids for its field
+    Forbidden {
+        /// The name of the field in the syntax table
+        field: &'static str,
+        /// The value given
+        value: u32,
+    },
+    /// A packet to write would have `PES_packet_length` 0, leaving its
+    /// length unspecified, though it is not of a video elementary stream
     LengthUnspecified {
         /// The `stream_id` of the packet
         stream_id: StreamId,
@@ -138,6 +148,9 @@ impl fmt::Display for Error {
                 "stream_id {:#04x} and the presence of an optional PES header disagree",
                 stream_id.get()
             ),
+            Self::Forbidden { field, value } => {
+                write!(formatter, "{field} {value} is forbidden")
+            }
             Self::LengthUnspecified { stream_id } => write!(
                 formatter,
                 "PES_packet_length 0 is for video only, not stream_id {:#04x}",
@@ -159,6 +172,7 @@ impl core::error::Error for Error {
             | Self::EscrExtension { .. }
             | Self::TooLong { .. }
             | Self::OptionalHeaderPresence { .. }
+            | Self::Forbidden { .. }
             | Self::LengthUnspecified { .. } => None,
         }
     }
@@ -167,84 +181,6 @@ impl core::error::Error for Error {
 /// Names the field a [`field::Error`] arose in
 pub(crate) const fn field_error(field: &'static str, error: field::Error) -> Error {
     Error::Field { field, error }
-}
-
-/// Kind and number of the elementary stream a PES packet carries
-///
-/// `stream_id`, ISO/IEC 13818-1 §2.4.3.7, Table 2-22
-///
-/// Every value has a meaning in Table 2-22, so any `u8` converts. The streams
-/// the table names by a single value are associated constants; audio and
-/// video take a range each, which [`is_audio`](Self::is_audio) and
-/// [`is_video`](Self::is_video) test.
-#[doc(alias = "stream_id")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StreamId(u8);
-
-impl StreamId {
-    /// `program_stream_map`
-    pub const PROGRAM_STREAM_MAP: Self = Self(0xbc);
-    /// `private_stream_1`
-    pub const PRIVATE_STREAM_1: Self = Self(0xbd);
-    /// `padding_stream`, whose packets carry `padding_byte`s
-    pub const PADDING_STREAM: Self = Self(0xbe);
-    /// `private_stream_2`
-    pub const PRIVATE_STREAM_2: Self = Self(0xbf);
-    /// `ECM_stream`
-    pub const ECM_STREAM: Self = Self(0xf0);
-    /// `EMM_stream`
-    pub const EMM_STREAM: Self = Self(0xf1);
-    /// `DSMCC_stream`
-    pub const DSMCC_STREAM: Self = Self(0xf2);
-    /// Rec. ITU-T H.222.1 type E stream
-    pub const H222_1_TYPE_E_STREAM: Self = Self(0xf8);
-    /// `program_stream_directory`
-    pub const PROGRAM_STREAM_DIRECTORY: Self = Self(0xff);
-
-    /// Returns the 8-bit value
-    #[must_use]
-    pub const fn get(self) -> u8 {
-        self.0
-    }
-
-    /// Returns whether the stream is an audio stream, `'110x xxxx'`
-    #[must_use]
-    pub const fn is_audio(self) -> bool {
-        self.0 & 0xe0 == 0xc0
-    }
-
-    /// Returns whether the stream is a video stream, `'1110 xxxx'`
-    #[must_use]
-    pub const fn is_video(self) -> bool {
-        self.0 & 0xf0 == 0xe0
-    }
-
-    /// Returns whether packets of the stream carry the optional PES header
-    ///
-    /// All do except those of `program_stream_map`, `padding_stream`,
-    /// `private_stream_2`, `ECM_stream`, `EMM_stream`,
-    /// `program_stream_directory`, `DSMCC_stream` and the H.222.1 type E
-    /// stream, whose bytes follow `PES_packet_length` directly.
-    #[must_use]
-    pub const fn carries_optional_header(self) -> bool {
-        !matches!(
-            self,
-            Self::PROGRAM_STREAM_MAP
-                | Self::PADDING_STREAM
-                | Self::PRIVATE_STREAM_2
-                | Self::ECM_STREAM
-                | Self::EMM_STREAM
-                | Self::PROGRAM_STREAM_DIRECTORY
-                | Self::DSMCC_STREAM
-                | Self::H222_1_TYPE_E_STREAM
-        )
-    }
-}
-
-impl From<u8> for StreamId {
-    fn from(value: u8) -> Self {
-        Self(value)
-    }
 }
 
 /// How long a PES packet is, as far as its first bytes tell
@@ -388,7 +324,7 @@ impl<'input> PesPacket<'input> {
         let prefix = (|| {
             Ok((
                 reader.read_u32::<24>()?,
-                StreamId(reader.read_u8::<8>()?),
+                StreamId::from(reader.read_u8::<8>()?),
                 reader.read_u16::<16>()?,
             ))
         })();
@@ -443,8 +379,9 @@ impl<'input> PesPacket<'input> {
     /// * [`OptionalHeaderPresence`](Error::OptionalHeaderPresence): the
     ///   optional header is present or absent against
     ///   [`StreamId::carries_optional_header`].
-    /// * [`LengthUnspecified`](Error::LengthUnspecified): the length is left
-    ///   unspecified for a stream that is not video.
+    /// * [`LengthUnspecified`](Error::LengthUnspecified): `PES_packet_length`
+    ///   would be 0, left unspecified or with nothing after it, for a stream
+    ///   that is not video.
     /// * [`TooLong`](Error::TooLong): the packet after `PES_packet_length` is
     ///   longer than 65535 bytes and its length is specified.
     /// * Any error of [`OptionalHeader::write`].
@@ -456,11 +393,6 @@ impl<'input> PesPacket<'input> {
             });
         }
         let pes_packet_length = if self.length_unspecified {
-            if !self.stream_id.is_video() {
-                return Err(Error::LengthUnspecified {
-                    stream_id: self.stream_id,
-                });
-            }
             0
         } else {
             let length = self.body_length();
@@ -470,6 +402,14 @@ impl<'input> PesPacket<'input> {
                 limit: usize::from(u16::MAX),
             })?
         };
+        // Why not only when `length_unspecified` is set: an empty packet with
+        // no optional header comes to a length of 0 too, which reads back as
+        // unspecified.
+        if pes_packet_length == 0 && !self.stream_id.is_video() {
+            return Err(Error::LengthUnspecified {
+                stream_id: self.stream_id,
+            });
+        }
 
         let start = out.len();
         let mut writer = FieldWriter::new(out);
@@ -559,6 +499,20 @@ mod tests {
                 available_bytes: 1
             })
         );
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_empty_packet_of_a_stream_other_than_video_is_refused_its_length_of_zero() {
+        let mut written = Vec::new();
+
+        assert_eq!(
+            PesPacket::new(StreamId::PADDING_STREAM, &[]).write(&mut written),
+            Err(Error::LengthUnspecified {
+                stream_id: StreamId::PADDING_STREAM
+            })
+        );
+        assert_eq!(written, []);
     }
 
     #[cfg(feature = "alloc")]
