@@ -9,6 +9,11 @@
 //! implements the same `TryFrom` for its types. A tag nobody converts stays a
 //! [`RawDescriptor`] and is written back as read.
 //!
+//! The descriptors of tags 0x02 to 0x0A have a module each: [`video_stream`],
+//! [`audio_stream`], [`hierarchy`], [`registration`],
+//! [`data_stream_alignment`], [`target_background_grid`], [`video_window`],
+//! [`ca`] and [`iso_639_language`].
+//!
 //! # Examples
 //!
 //! ```
@@ -48,9 +53,20 @@
 use alloc::vec::Vec;
 use core::fmt;
 
+#[cfg(feature = "alloc")]
+use crate::field::FieldWriter;
 use crate::field::{self, FieldReader};
 
+pub mod audio_stream;
+pub mod ca;
+pub mod data_stream_alignment;
+pub mod hierarchy;
+pub mod iso_639_language;
+pub mod registration;
 pub mod tag;
+pub mod target_background_grid;
+pub mod video_stream;
+pub mod video_window;
 
 pub use tag::DescriptorTag;
 
@@ -83,6 +99,28 @@ pub enum Error {
     },
     /// The `descriptor_tag` to write is 0x01, which Table 2-45 forbids
     ForbiddenTag,
+    /// The descriptor converted is of another tag than the type takes
+    DescriptorTag {
+        /// The tag the type takes
+        expected: DescriptorTag,
+        /// The tag of the descriptor
+        found: DescriptorTag,
+    },
+    /// The body of the descriptor converted is not as long as the syntax of
+    /// its tag
+    BodyLength {
+        /// The tag of the descriptor
+        descriptor_tag: DescriptorTag,
+        /// The bytes of body found
+        length: usize,
+    },
+    /// A field to write has a value its semantics forbid or reserve
+    Forbidden {
+        /// The name of the field in the syntax table
+        field: &'static str,
+        /// The value given
+        value: u32,
+    },
 }
 
 impl fmt::Display for Error {
@@ -104,6 +142,21 @@ impl fmt::Display for Error {
                 "descriptor body of {length} bytes exceeds the 255 descriptor_length counts"
             ),
             Self::ForbiddenTag => write!(formatter, "descriptor_tag 0x01 is forbidden"),
+            Self::DescriptorTag { expected, found } => write!(
+                formatter,
+                "descriptor_tag {:#04x} is not {:#04x}, the tag of the descriptor type",
+                found.get(),
+                expected.get()
+            ),
+            Self::BodyLength {
+                descriptor_tag,
+                length,
+            } => write!(
+                formatter,
+                "a body of {length} bytes does not fit the syntax of descriptor_tag {:#04x}",
+                descriptor_tag.get()
+            ),
+            Self::Forbidden { field, value } => write!(formatter, "{field} {value} is forbidden"),
         }
     }
 }
@@ -112,9 +165,75 @@ impl core::error::Error for Error {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Field { error, .. } => Some(error),
-            Self::Length { .. } | Self::DescriptorLength { .. } | Self::ForbiddenTag => None,
+            Self::Length { .. }
+            | Self::DescriptorLength { .. }
+            | Self::ForbiddenTag
+            | Self::DescriptorTag { .. }
+            | Self::BodyLength { .. }
+            | Self::Forbidden { .. } => None,
         }
     }
+}
+
+/// Returns the body of `raw`, refusing a descriptor of another tag than
+/// `expected`
+pub(crate) const fn body_of<'input>(
+    raw: &RawDescriptor<'input>,
+    expected: DescriptorTag,
+) -> Result<&'input [u8], Error> {
+    if raw.descriptor_tag.get() != expected.get() {
+        return Err(Error::DescriptorTag {
+            expected,
+            found: raw.descriptor_tag,
+        });
+    }
+
+    Ok(raw.body)
+}
+
+/// Returns the body of `raw`, refusing a descriptor of another tag than
+/// `expected` or a body of other than `LENGTH` bytes
+pub(crate) fn fixed_body<'input, const LENGTH: usize>(
+    raw: &RawDescriptor<'input>,
+    expected: DescriptorTag,
+) -> Result<&'input [u8; LENGTH], Error> {
+    let body = body_of(raw, expected)?;
+    body.try_into().map_err(|_| Error::BodyLength {
+        descriptor_tag: expected,
+        length: body.len(),
+    })
+}
+
+/// Returns a mapping of a failure to write `field` to an [`Error::Field`]
+#[cfg(feature = "alloc")]
+pub(crate) const fn field_error(field: &'static str) -> impl Fn(field::Error) -> Error {
+    move |error| Error::Field { field, error }
+}
+
+/// Appends a descriptor of `descriptor_tag` to `out`, its body of
+/// `body_length` bytes laid out by `write_body`, leaving `out` as it was if
+/// the body is too long or a field is refused
+#[cfg(feature = "alloc")]
+pub(crate) fn write_descriptor(
+    out: &mut Vec<u8>,
+    descriptor_tag: DescriptorTag,
+    body_length: usize,
+    write_body: impl FnOnce(&mut FieldWriter<'_>) -> Result<(), Error>,
+) -> Result<(), Error> {
+    let descriptor_length = u8::try_from(body_length).map_err(|_| Error::DescriptorLength {
+        length: body_length,
+    })?;
+    let start = out.len();
+    out.push(descriptor_tag.get());
+    out.push(descriptor_length);
+    let mut writer = FieldWriter::new(out);
+    let written = write_body(&mut writer)
+        .and_then(|()| writer.finish().map_err(field_error("descriptor body")));
+    if written.is_err() {
+        out.truncate(start);
+    }
+
+    written
 }
 
 /// Descriptor whose body is kept as bytes, whatever its tag
@@ -369,6 +488,9 @@ mod tests {
     use alloc::vec::Vec;
     use core::array;
 
+    use super::ca::CaDescriptor;
+    use super::registration::RegistrationDescriptor;
+    use super::video_window::VideoWindowDescriptor;
     use super::{DescriptorLoop, DescriptorTag, Error, RawDescriptor};
     use crate::field;
 
@@ -469,6 +591,40 @@ mod tests {
                     available_bytes: 1
                 }),
             ]
+        );
+    }
+
+    #[test]
+    fn a_descriptor_whose_body_does_not_fit_its_tag_is_refused_and_the_loop_goes_on() {
+        let bytes = [
+            0x08, 0x03, 0x00, 0x40, 0x00, 0x05, 0x04, 0x48, 0x44, 0x4d, 0x56,
+        ];
+        let mut descriptors = DescriptorLoop::from(bytes.as_slice()).iter();
+        let window = descriptors
+            .next()
+            .unwrap()
+            .and_then(|raw| VideoWindowDescriptor::try_from(&raw));
+        let registration = descriptors
+            .next()
+            .unwrap()
+            .and_then(|raw| RegistrationDescriptor::try_from(&raw));
+        let as_ca =
+            CaDescriptor::try_from(&RawDescriptor::new(DescriptorTag::REGISTRATION, b"HDMV"));
+
+        assert_eq!(
+            (window, registration, as_ca, descriptors.next()),
+            (
+                Err(Error::BodyLength {
+                    descriptor_tag: DescriptorTag::VIDEO_WINDOW,
+                    length: 3
+                }),
+                Ok(RegistrationDescriptor::new(0x4844_4d56)),
+                Err(Error::DescriptorTag {
+                    expected: DescriptorTag::CA,
+                    found: DescriptorTag::REGISTRATION
+                }),
+                None
+            )
         );
     }
 

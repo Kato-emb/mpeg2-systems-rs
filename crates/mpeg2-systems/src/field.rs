@@ -96,6 +96,31 @@ impl fmt::Display for TwoBitFieldOutOfRange {
 
 impl core::error::Error for TwoBitFieldOutOfRange {}
 
+/// Failure to make the value of a 4-bit field of a value 4 bits cannot carry
+///
+/// The value types of 4-bit fields, such as `frame_rate_code` and
+/// `hierarchy_type`, share it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FourBitFieldOutOfRange {
+    pub(crate) value: u8,
+}
+
+impl FourBitFieldOutOfRange {
+    /// Returns the value given, 16 or more
+    #[must_use]
+    pub const fn value(self) -> u8 {
+        self.value
+    }
+}
+
+impl fmt::Display for FourBitFieldOutOfRange {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "value {} does not fit in 4 bits", self.value)
+    }
+}
+
+impl core::error::Error for FourBitFieldOutOfRange {}
+
 /// Cursor reading the fields of a syntax element off the front of its bytes
 ///
 /// `uimsbf` and `bslbf` fields, ISO/IEC 13818-1 §2.2.6
