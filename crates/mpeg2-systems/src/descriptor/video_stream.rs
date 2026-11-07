@@ -110,13 +110,71 @@ impl TryFrom<u8> for ChromaFormat {
     }
 }
 
+/// Profile and level of a video stream
+///
+/// `profile_and_level_indication`, coded as in Rec. ITU-T H.262 | ISO/IEC
+/// 13818-2 §8, Tables 8-1 to 8-3
+///
+/// The first bit is the escape bit, then 3 bits of profile and 4 of level.
+/// With the escape bit `'0'`, profile `'000'` and level `'0000'` are
+/// reserved; with it `'1'`, the 7 bits name a profile and level of their own.
+///
+/// # Examples
+///
+/// ```
+/// use mpeg2_systems::descriptor::video_stream::ProfileAndLevelIndication;
+///
+/// // Main Profile at Main Level
+/// let main_at_main = ProfileAndLevelIndication::from(0x48);
+/// assert_eq!(
+///     (main_at_main.escape_bit(), main_at_main.profile(), main_at_main.level()),
+///     (false, 0b100, 0b1000)
+/// );
+/// ```
+#[doc(alias = "profile_and_level_indication")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProfileAndLevelIndication(u8);
+
+impl ProfileAndLevelIndication {
+    /// Returns the 8-bit value
+    #[must_use]
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+
+    /// Returns the first bit, which when set gives the other 7 bits a meaning
+    /// of their own
+    #[must_use]
+    pub const fn escape_bit(self) -> bool {
+        self.0 & 0x80 != 0
+    }
+
+    /// Returns the 3 bits of profile
+    #[must_use]
+    pub const fn profile(self) -> u8 {
+        (self.0 & 0x70).wrapping_shr(4)
+    }
+
+    /// Returns the 4 bits of level
+    #[must_use]
+    pub const fn level(self) -> u8 {
+        self.0 & 0x0f
+    }
+}
+
+impl From<u8> for ProfileAndLevelIndication {
+    fn from(value: u8) -> Self {
+        Self(value)
+    }
+}
+
 /// The fields of a [`VideoStreamDescriptor`] present when `MPEG_1_only_flag`
 /// is `'0'`
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Mpeg2Fields {
     /// A profile and level equal to or higher than those of any sequence
-    pub profile_and_level_indication: u8,
+    pub profile_and_level_indication: ProfileAndLevelIndication,
     /// A chroma format equal to or higher than that of any sequence
     pub chroma_format: ChromaFormat,
     /// Whether a sequence has a non-zero `frame_rate_extension_n` or
@@ -127,7 +185,10 @@ pub struct Mpeg2Fields {
 impl Mpeg2Fields {
     /// Creates the fields, `frame_rate_extension_flag` clear
     #[must_use]
-    pub const fn new(profile_and_level_indication: u8, chroma_format: ChromaFormat) -> Self {
+    pub const fn new(
+        profile_and_level_indication: ProfileAndLevelIndication,
+        chroma_format: ChromaFormat,
+    ) -> Self {
         Self {
             profile_and_level_indication,
             chroma_format,
@@ -150,7 +211,7 @@ impl Mpeg2Fields {
 /// ```
 /// use mpeg2_systems::descriptor::RawDescriptor;
 /// use mpeg2_systems::descriptor::video_stream::{
-///     ChromaFormat, FrameRateCode, Mpeg2Fields, VideoStreamDescriptor,
+///     ChromaFormat, FrameRateCode, Mpeg2Fields, ProfileAndLevelIndication, VideoStreamDescriptor,
 /// };
 ///
 /// // Main Profile at Main Level, 4:2:0, 29.97 frames a second
@@ -159,7 +220,10 @@ impl Mpeg2Fields {
 /// assert_eq!(descriptor.frame_rate_code, FrameRateCode::FRAME_RATE_29_97);
 /// assert_eq!(
 ///     descriptor.mpeg_2,
-///     Some(Mpeg2Fields::new(0x48, ChromaFormat::CHROMA_420))
+///     Some(Mpeg2Fields::new(
+///         ProfileAndLevelIndication::from(0x48),
+///         ChromaFormat::CHROMA_420
+///     ))
 /// );
 ///
 /// # #[cfg(feature = "alloc")]
@@ -234,7 +298,9 @@ impl VideoStreamDescriptor {
     /// # Errors
     ///
     /// [`Forbidden`](Error::Forbidden): `frame_rate_code` is 0, forbidden,
-    /// or 9 to 15, reserved; `chroma_format` is `'00'`, reserved; or
+    /// or 9 to 15, reserved; `profile_and_level_indication` has the escape
+    /// bit `'0'` with profile `'000'` or level `'0000'`, reserved;
+    /// `chroma_format` is `'00'`, reserved; or
     /// [`mpeg_2`](Self::mpeg_2) is present without
     /// `constrained_parameter_flag`, which §2.6.3 requires then.
     #[cfg(feature = "alloc")]
@@ -251,6 +317,13 @@ impl VideoStreamDescriptor {
             });
         }
         if let Some(mpeg_2) = self.mpeg_2 {
+            let indication = mpeg_2.profile_and_level_indication;
+            if !indication.escape_bit() && (indication.profile() == 0 || indication.level() == 0) {
+                return Err(Error::Forbidden {
+                    field: "profile_and_level_indication",
+                    value: u32::from(indication.get()),
+                });
+            }
             if mpeg_2.chroma_format.get() == 0 {
                 return Err(Error::Forbidden {
                     field: "chroma_format",
@@ -274,7 +347,7 @@ impl VideoStreamDescriptor {
                 writer.write_bool(self.constrained_parameter_flag)?;
                 writer.write_bool(self.still_picture_flag)?;
                 if let Some(mpeg_2) = self.mpeg_2 {
-                    writer.write_bits::<8>(mpeg_2.profile_and_level_indication)?;
+                    writer.write_bits::<8>(mpeg_2.profile_and_level_indication.get())?;
                     writer.write_bits::<2>(mpeg_2.chroma_format.get())?;
                     writer.write_bool(mpeg_2.frame_rate_extension_flag)?;
                     writer.write_bits::<5>(0b1_1111_u8)?;
@@ -333,7 +406,8 @@ impl TryFrom<&RawDescriptor<'_>> for VideoStreamDescriptor {
         if !mpeg_1_only_flag {
             descriptor.mpeg_2 = Some(
                 (|| {
-                    let profile_and_level_indication = reader.read_u8::<8>()?;
+                    let profile_and_level_indication =
+                        ProfileAndLevelIndication(reader.read_u8::<8>()?);
                     let chroma_format = ChromaFormat(reader.read_u8::<2>()?);
                     let mut mpeg_2 = Mpeg2Fields::new(profile_and_level_indication, chroma_format);
                     mpeg_2.frame_rate_extension_flag = reader.read_bool()?;
@@ -355,7 +429,9 @@ mod tests {
     #[cfg(feature = "alloc")]
     use alloc::vec::Vec;
 
-    use super::{ChromaFormat, FrameRateCode, Mpeg2Fields, VideoStreamDescriptor};
+    use super::{
+        ChromaFormat, FrameRateCode, Mpeg2Fields, ProfileAndLevelIndication, VideoStreamDescriptor,
+    };
     use crate::descriptor::{DescriptorTag, Error, RawDescriptor};
 
     /// ISO/IEC 11172-2 only, 25 frames a second or more, still pictures
@@ -374,7 +450,10 @@ mod tests {
     fn mpeg_2() -> VideoStreamDescriptor {
         let mut descriptor = VideoStreamDescriptor::new(FrameRateCode::FRAME_RATE_29_97);
         descriptor.constrained_parameter_flag = true;
-        descriptor.mpeg_2 = Some(Mpeg2Fields::new(0x48, ChromaFormat::CHROMA_420));
+        descriptor.mpeg_2 = Some(Mpeg2Fields::new(
+            ProfileAndLevelIndication::from(0x48),
+            ChromaFormat::CHROMA_420,
+        ));
         descriptor
     }
 
@@ -427,7 +506,18 @@ mod tests {
         let mut reserved_rate = mpeg_1();
         reserved_rate.frame_rate_code = FrameRateCode::try_from(9).unwrap();
         let mut reserved_chroma = mpeg_2();
-        reserved_chroma.mpeg_2 = Some(Mpeg2Fields::new(0x48, ChromaFormat::try_from(0).unwrap()));
+        reserved_chroma.mpeg_2 = Some(Mpeg2Fields::new(
+            ProfileAndLevelIndication::from(0x48),
+            ChromaFormat::try_from(0).unwrap(),
+        ));
+        let reserved_indication = |value| {
+            let mut descriptor = mpeg_2();
+            descriptor.mpeg_2 = Some(Mpeg2Fields::new(
+                ProfileAndLevelIndication::from(value),
+                ChromaFormat::CHROMA_420,
+            ));
+            descriptor
+        };
         let mut unconstrained = mpeg_2();
         unconstrained.constrained_parameter_flag = false;
         let mut written = Vec::new();
@@ -437,7 +527,10 @@ mod tests {
                 forbidden_rate,
                 reserved_rate,
                 reserved_chroma,
-                unconstrained
+                unconstrained,
+                reserved_indication(0x00),
+                reserved_indication(0x08),
+                reserved_indication(0x40),
             ]
             .map(|descriptor| descriptor.write(&mut written)),
             [
@@ -456,6 +549,18 @@ mod tests {
                 Err(Error::Forbidden {
                     field: "constrained_parameter_flag",
                     value: 0
+                }),
+                Err(Error::Forbidden {
+                    field: "profile_and_level_indication",
+                    value: 0x00
+                }),
+                Err(Error::Forbidden {
+                    field: "profile_and_level_indication",
+                    value: 0x08
+                }),
+                Err(Error::Forbidden {
+                    field: "profile_and_level_indication",
+                    value: 0x40
                 }),
             ]
         );

@@ -127,6 +127,35 @@ impl<'input> LanguageLoop<'input> {
     ///
     /// [`Forbidden`](Error::Forbidden): an `audio_type` of 0x85 to 0xFF,
     /// reserved.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "alloc")]
+    /// # {
+    /// use mpeg2_systems::descriptor::iso_639_language::{
+    ///     AudioType, Iso639LanguageDescriptor, Language, LanguageLoop,
+    /// };
+    ///
+    /// let mut languages = Vec::new();
+    /// LanguageLoop::write_from(
+    ///     [
+    ///         Language::new(*b"eng", AudioType::HEARING_IMPAIRED),
+    ///         Language::new(*b"spa", AudioType::VISUAL_IMPAIRED_COMMENTARY),
+    ///     ],
+    ///     &mut languages,
+    /// )?;
+    /// let descriptor = Iso639LanguageDescriptor::new(LanguageLoop::from(languages.as_slice()));
+    ///
+    /// let mut written = Vec::new();
+    /// descriptor.write(&mut written)?;
+    /// assert_eq!(
+    ///     written,
+    ///     [0x0a, 0x08, 0x65, 0x6e, 0x67, 0x02, 0x73, 0x70, 0x61, 0x03]
+    /// );
+    /// # }
+    /// # Ok::<(), mpeg2_systems::descriptor::Error>(())
+    /// ```
     #[cfg(feature = "alloc")]
     pub fn write_from(
         languages: impl IntoIterator<Item = Language>,

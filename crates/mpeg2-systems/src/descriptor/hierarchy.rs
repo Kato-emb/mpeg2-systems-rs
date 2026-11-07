@@ -122,7 +122,8 @@ pub struct HierarchyDescriptor {
 }
 
 impl HierarchyDescriptor {
-    /// Creates the descriptor of a layer, every flag `'1'`
+    /// Creates the descriptor of a layer, every `no_*_scalability_flag` `'1'`
+    /// and `tref_present_flag` `'0'`
     #[must_use]
     pub const fn new(
         hierarchy_type: HierarchyType,
@@ -137,7 +138,7 @@ impl HierarchyDescriptor {
             no_quality_scalability_flag: true,
             hierarchy_type,
             hierarchy_layer_index,
-            tref_present_flag: true,
+            tref_present_flag: false,
             hierarchy_embedded_layer_index,
             hierarchy_channel,
         }
@@ -156,8 +157,12 @@ impl HierarchyDescriptor {
     /// # Errors
     ///
     /// * [`Forbidden`](Error::Forbidden): `hierarchy_type` is 0 or 11 to 14,
-    ///   reserved; or it is 9, an MVC or MVCD video sub-bitstream, with a
-    ///   `no_*_scalability_flag` other than `'1'`, which §2.6.7 requires.
+    ///   reserved; it is 9, an MVC or MVCD video sub-bitstream, with a
+    ///   `no_*_scalability_flag` other than `'1'`, which §2.6.7 requires; it
+    ///   is other than 8, Combined Scalability, with two or more
+    ///   `no_*_scalability_flag`s `'0'`, scalability in more than one
+    ///   dimension, for which §2.6.7 requires 8; or `tref_present_flag` is
+    ///   `'1'`, reserved.
     /// * [`Field`](Error::Field): an index or `hierarchy_channel` wider than
     ///   6 bits.
     #[cfg(feature = "alloc")]
@@ -188,6 +193,19 @@ impl HierarchyDescriptor {
             && let Some((field, _)) = flags.iter().find(|(_, flag)| !flag)
         {
             return Err(Error::Forbidden { field, value: 0 });
+        }
+        let dimensions = flags.iter().filter(|(_, flag)| !flag).count();
+        if dimensions > 1 && self.hierarchy_type != HierarchyType::COMBINED_SCALABILITY {
+            return Err(Error::Forbidden {
+                field: "hierarchy_type",
+                value: u32::from(hierarchy_type),
+            });
+        }
+        if self.tref_present_flag {
+            return Err(Error::Forbidden {
+                field: "tref_present_flag",
+                value: 1,
+            });
         }
 
         write_descriptor(out, DescriptorTag::HIERARCHY, BODY_LENGTH, |writer| {
@@ -279,7 +297,7 @@ mod tests {
 
     /// An SNR enhancement of layer 4 as layer 5, on channel 63, every
     /// `reserved` bit `'1'`
-    const SNR: [u8; 6] = [0x04, 0x04, 0xd2, 0xc5, 0xc4, 0xff];
+    const SNR: [u8; 6] = [0x04, 0x04, 0xd2, 0xc5, 0x44, 0xff];
 
     fn snr() -> HierarchyDescriptor {
         let mut descriptor = HierarchyDescriptor::new(HierarchyType::SNR_SCALABILITY, 5, 4, 63);
@@ -289,7 +307,7 @@ mod tests {
 
     #[test]
     fn the_fields_are_read_whatever_the_reserved_bits() {
-        let reserved_0 = [0x04, 0x04, 0xd2, 0x05, 0x84, 0x3f];
+        let reserved_0 = [0x04, 0x04, 0xd2, 0x05, 0x04, 0x3f];
 
         assert_eq!(
             [SNR, reserved_0]
@@ -317,12 +335,18 @@ mod tests {
         };
         let mut mvc = snr();
         mvc.hierarchy_type = HierarchyType::MVC_VIDEO_SUB_BITSTREAM;
+        let combined = HierarchyDescriptor::try_from(
+            &RawDescriptor::read(&[0x04, 0x04, 0x03, 0xc1, 0x40, 0xc1]).unwrap(),
+        )
+        .unwrap();
+        let mut tref = snr();
+        tref.tref_present_flag = true;
         let mut wide_index = snr();
         wide_index.hierarchy_layer_index = 64;
         let mut written = Vec::new();
 
         assert_eq!(
-            [reserved(0), reserved(11), mvc, wide_index]
+            [reserved(0), reserved(11), mvc, combined, tref, wide_index]
                 .map(|descriptor| descriptor.write(&mut written)),
             [
                 Err(Error::Forbidden {
@@ -336,6 +360,14 @@ mod tests {
                 Err(Error::Forbidden {
                     field: "no_spatial_scalability_flag",
                     value: 0
+                }),
+                Err(Error::Forbidden {
+                    field: "hierarchy_type",
+                    value: 3
+                }),
+                Err(Error::Forbidden {
+                    field: "tref_present_flag",
+                    value: 1
                 }),
                 Err(Error::Field {
                     field: "hierarchy_layer_index",
