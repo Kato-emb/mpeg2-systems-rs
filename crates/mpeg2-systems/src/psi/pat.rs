@@ -4,16 +4,17 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 use core::fmt;
-use core::num::NonZeroU16;
 
 #[cfg(feature = "alloc")]
 use super::section::SectionSyntax;
 use super::section::{self, Section};
 use super::{TableId, VersionNumber};
-#[cfg(feature = "alloc")]
-use crate::field::FieldWriter;
-use crate::field::{self, FieldReader};
+use crate::field;
 use crate::ts::Pid;
+
+pub mod program;
+
+pub use program::{Program, ProgramLoop};
 
 /// Failure to convert a section into a [`ProgramAssociationSection`], to
 /// read an entry of its program loop, or to write it
@@ -99,203 +100,6 @@ impl From<section::Error> for Error {
     }
 }
 
-/// Entry of the program loop of a [`ProgramAssociationSection`]
-///
-/// `program_number` 0 announces `network_PID`, and any other
-/// `program_number` a `program_map_PID` (ISO/IEC 13818-1 §2.4.4.6).
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Program {
-    /// `program_number` 0: the PID of the network information table
-    Network {
-        /// PID of the Transport Packets carrying the network information
-        /// table
-        network_pid: Pid,
-    },
-    /// A program and the PID of its program map table
-    ProgramMap {
-        /// The program, defined by the user
-        program_number: NonZeroU16,
-        /// PID of the Transport Packets carrying the
-        /// `TS_program_map_section` of the program
-        program_map_pid: Pid,
-    },
-}
-
-impl Program {
-    /// Returns `program_number`, 0 for the network
-    #[must_use]
-    pub const fn program_number(self) -> u16 {
-        match self {
-            Self::Network { .. } => 0,
-            Self::ProgramMap { program_number, .. } => program_number.get(),
-        }
-    }
-
-    /// Returns the PID the entry names, `network_PID` or `program_map_PID`
-    #[must_use]
-    pub const fn pid(self) -> Pid {
-        match self {
-            Self::Network { network_pid } => network_pid,
-            Self::ProgramMap {
-                program_map_pid, ..
-            } => program_map_pid,
-        }
-    }
-
-    /// Returns the name of the PID field in the syntax table
-    #[cfg(feature = "alloc")]
-    const fn pid_field(self) -> &'static str {
-        match self {
-            Self::Network { .. } => "network_PID",
-            Self::ProgramMap { .. } => "program_map_PID",
-        }
-    }
-
-    /// Refuses a PID that Table 2-3 does not let a network or a program map
-    /// take
-    #[cfg(feature = "alloc")]
-    const fn check(self) -> Result<Self, Error> {
-        let pid = self.pid();
-        if matches!(pid.get(), 0x0010..=0x1ffe) {
-            Ok(self)
-        } else {
-            Err(Error::Pid {
-                field: self.pid_field(),
-                pid,
-            })
-        }
-    }
-}
-
-/// The program loop of a [`ProgramAssociationSection`], borrowed
-///
-/// The bytes are read entry by entry as [`iter`](Self::iter) walks them, so
-/// a view of any bytes can be made; an entry the bytes end inside is an
-/// error of its own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct ProgramLoop<'input>(&'input [u8]);
-
-impl<'input> ProgramLoop<'input> {
-    /// Returns the bytes of the loop
-    #[must_use]
-    pub const fn as_bytes(self) -> &'input [u8] {
-        self.0
-    }
-
-    /// Returns an iterator over the entries, each read as it is reached
-    #[must_use]
-    pub const fn iter(self) -> ProgramIter<'input> {
-        ProgramIter(self.0)
-    }
-
-    /// Appends the bytes of a loop of `programs` to `out`, its `reserved`
-    /// bits `'111'`
-    ///
-    /// A write that fails leaves `out` as it was.
-    ///
-    /// # Errors
-    ///
-    /// [`Pid`](Error::Pid): a PID outside `0x0010` to `0x1FFE`.
-    #[cfg(feature = "alloc")]
-    pub fn write_from(
-        programs: impl IntoIterator<Item = Program>,
-        out: &mut Vec<u8>,
-    ) -> Result<(), Error> {
-        let start = out.len();
-        for program in programs {
-            if let Err(error) = program.check() {
-                out.truncate(start);
-                return Err(error);
-            }
-            let mut writer = FieldWriter::new(out);
-            // Why not an error per field: every value fits its field's width.
-            let entry = (|| {
-                writer.write_bits::<16>(program.program_number())?;
-                writer.write_bits::<3>(0b111_u8)?;
-                writer.write_bits::<13>(program.pid().get())?;
-                writer.finish()
-            })();
-            if let Err(error) = entry {
-                out.truncate(start);
-                return Err(Error::Field {
-                    field: "program loop",
-                    error,
-                });
-            }
-        }
-
-        Ok(())
-    }
-}
-
-impl<'input> From<&'input [u8]> for ProgramLoop<'input> {
-    fn from(bytes: &'input [u8]) -> Self {
-        Self(bytes)
-    }
-}
-
-impl<'input> IntoIterator for ProgramLoop<'input> {
-    type Item = Result<Program, Error>;
-    type IntoIter = ProgramIter<'input>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
-}
-
-/// Iterator over the entries of a [`ProgramLoop`]
-///
-/// An entry the bytes end inside is an [`Error::Field`], and the last item.
-#[derive(Debug, Clone)]
-pub struct ProgramIter<'input>(&'input [u8]);
-
-impl Iterator for ProgramIter<'_> {
-    type Item = Result<Program, Error>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.0.is_empty() {
-            return None;
-        }
-
-        let mut reader = FieldReader::new(self.0);
-        let entry = (|| {
-            let program_number = reader.read_u16::<16>().map_err(|error| Error::Field {
-                field: "program_number",
-                error,
-            })?;
-            let pid = reader
-                .read_bits::<3>()
-                .and_then(|_| reader.read_u16::<13>())
-                .map(Pid)
-                .map_err(|error| Error::Field {
-                    field: if program_number == 0 {
-                        "network_PID"
-                    } else {
-                        "program_map_PID"
-                    },
-                    error,
-                })?;
-            Ok(NonZeroU16::new(program_number).map_or(
-                Program::Network { network_pid: pid },
-                |program_number| Program::ProgramMap {
-                    program_number,
-                    program_map_pid: pid,
-                },
-            ))
-        })();
-        // Why not an error: the entry ends on a byte boundary, or the
-        // entry failed and nothing after it is read.
-        self.0 = reader
-            .read_bytes(reader.remaining_bytes())
-            .ok()
-            .filter(|_| entry.is_ok())
-            .unwrap_or_default();
-
-        Some(entry)
-    }
-}
-
 /// Program association section, which maps each program to the PID of its
 /// program map table
 ///
@@ -377,19 +181,23 @@ impl<'input> ProgramAssociationSection<'input> {
 
     /// Appends the section to `out`, with its `CRC_32`
     ///
-    /// The program loop is written as it is held, after every entry is read
-    /// and checked. A write that fails leaves `out` as it was.
+    /// The program loop is written from the entries it reads, so its
+    /// `reserved` bits are `'111'` whatever the bytes held. A write that
+    /// fails leaves `out` as it was.
     ///
     /// # Errors
     ///
+    /// * [`Section`](Error::Section): `section_length` would be larger than
+    ///   1021, checked before the loop is walked or a buffer sized.
     /// * [`Field`](Error::Field): the program loop ends inside an entry.
     /// * [`Pid`](Error::Pid): a PID outside `0x0010` to `0x1FFE`.
     /// * [`ProgramNumber`](Error::ProgramNumber): a `program_number` that
     ///   appears more than once, which §2.4.4.6 forbids.
-    /// * [`Section`](Error::Section): `section_length` would be larger than
-    ///   1021, or `section_number` is past `last_section_number`.
+    /// * [`Section`](Error::Section): `section_number` is past
+    ///   `last_section_number`.
     #[cfg(feature = "alloc")]
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
+        super::check_section_length(TableId::PROGRAM_ASSOCIATION, self.encoded_len())?;
         let mut entries = self.programs.iter();
         while let Some(program) = entries.next() {
             let program = program?.check()?;
@@ -402,7 +210,9 @@ impl<'input> ProgramAssociationSection<'input> {
             }
         }
 
-        let mut section = Section::new(TableId::PROGRAM_ASSOCIATION, self.programs.0);
+        let mut body = Vec::with_capacity(self.programs.0.len());
+        program::write_entries(self.programs, &mut body)?;
+        let mut section = Section::new(TableId::PROGRAM_ASSOCIATION, &body);
         section.syntax = Some(SectionSyntax::new(
             self.transport_stream_id,
             self.version_number,
@@ -458,9 +268,9 @@ mod tests {
     use crate::psi::TableId;
     #[cfg(feature = "alloc")]
     use crate::psi::VersionNumber;
-    #[cfg(feature = "alloc")]
-    use crate::psi::section;
     use crate::psi::section::Section;
+    #[cfg(feature = "alloc")]
+    use crate::psi::section::{self, SectionSyntax};
     use crate::ts::Pid;
 
     /// A program association section of a network and two programs, its
@@ -573,6 +383,32 @@ mod tests {
 
     #[cfg(feature = "alloc")]
     #[test]
+    fn reserved_bits_read_as_0_are_written_as_1() {
+        let mut section = Section::new(TableId::PROGRAM_ASSOCIATION, &[0x00, 0x01, 0x10, 0x00]);
+        section.syntax = Some(SectionSyntax::new(
+            1,
+            VersionNumber::try_from(0).unwrap(),
+            true,
+            0,
+            0,
+        ));
+        let mut written = Vec::new();
+        ProgramAssociationSection::try_from(&section)
+            .unwrap()
+            .write(&mut written)
+            .unwrap();
+
+        assert_eq!(
+            written,
+            [
+                0x00, 0xb0, 0x0d, 0x00, 0x01, 0xc1, 0x00, 0x00, 0x00, 0x01, 0xf0, 0x00, 0x2a, 0xb1,
+                0x04, 0xb2,
+            ]
+        );
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
     fn sections_the_specification_does_not_allow_are_refused_before_a_byte_is_written() {
         let version = VersionNumber::try_from(0).unwrap();
         let mut reserved_pid = Vec::new();
@@ -598,6 +434,9 @@ mod tests {
         reversed.section_number = 1;
         let mut truncated = ProgramAssociationSection::new(1, version);
         truncated.programs = ProgramLoop::from([0x00, 0x01, 0xf0].as_slice());
+        let garbage = [0x00; 1013];
+        let mut too_long_loop = ProgramAssociationSection::new(1, version);
+        too_long_loop.programs = ProgramLoop::from(garbage.as_slice());
         let mut written = Vec::new();
 
         assert_eq!(
@@ -608,6 +447,7 @@ mod tests {
                 too_many.write(&mut written),
                 reversed.write(&mut written),
                 truncated.write(&mut written),
+                too_long_loop.write(&mut written),
             ],
             [
                 Err(Error::Pid {
@@ -634,6 +474,10 @@ mod tests {
                         remaining_bits: 5
                     }
                 }),
+                Err(Error::Section(section::Error::SectionLength {
+                    section_length: 1022,
+                    limit: 1021
+                })),
             ]
         );
         assert_eq!(written, []);

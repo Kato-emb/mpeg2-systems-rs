@@ -17,11 +17,6 @@ pub mod elementary_stream;
 
 pub use elementary_stream::{ElementaryStream, ElementaryStreamLoop};
 
-/// Largest `program_info_length` and `ES_info_length`, whose first two bits
-/// are `'00'`
-#[cfg(feature = "alloc")]
-const MAX_INFO_LENGTH: usize = 0x3ff;
-
 /// Bytes from `PCR_PID` to `program_info_length`
 #[cfg(feature = "alloc")]
 const PROGRAM_HEADER_LENGTH: usize = 4;
@@ -61,11 +56,15 @@ pub enum Error {
         /// The PID given
         pid: Pid,
     },
-    /// The descriptors to write are more than the 1023 bytes a length field
-    /// whose first two bits are `'00'` counts
-    InfoLength {
-        /// The name of the length field in the syntax table
-        field: &'static str,
+    /// An `elementary_PID` to write is outside `0x0010` to `0x1FFE`, the
+    /// values Table 2-3 lets a program element take
+    ElementaryPid {
+        /// The PID given
+        pid: Pid,
+    },
+    /// The descriptors of a program element to write are more than the 1023
+    /// bytes `ES_info_length`, whose first two bits are `'00'`, counts
+    EsInfoLength {
         /// The bytes of descriptors given
         length: usize,
     },
@@ -99,9 +98,14 @@ impl fmt::Display for Error {
                 "PCR_PID {:#06x} is of a PID that cannot carry a PCR",
                 pid.get()
             ),
-            Self::InfoLength { field, length } => write!(
+            Self::ElementaryPid { pid } => write!(
                 formatter,
-                "{field} {length} exceeds 1023, which its first two bits '00' allow"
+                "elementary_PID {:#06x} is outside 0x0010 to 0x1ffe",
+                pid.get()
+            ),
+            Self::EsInfoLength { length } => write!(
+                formatter,
+                "ES_info_length {length} exceeds 1023, which its first two bits '00' allow"
             ),
             Self::Section(error) => write!(formatter, "{error}"),
         }
@@ -117,7 +121,8 @@ impl core::error::Error for Error {
             | Self::SectionSyntaxIndicator
             | Self::SectionNumber { .. }
             | Self::PcrPid { .. }
-            | Self::InfoLength { .. } => None,
+            | Self::ElementaryPid { .. }
+            | Self::EsInfoLength { .. } => None,
         }
     }
 }
@@ -126,20 +131,6 @@ impl From<section::Error> for Error {
     fn from(error: section::Error) -> Self {
         Self::Section(error)
     }
-}
-
-/// Refuses descriptors longer than a length field whose first two bits are
-/// `'00'` counts
-#[cfg(feature = "alloc")]
-const fn check_info_length(field: &'static str, descriptors: &[u8]) -> Result<(), Error> {
-    if descriptors.len() > MAX_INFO_LENGTH {
-        return Err(Error::InfoLength {
-            field,
-            length: descriptors.len(),
-        });
-    }
-
-    Ok(())
 }
 
 /// TS program map section, which lists the program elements of a program
@@ -239,23 +230,25 @@ impl<'input> TsProgramMapSection<'input> {
 
     /// Appends the section to `out`, with its `CRC_32`
     ///
-    /// The elementary stream loop is written as it is held, after every
-    /// entry is read and checked. A write that fails leaves `out` as it was.
+    /// The elementary stream loop is written from the entries it reads, so
+    /// its `reserved` bits are all `'1'` whatever the bytes held. A write
+    /// that fails leaves `out` as it was.
     ///
     /// # Errors
     ///
+    /// * [`Section`](Error::Section): `section_length` would be larger than
+    ///   1021, checked before a loop is walked or a buffer sized.
     /// * [`SectionNumber`](Error::SectionNumber): `section_number` or
     ///   `last_section_number` is not 0.
     /// * [`PcrPid`](Error::PcrPid): `pcr_pid` is of a PID other than 0x0000,
     ///   0x0001 and 0x0010 to 0x1FFE, which Table 2-3 lets carry a PCR.
-    /// * [`InfoLength`](Error::InfoLength): descriptors of more than 1023
-    ///   bytes, for the program or a program element.
+    /// * [`ElementaryPid`](Error::ElementaryPid): an `elementary_PID` outside
+    ///   `0x0010` to `0x1FFE`.
     /// * [`Field`](Error::Field): the elementary stream loop ends inside an
     ///   entry.
-    /// * [`Section`](Error::Section): `section_length` would be larger than
-    ///   1021.
     #[cfg(feature = "alloc")]
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
+        super::check_section_length(TableId::TS_PROGRAM_MAP, self.encoded_len())?;
         if self.section_number != 0 || self.last_section_number != 0 {
             return Err(Error::SectionNumber {
                 section_number: self.section_number,
@@ -267,10 +260,6 @@ impl<'input> TsProgramMapSection<'input> {
         {
             return Err(Error::PcrPid { pid });
         }
-        check_info_length("program_info_length", self.program_info)?;
-        for stream in self.elementary_streams {
-            check_info_length("ES_info_length", stream?.es_info)?;
-        }
 
         let mut body = Vec::with_capacity(
             PROGRAM_HEADER_LENGTH
@@ -278,20 +267,21 @@ impl<'input> TsProgramMapSection<'input> {
                 .saturating_add(self.elementary_streams.0.len()),
         );
         let mut writer = FieldWriter::new(&mut body);
-        // Why not an error per field: every value fits its field's width.
+        // Why not an error per field: every value fits its field's width, and
+        // `program_info` is at most 1008 bytes after the check above.
         (|| {
             writer.write_bits::<3>(0b111_u8)?;
             writer.write_bits::<13>(self.pcr_pid.unwrap_or(Pid::NULL).get())?;
             writer.write_bits::<4>(0b1111_u8)?;
             writer.write_bits::<12>(u64::try_from(self.program_info.len()).unwrap_or(u64::MAX))?;
             writer.write_bytes(self.program_info)?;
-            writer.write_bytes(self.elementary_streams.0)?;
             writer.finish()
         })()
         .map_err(|error| Error::Field {
             field: "program header",
             error,
         })?;
+        elementary_stream::write_entries(self.elementary_streams, &mut body)?;
 
         let mut section = Section::new(TableId::TS_PROGRAM_MAP, &body);
         section.syntax = Some(SectionSyntax::new(
@@ -532,6 +522,25 @@ mod tests {
 
     #[cfg(feature = "alloc")]
     #[test]
+    fn reserved_bits_read_as_0_are_written_as_1() {
+        let section = section_of(&[0x01, 0x00, 0x00, 0x00, 0x02, 0x01, 0x00, 0x00, 0x00]);
+        let mut written = Vec::new();
+        TsProgramMapSection::try_from(&section)
+            .unwrap()
+            .write(&mut written)
+            .unwrap();
+
+        assert_eq!(
+            written,
+            [
+                0x02, 0xb0, 0x12, 0x00, 0x01, 0xc1, 0x00, 0x00, 0xe1, 0x00, 0xf0, 0x00, 0x02, 0xe1,
+                0x00, 0xf0, 0x00, 0x9e, 0x8b, 0x23, 0xd1,
+            ]
+        );
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
     fn sections_the_specification_does_not_allow_are_refused_before_a_byte_is_written() {
         let version = VersionNumber::try_from(0).unwrap();
         let descriptors = [0xff; 1024];
@@ -542,15 +551,23 @@ mod tests {
         reserved_pcr_pid.pcr_pid = Some(pid(0x0002));
         let mut null_pcr_pid = TsProgramMapSection::new(1, version);
         null_pcr_pid.pcr_pid = Some(Pid::NULL);
-        let mut long_program_info = TsProgramMapSection::new(1, version);
-        long_program_info.program_info = &descriptors;
         let mut long_es_info = ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x0100));
         long_es_info.es_info = &descriptors;
         let long_es_info = ElementaryStreamLoop::write_from([long_es_info], &mut Vec::new());
+        let reserved_elementary_pid = ElementaryStreamLoop::write_from(
+            [ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x000f))],
+            &mut Vec::new(),
+        );
+        let mut null_elementary_pid = TsProgramMapSection::new(1, version);
+        null_elementary_pid.elementary_streams =
+            ElementaryStreamLoop::from([0x02, 0xff, 0xff, 0xf0, 0x00].as_slice());
         let mut truncated = TsProgramMapSection::new(1, version);
         truncated.elementary_streams = ElementaryStreamLoop::from([0x02, 0xe1].as_slice());
         let mut too_long = TsProgramMapSection::new(1, version);
         too_long.program_info = &descriptors[..1023];
+        let garbage = [0x02; 1100];
+        let mut too_long_loop = TsProgramMapSection::new(1, version);
+        too_long_loop.elementary_streams = ElementaryStreamLoop::from(garbage.as_slice());
         let mut written = Vec::new();
 
         assert_eq!(
@@ -558,10 +575,12 @@ mod tests {
                 second.write(&mut written),
                 reserved_pcr_pid.write(&mut written),
                 null_pcr_pid.write(&mut written),
-                long_program_info.write(&mut written),
                 long_es_info,
+                reserved_elementary_pid,
+                null_elementary_pid.write(&mut written),
                 truncated.write(&mut written),
                 too_long.write(&mut written),
+                too_long_loop.write(&mut written),
             ],
             [
                 Err(Error::SectionNumber {
@@ -570,14 +589,9 @@ mod tests {
                 }),
                 Err(Error::PcrPid { pid: pid(0x0002) }),
                 Err(Error::PcrPid { pid: Pid::NULL }),
-                Err(Error::InfoLength {
-                    field: "program_info_length",
-                    length: 1024
-                }),
-                Err(Error::InfoLength {
-                    field: "ES_info_length",
-                    length: 1024
-                }),
+                Err(Error::EsInfoLength { length: 1024 }),
+                Err(Error::ElementaryPid { pid: pid(0x000f) }),
+                Err(Error::ElementaryPid { pid: Pid::NULL }),
                 Err(Error::Field {
                     field: "ES_info_length",
                     error: field::Error::Truncated {
@@ -587,6 +601,10 @@ mod tests {
                 }),
                 Err(Error::Section(section::Error::SectionLength {
                     section_length: 1036,
+                    limit: 1021
+                })),
+                Err(Error::Section(section::Error::SectionLength {
+                    section_length: 1113,
                     limit: 1021
                 })),
             ]
