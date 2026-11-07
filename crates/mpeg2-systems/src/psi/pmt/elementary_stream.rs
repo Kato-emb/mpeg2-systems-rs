@@ -5,6 +5,7 @@
 use alloc::vec::Vec;
 
 use super::Error;
+use crate::descriptor::DescriptorLoop;
 use crate::field::FieldReader;
 #[cfg(feature = "alloc")]
 use crate::field::FieldWriter;
@@ -25,8 +26,8 @@ pub struct ElementaryStream<'input> {
     pub stream_type: StreamType,
     /// PID of the Transport Packets carrying the program element
     pub elementary_pid: Pid,
-    /// The descriptors of the program element, as bytes
-    pub es_info: &'input [u8],
+    /// The descriptors of the program element
+    pub es_info: DescriptorLoop<'input>,
 }
 
 impl<'input> ElementaryStream<'input> {
@@ -36,7 +37,7 @@ impl<'input> ElementaryStream<'input> {
         Self {
             stream_type,
             elementary_pid,
-            es_info: &[],
+            es_info: DescriptorLoop(&[]),
         }
     }
 }
@@ -74,6 +75,9 @@ impl<'input> ElementaryStreamLoop<'input> {
     ///   `0x0010` to `0x1FFE`.
     /// * [`EsInfoLength`](Error::EsInfoLength): descriptors of more than
     ///   1023 bytes.
+    /// * [`Descriptor`](Error::Descriptor): a descriptor loop ends inside a
+    ///   descriptor, or a descriptor is refused by
+    ///   [`RawDescriptor::write`](crate::descriptor::RawDescriptor::write).
     ///
     /// # Examples
     ///
@@ -132,9 +136,10 @@ pub(super) fn write_entries<'stream>(
             if !matches!(pid.get(), 0x0010..=0x1ffe) {
                 return Err(Error::ElementaryPid { pid });
             }
-            if stream.es_info.len() > MAX_ES_INFO_LENGTH {
+            let es_info_length = stream.es_info.0.len();
+            if es_info_length > MAX_ES_INFO_LENGTH {
                 return Err(Error::EsInfoLength {
-                    length: stream.es_info.len(),
+                    length: es_info_length,
                 });
             }
             let mut writer = FieldWriter::new(out);
@@ -144,14 +149,14 @@ pub(super) fn write_entries<'stream>(
                 writer.write_bits::<3>(0b111_u8)?;
                 writer.write_bits::<13>(pid.get())?;
                 writer.write_bits::<4>(0b1111_u8)?;
-                writer.write_bits::<12>(u64::try_from(stream.es_info.len()).unwrap_or(u64::MAX))?;
-                writer.write_bytes(stream.es_info)?;
+                writer.write_bits::<12>(u64::try_from(es_info_length).unwrap_or(u64::MAX))?;
                 writer.finish()
             })()
             .map_err(|error| Error::Field {
                 field: "elementary stream loop",
                 error,
-            })
+            })?;
+            Ok(DescriptorLoop::write_entries(stream.es_info, out)?)
         });
         if let Err(error) = entry {
             out.truncate(start);
@@ -199,7 +204,7 @@ impl<'input> Iterator for ElementaryStreamIter<'input> {
             let elementary_pid = Pid(reader.read_u16::<13>()?);
             reader.read_bits::<4>()?;
             let es_info_length = reader.read_u16::<12>()?;
-            let es_info = reader.read_bytes(usize::from(es_info_length))?;
+            let es_info = DescriptorLoop(reader.read_bytes(usize::from(es_info_length))?);
             Ok(ElementaryStream {
                 stream_type,
                 elementary_pid,

@@ -9,6 +9,7 @@ use core::fmt;
 use super::section::SectionSyntax;
 use super::section::{self, Section};
 use super::{TableId, VersionNumber};
+use crate::descriptor::{self, DescriptorLoop};
 
 /// The 16 `reserved` bits a CA section has where other sections have
 /// `table_id_extension`
@@ -27,6 +28,8 @@ pub enum Error {
     /// The section lacks the fields `section_syntax_indicator` `'1'`
     /// announces
     SectionSyntaxIndicator,
+    /// A descriptor to write is refused
+    Descriptor(descriptor::Error),
     /// The section to write is refused as a section
     Section(section::Error),
 }
@@ -43,6 +46,7 @@ impl fmt::Display for Error {
                 formatter,
                 "a CA section must have section_syntax_indicator '1'"
             ),
+            Self::Descriptor(_) => write!(formatter, "a descriptor could not be written"),
             Self::Section(_) => write!(
                 formatter,
                 "the CA section could not be written as a section"
@@ -54,9 +58,16 @@ impl fmt::Display for Error {
 impl core::error::Error for Error {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
+            Self::Descriptor(error) => Some(error),
             Self::Section(error) => Some(error),
             Self::TableId { .. } | Self::SectionSyntaxIndicator => None,
         }
+    }
+}
+
+impl From<descriptor::Error> for Error {
+    fn from(error: descriptor::Error) -> Self {
+        Self::Descriptor(error)
     }
 }
 
@@ -75,12 +86,12 @@ impl From<section::Error> for Error {
 /// with `TryFrom`: the conditional access table takes no path of its own,
 /// and a crate that defines a table of its own converts a [`Section`] the
 /// same way. The 16 bits other sections give to `table_id_extension` are
-/// `reserved` here: they are not kept, and are written `'1'`. The
-/// descriptors are kept as bytes.
+/// `reserved` here: they are not kept, and are written `'1'`.
 ///
 /// # Examples
 ///
 /// ```
+/// use mpeg2_systems::descriptor::DescriptorTag;
 /// use mpeg2_systems::psi::cat::CaSection;
 /// use mpeg2_systems::psi::section::Section;
 ///
@@ -92,7 +103,9 @@ impl From<section::Error> for Error {
 /// ];
 /// let section = Section::read(&bytes)?;
 /// let cat = CaSection::try_from(&section)?;
-/// assert_eq!(cat.descriptors, [0x09, 0x04, 0x00, 0x05, 0xe1, 0x00]);
+/// let ca_descriptor = cat.descriptors.iter().next().unwrap()?;
+/// assert_eq!(ca_descriptor.descriptor_tag, DescriptorTag::CA);
+/// assert_eq!(ca_descriptor.body, [0x00, 0x05, 0xe1, 0x00]);
 ///
 /// // Written back (with the `alloc` feature), it gives the same bytes
 /// # #[cfg(feature = "alloc")]
@@ -115,8 +128,8 @@ pub struct CaSection<'input> {
     pub section_number: u8,
     /// Number of the last section of the table
     pub last_section_number: u8,
-    /// The descriptors of the table, as bytes
-    pub descriptors: &'input [u8],
+    /// The descriptors of the table
+    pub descriptors: DescriptorLoop<'input>,
 }
 
 impl<'input> CaSection<'input> {
@@ -129,27 +142,36 @@ impl<'input> CaSection<'input> {
             current_next_indicator: true,
             section_number: 0,
             last_section_number: 0,
-            descriptors: &[],
+            descriptors: DescriptorLoop(&[]),
         }
     }
 
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
-        super::LONG_SECTION_OVERHEAD.saturating_add(self.descriptors.len())
+        super::LONG_SECTION_OVERHEAD.saturating_add(self.descriptors.0.len())
     }
 
     /// Appends the section to `out`, with its `CRC_32`
     ///
-    /// A write that fails leaves `out` as it was.
+    /// The descriptor loop is written from the descriptors it frames. A
+    /// write that fails leaves `out` as it was.
     ///
     /// # Errors
     ///
-    /// [`Section`](Error::Section): `section_length` would be larger than
-    /// 1021, or `section_number` is past `last_section_number`.
+    /// * [`Section`](Error::Section): `section_length` would be larger than
+    ///   1021, checked before the loop is walked or a buffer sized, or
+    ///   `section_number` is past `last_section_number`.
+    /// * [`Descriptor`](Error::Descriptor): the descriptor loop ends inside a
+    ///   descriptor, or a descriptor is refused by
+    ///   [`RawDescriptor::write`](crate::descriptor::RawDescriptor::write).
     #[cfg(feature = "alloc")]
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
-        let mut section = Section::new(TableId::CONDITIONAL_ACCESS, self.descriptors);
+        super::check_section_length(TableId::CONDITIONAL_ACCESS, self.encoded_len())?;
+        let mut body = Vec::with_capacity(self.descriptors.0.len());
+        DescriptorLoop::write_entries(self.descriptors, &mut body)?;
+
+        let mut section = Section::new(TableId::CONDITIONAL_ACCESS, &body);
         section.syntax = Some(SectionSyntax::new(
             RESERVED_TABLE_ID_EXTENSION,
             self.version_number,
@@ -186,7 +208,7 @@ impl<'input> TryFrom<&Section<'input>> for CaSection<'input> {
             current_next_indicator: syntax.current_next_indicator,
             section_number: syntax.section_number,
             last_section_number: syntax.last_section_number,
-            descriptors: section.body,
+            descriptors: DescriptorLoop(section.body),
         })
     }
 }
@@ -197,6 +219,8 @@ mod tests {
     use alloc::vec::Vec;
 
     use super::{CaSection, Error};
+    #[cfg(feature = "alloc")]
+    use crate::descriptor::{self, DescriptorLoop};
     use crate::psi::TableId;
     #[cfg(feature = "alloc")]
     use crate::psi::VersionNumber;
@@ -220,7 +244,7 @@ mod tests {
     #[test]
     fn a_section_built_from_its_descriptors_is_written_with_its_reserved_bits_set() {
         let mut cat = CaSection::new(VersionNumber::try_from(0).unwrap());
-        cat.descriptors = &CA_DESCRIPTOR;
+        cat.descriptors = DescriptorLoop::from(CA_DESCRIPTOR.as_slice());
         let mut written = Vec::new();
         cat.write(&mut written).unwrap();
 
@@ -272,17 +296,26 @@ mod tests {
 
     #[cfg(feature = "alloc")]
     #[test]
-    fn a_section_longer_than_a_psi_table_allows_is_refused_before_a_byte_is_written() {
-        let mut cat = CaSection::new(VersionNumber::try_from(0).unwrap());
-        cat.descriptors = &[0xff; 1013];
+    fn sections_the_specification_does_not_allow_are_refused_before_a_byte_is_written() {
+        let version = VersionNumber::try_from(0).unwrap();
+        let mut too_long = CaSection::new(version);
+        too_long.descriptors = DescriptorLoop::from([0xff; 1013].as_slice());
+        let mut truncated = CaSection::new(version);
+        truncated.descriptors = DescriptorLoop::from([0x09, 0x04, 0x00].as_slice());
         let mut written = Vec::new();
 
         assert_eq!(
-            cat.write(&mut written),
-            Err(Error::Section(section::Error::SectionLength {
-                section_length: 1022,
-                limit: 1021
-            }))
+            [too_long.write(&mut written), truncated.write(&mut written)],
+            [
+                Err(Error::Section(section::Error::SectionLength {
+                    section_length: 1022,
+                    limit: 1021
+                })),
+                Err(Error::Descriptor(descriptor::Error::Length {
+                    descriptor_length: 4,
+                    available_bytes: 1
+                })),
+            ]
         );
         assert_eq!(written, []);
     }
