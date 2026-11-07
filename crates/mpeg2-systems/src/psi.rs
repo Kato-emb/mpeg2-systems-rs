@@ -1,6 +1,20 @@
 //! Program specific information: the sections that tables are carried in
+//!
+//! A [`Section`](section::Section) is read from bytes, its `CRC_32` checked.
+//! A table the crate defines, [`pat`], [`pmt`] or [`cat`], is converted from
+//! a section with `TryFrom`, and a crate that defines tables of its own, for
+//! a body that gives the user private `table_id` values a meaning, converts a
+//! section the same way.
 
+pub mod cat;
+pub mod pat;
+pub mod pmt;
 pub mod section;
+
+/// Bytes of a section with the fields `section_syntax_indicator` `'1'`
+/// announces, besides its body: 3 to `section_length`, 5 to
+/// `last_section_number` and 4 of `CRC_32`
+const LONG_SECTION_OVERHEAD: usize = 12;
 
 use core::fmt;
 

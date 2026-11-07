@@ -13,5 +13,6 @@ pub mod crc;
 pub mod field;
 pub mod pes;
 pub mod psi;
+pub mod stream_type;
 pub mod time;
 pub mod ts;
