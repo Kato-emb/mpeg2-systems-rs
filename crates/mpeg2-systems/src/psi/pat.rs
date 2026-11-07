@@ -66,7 +66,9 @@ impl fmt::Display for Error {
                 formatter,
                 "a program association section must have section_syntax_indicator '1'"
             ),
-            Self::Field { field, error } => write!(formatter, "{field}: {error}"),
+            Self::Field { field, .. } => {
+                write!(formatter, "field {field} could not be read or written")
+            }
             Self::Pid { field, pid } => write!(
                 formatter,
                 "{field} {:#06x} is outside 0x0010 to 0x1ffe",
@@ -76,7 +78,10 @@ impl fmt::Display for Error {
                 formatter,
                 "program_number {program_number} appears more than once"
             ),
-            Self::Section(error) => write!(formatter, "{error}"),
+            Self::Section(_) => write!(
+                formatter,
+                "the program association section could not be written as a section"
+            ),
         }
     }
 }

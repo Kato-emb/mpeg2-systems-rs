@@ -87,8 +87,13 @@ impl fmt::Display for Error {
                 formatter,
                 "transport packet has neither an adaptation field nor a payload"
             ),
-            Self::AdaptationField(error) => write!(formatter, "adaptation field: {error}"),
-            Self::Field { field, error } => write!(formatter, "{field}: {error}"),
+            Self::AdaptationField(_) => write!(
+                formatter,
+                "the adaptation field could not be read or written"
+            ),
+            Self::Field { field, .. } => {
+                write!(formatter, "field {field} could not be read or written")
+            }
         }
     }
 }

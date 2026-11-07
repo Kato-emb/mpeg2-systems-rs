@@ -87,7 +87,9 @@ impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ForbiddenTableId => write!(formatter, "table_id 0xff is forbidden"),
-            Self::Field { field, error } => write!(formatter, "{field}: {error}"),
+            Self::Field { field, .. } => {
+                write!(formatter, "field {field} could not be read or written")
+            }
             Self::SectionLength {
                 section_length,
                 limit,

@@ -84,7 +84,9 @@ impl fmt::Display for Error {
                 formatter,
                 "a TS program map section must have section_syntax_indicator '1'"
             ),
-            Self::Field { field, error } => write!(formatter, "{field}: {error}"),
+            Self::Field { field, .. } => {
+                write!(formatter, "field {field} could not be read or written")
+            }
             Self::SectionNumber {
                 section_number,
                 last_section_number,
@@ -107,7 +109,10 @@ impl fmt::Display for Error {
                 formatter,
                 "ES_info_length {length} exceeds 1023, which its first two bits '00' allow"
             ),
-            Self::Section(error) => write!(formatter, "{error}"),
+            Self::Section(_) => write!(
+                formatter,
+                "the TS program map section could not be written as a section"
+            ),
         }
     }
 }
