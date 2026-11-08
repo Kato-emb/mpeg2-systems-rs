@@ -1,0 +1,25 @@
+[package]
+name = "examples"
+version = "0.0.0"
+description = "Programs that read Transport Streams and Program Streams with mpeg2-systems"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+# The demuxers reassemble sections and PES packets, which takes `alloc`.
+mpeg2-systems = { workspace = true, features = ["alloc"] }
+
+[[example]]
+name = "ts_dump"
+path = "ts_dump.rs"
+
+[[example]]
+name = "ps_dump"
+path = "ps_dump.rs"
+
+[lints]
+workspace = true
