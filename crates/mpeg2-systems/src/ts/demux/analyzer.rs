@@ -5,7 +5,7 @@
 //! nothing else; any other gives a discontinuity, then its PCR, then the
 //! sections it completes, each read or failed.
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use core::ops::Range;
 
 use super::{Error, Event, Lent, Pending};
@@ -27,10 +27,11 @@ use section_reassembly::{Completed, SectionReassembler};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct PacketAnalyzer {
     continuity: ContinuityTracker,
-    // Why not keep the PAT in the map with the others: the PIDs a PAT names
-    // are added to the map while its bytes, in this reassembler, are read.
-    program_association: SectionReassembler,
     reassemblers: BTreeMap<Pid, SectionReassembler>,
+    /// The PIDs PAT sections have named for a program map
+    // Why not read these from the map's keys: the map lends the PAT's
+    // reassembler while the PAT's section names them.
+    program_map_pids: BTreeSet<Pid>,
     /// The PID whose reassembler holds sections completed since the last
     /// [`PacketAnalyzer::release`], read or not
     // Why not release every reassembler instead: that walks them all on
@@ -42,8 +43,8 @@ impl PacketAnalyzer {
     pub(super) const fn new() -> Self {
         Self {
             continuity: ContinuityTracker::new(),
-            program_association: SectionReassembler::new(),
             reassemblers: BTreeMap::new(),
+            program_map_pids: BTreeSet::new(),
             completed_on: None,
         }
     }
@@ -52,35 +53,26 @@ impl PacketAnalyzer {
     /// learned from a PAT stay
     pub(super) fn reset(&mut self) {
         self.continuity.reset();
-        for reassembler in self.reassemblers_mut() {
+        for reassembler in self.reassemblers.values_mut() {
             reassembler.discard_in_flight();
         }
     }
 
     /// Drops the sections the queued events lent, once none is queued
     pub(super) fn release(&mut self) {
-        let reassembler = match self.completed_on.take() {
-            None => None,
-            Some(Pid::PAT) => Some(&mut self.program_association),
-            Some(pid) => self.reassemblers.get_mut(&pid),
-        };
-        if let Some(reassembler) = reassembler {
+        if let Some(reassembler) = self
+            .completed_on
+            .take()
+            .and_then(|pid| self.reassemblers.get_mut(&pid))
+        {
             reassembler.release();
         }
     }
 
-    fn reassemblers_mut(&mut self) -> impl Iterator<Item = &mut SectionReassembler> {
-        core::iter::once(&mut self.program_association).chain(self.reassemblers.values_mut())
-    }
-
     /// Returns the bytes of a [`Lent::Reassembled`] range of `pid`
     pub(super) fn reassembled(&self, pid: Pid, range: Range<usize>) -> &[u8] {
-        let reassembler = if pid == Pid::PAT {
-            Some(&self.program_association)
-        } else {
-            self.reassemblers.get(&pid)
-        };
-        reassembler
+        self.reassemblers
+            .get(&pid)
             .map(|reassembler| reassembler.section(range))
             .unwrap_or_default()
     }
@@ -131,24 +123,20 @@ impl PacketAnalyzer {
                 program_clock_reference,
             }));
         }
-        // Why hand the map over only with the PAT's reassembler: the PIDs a
-        // PAT names are learned while its reassembler, which is not in the
-        // map, lends the section.
-        let (reassembler, mut program_maps) = match pid {
-            Pid::PAT => (
-                Some(&mut self.program_association),
-                Some(&mut self.reassemblers),
-            ),
-            Pid::CAT => (
-                Some(
-                    self.reassemblers
-                        .entry(pid)
-                        .or_insert_with(SectionReassembler::new),
-                ),
-                None,
-            ),
-            _ => (self.reassemblers.get_mut(&pid), None),
+        let reassembler = if pid == Pid::PAT || pid == Pid::CAT {
+            Some(
+                self.reassemblers
+                    .entry(pid)
+                    .or_insert_with(SectionReassembler::new),
+            )
+        } else {
+            self.reassemblers.get_mut(&pid)
         };
+        // Why gather the PIDs a PAT names in the set, and only then add their
+        // reassemblers: the map lends the PAT's reassembler while the section
+        // is read, so it cannot take a new entry until then.
+        let mut program_map_pids = (pid == Pid::PAT).then_some(&mut self.program_map_pids);
+        let mut named_new_pid = false;
         let Some(reassembler) = reassembler else {
             return;
         };
@@ -185,22 +173,20 @@ impl PacketAnalyzer {
                         return;
                     }
                 };
-                if let Some(program_maps) = program_maps.as_deref_mut()
+                if let Some(program_map_pids) = program_map_pids.as_deref_mut()
                     && let Ok(table) = ProgramAssociationSection::try_from(&section)
                 {
                     for program in table.programs {
-                        // Why skip the PAT and null PIDs: a broken PAT can name
-                        // them, and the PAT has its own reassembler while null
-                        // packets carry stuffing, not sections.
+                        // Why skip the PAT, CAT and null PIDs: a broken PAT can
+                        // name them, and the PAT and CAT are reassembled
+                        // anyway while null packets carry stuffing, not
+                        // sections.
                         if let Ok(Program::ProgramMap {
                             program_map_pid, ..
                         }) = program
-                            && program_map_pid != Pid::PAT
-                            && program_map_pid != Pid::NULL
+                            && ![Pid::PAT, Pid::CAT, Pid::NULL].contains(&program_map_pid)
                         {
-                            program_maps
-                                .entry(program_map_pid)
-                                .or_insert_with(SectionReassembler::new);
+                            named_new_pid |= program_map_pids.insert(program_map_pid);
                         }
                     }
                 }
@@ -231,6 +217,13 @@ impl PacketAnalyzer {
                 });
             },
         );
+        if named_new_pid {
+            for &program_map_pid in &self.program_map_pids {
+                self.reassemblers
+                    .entry(program_map_pid)
+                    .or_insert_with(SectionReassembler::new);
+            }
+        }
     }
 }
 
