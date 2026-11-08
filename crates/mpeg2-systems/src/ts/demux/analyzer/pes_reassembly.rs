@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use super::continuity::Verdict;
-use crate::pes::{self, PesPacketLength, pes_packet_length};
+use crate::pes::{self, PesPacket, PesPacketLength};
 use crate::ts::Pid;
 use crate::ts::demux::{Error, Event, Lent, Pending};
 use crate::ts::packet::{PACKET_LENGTH, TransportPacket, TransportScramblingControl};
@@ -410,7 +410,7 @@ fn length_of(prefix: &[u8], scrambled: bool) -> PesPacketLength {
     if scrambled {
         PesPacketLength::Unbounded
     } else {
-        pes_packet_length(prefix)
+        PesPacket::encoded_len_of(prefix)
     }
 }
 

@@ -10,7 +10,7 @@ use core::ops::Range;
 
 use super::Error;
 use crate::input_buffer::InputBuffer;
-use crate::pes::{self, PesPacket, PesPacketLength, StreamId, pes_packet_length};
+use crate::pes::{self, PesPacket, PesPacketLength, StreamId};
 use crate::ps::{
     MPEG_PROGRAM_END_CODE, PACK_START_CODE, PROGRAM_STREAM_MAP_START_CODE, PackHeader,
     ProgramStreamMap, SYSTEM_HEADER_START_CODE, SystemHeader,
@@ -403,7 +403,7 @@ fn observe_synced(bytes: &[u8]) -> Synced {
         PROGRAM_STREAM_MAP_STREAM_ID => {
             observe_element(bytes, Element::ProgramStreamMap, length_field(bytes))
         }
-        _ if StreamId::from(stream_id).is_pes_packet() => match pes_packet_length(bytes) {
+        _ if StreamId::from(stream_id).is_pes_packet() => match PesPacket::encoded_len_of(bytes) {
             PesPacketLength::NeedMoreData => Synced::NeedMoreData,
             PesPacketLength::Unbounded => Synced::UnboundedPes,
             PesPacketLength::Bounded(length) => {

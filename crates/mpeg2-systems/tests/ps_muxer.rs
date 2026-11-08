@@ -8,9 +8,7 @@
     reason = "the stream is cut at offsets its own writers gave"
 )]
 mod tests {
-    use mpeg2_systems::pes::{
-        OptionalHeader, PesPacket, PesPacketLength, StreamId, pes_packet_length,
-    };
+    use mpeg2_systems::pes::{OptionalHeader, PesPacket, PesPacketLength, StreamId};
     use mpeg2_systems::ps::demux::{Demuxer, Event};
     use mpeg2_systems::ps::mux::Muxer;
     use mpeg2_systems::ps::psm::ElementaryStreamLoop;
@@ -61,7 +59,7 @@ mod tests {
     fn cut_by_hand(bytes: &[u8]) -> Vec<PesPacket<'_>> {
         let mut packets = Vec::new();
         let mut rest = bytes;
-        while let PesPacketLength::Bounded(length) = pes_packet_length(rest) {
+        while let PesPacketLength::Bounded(length) = PesPacket::encoded_len_of(rest) {
             if rest.len() < length {
                 break;
             }

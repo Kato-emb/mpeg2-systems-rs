@@ -2,7 +2,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::*;
-use crate::pes::{OptionalHeader, PesPacketLength, pes_packet_length};
+use crate::pes::{OptionalHeader, PesPacket, PesPacketLength};
 use crate::ps::system_header::{self, StreamBound, StreamBoundLoop, SystemHeader};
 use crate::time::{ClockReference, Timestamp};
 
@@ -26,7 +26,7 @@ fn counting_payload(length: usize) -> Vec<u8> {
 fn packets(bytes: &[u8]) -> Vec<PesPacket<'_>> {
     let mut packets = Vec::new();
     let mut rest = bytes;
-    while let PesPacketLength::Bounded(length) = pes_packet_length(rest) {
+    while let PesPacketLength::Bounded(length) = PesPacket::encoded_len_of(rest) {
         let (packet, after) = rest.split_at(length);
         packets.push(PesPacket::read(packet).unwrap());
         rest = after;

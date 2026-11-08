@@ -187,7 +187,7 @@ const fn field_error(field: &'static str) -> impl Fn(field::Error) -> Error {
 
 /// How long a PES packet is, as far as its first bytes tell
 ///
-/// The value [`pes_packet_length`] returns.
+/// The value [`PesPacket::encoded_len_of`] returns.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PesPacketLength {
@@ -199,42 +199,6 @@ pub enum PesPacketLength {
     /// `PES_packet_length` is 0: the packet runs to the next packet of its
     /// PID with `payload_unit_start_indicator` set
     Unbounded,
-}
-
-/// Returns how long the PES packet that `prefix` starts is
-///
-/// `PES_packet_length`, ISO/IEC 13818-1 §2.4.3.7
-///
-/// Only the first 6 bytes are looked at, and `packet_start_code_prefix` is
-/// not checked; [`PesPacket::read`] checks it. A length of 0, which the
-/// specification allows only for video carried in a Transport Stream, leaves
-/// the end of the packet to the next `payload_unit_start_indicator`.
-///
-/// # Examples
-///
-/// ```
-/// use mpeg2_systems::pes::{PesPacketLength, pes_packet_length};
-///
-/// assert_eq!(pes_packet_length(&[0x00, 0x00, 0x01]), PesPacketLength::NeedMoreData);
-/// assert_eq!(
-///     pes_packet_length(&[0x00, 0x00, 0x01, 0xc0, 0x0b, 0x75]),
-///     PesPacketLength::Bounded(2939)
-/// );
-/// assert_eq!(
-///     pes_packet_length(&[0x00, 0x00, 0x01, 0xe0, 0x00, 0x00]),
-///     PesPacketLength::Unbounded
-/// );
-/// ```
-#[must_use]
-pub fn pes_packet_length(prefix: &[u8]) -> PesPacketLength {
-    let Some([.., high, low]) = prefix.first_chunk::<PREFIX_LENGTH>() else {
-        return PesPacketLength::NeedMoreData;
-    };
-
-    match u16::from_be_bytes([*high, *low]) {
-        0 => PesPacketLength::Unbounded,
-        length => PesPacketLength::Bounded(PREFIX_LENGTH.saturating_add(usize::from(length))),
-    }
 }
 
 /// PES packet, the unit an elementary stream is cut into for carriage
@@ -378,6 +342,46 @@ impl<'input> PesPacket<'input> {
         PREFIX_LENGTH.saturating_add(self.body_length())
     }
 
+    /// Returns the number of bytes of the PES packet that `prefix` starts,
+    /// read from its first 6 bytes
+    ///
+    /// `PES_packet_length`, ISO/IEC 13818-1 §2.4.3.7
+    ///
+    /// The value [`Bounded`](PesPacketLength::Bounded) holds is what
+    /// [`encoded_len`](Self::encoded_len) gives for the packet
+    /// [`read`](Self::read) reads from those bytes.
+    /// `packet_start_code_prefix` is not checked; [`read`](Self::read) checks
+    /// it. A length of 0, which the specification allows only for video
+    /// carried in a Transport Stream, leaves the end of the packet to the next
+    /// `payload_unit_start_indicator`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mpeg2_systems::pes::{PesPacket, PesPacketLength};
+    ///
+    /// assert_eq!(PesPacket::encoded_len_of(&[0x00, 0x00, 0x01]), PesPacketLength::NeedMoreData);
+    /// assert_eq!(
+    ///     PesPacket::encoded_len_of(&[0x00, 0x00, 0x01, 0xc0, 0x0b, 0x75]),
+    ///     PesPacketLength::Bounded(2939)
+    /// );
+    /// assert_eq!(
+    ///     PesPacket::encoded_len_of(&[0x00, 0x00, 0x01, 0xe0, 0x00, 0x00]),
+    ///     PesPacketLength::Unbounded
+    /// );
+    /// ```
+    #[must_use]
+    pub fn encoded_len_of(prefix: &[u8]) -> PesPacketLength {
+        let Some([.., high, low]) = prefix.first_chunk::<PREFIX_LENGTH>() else {
+            return PesPacketLength::NeedMoreData;
+        };
+
+        match u16::from_be_bytes([*high, *low]) {
+            0 => PesPacketLength::Unbounded,
+            length => PesPacketLength::Bounded(PREFIX_LENGTH.saturating_add(usize::from(length))),
+        }
+    }
+
     /// Appends the packet to `out`
     ///
     /// A write that fails leaves `out` as it was.
@@ -444,7 +448,7 @@ mod tests {
     #[cfg(feature = "alloc")]
     use alloc::vec::Vec;
 
-    use super::{Error, OptionalHeader, PesPacket, StreamId};
+    use super::{Error, OptionalHeader, PesPacket, PesPacketLength, StreamId};
 
     #[test]
     fn a_stream_without_an_optional_header_has_every_byte_as_payload() {
@@ -555,5 +559,33 @@ mod tests {
             ]
         );
         assert_eq!(written, []);
+    }
+
+    #[test]
+    fn fewer_than_6_bytes_have_no_encoded_length() {
+        let prefix = [0x00, 0x00, 0x01, 0xc0, 0x00];
+
+        for length in 0..=prefix.len() {
+            assert_eq!(
+                PesPacket::encoded_len_of(prefix.get(..length).unwrap()),
+                PesPacketLength::NeedMoreData
+            );
+        }
+    }
+
+    #[test]
+    fn the_encoded_length_counts_the_6_bytes_up_to_pes_packet_length() {
+        assert_eq!(
+            PesPacket::encoded_len_of(&[0x00, 0x00, 0x01, 0xbe, 0x00, 0x03]),
+            PesPacketLength::Bounded(9)
+        );
+    }
+
+    #[test]
+    fn the_largest_pes_packet_length_gives_the_largest_encoded_length() {
+        assert_eq!(
+            PesPacket::encoded_len_of(&[0x00, 0x00, 0x01, 0xc0, 0xff, 0xff]),
+            PesPacketLength::Bounded(65541)
+        );
     }
 }
