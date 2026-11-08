@@ -117,10 +117,9 @@ impl ProgramMapRoutes {
         // Why sort and search rather than scan the programs for each key: a
         // PAT can name tens of thousands of programs, and the scans would
         // multiply with the PIDs followed and the PMT sections looked up.
-        // Why a stable sort: the programs gathered before are sorted already,
-        // and it merges the run a section appends to them rather than sorting
-        // the whole again for each section of a version.
-        self.programs.sort();
+        // Why not sort: a stable sort allocates a scratch buffer for a long
+        // vector, and equal pairs need no order kept.
+        self.programs.sort_unstable();
         self.programs.dedup();
         // Why compare the count with last_section_number: Section::read
         // refuses a section_number past last_section_number, so the bits set
