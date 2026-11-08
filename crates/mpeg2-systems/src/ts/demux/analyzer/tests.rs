@@ -2,26 +2,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::ts::Pid;
+use crate::ts::demux::tests::packet;
 use crate::ts::demux::{Demuxer, DemuxerConfig};
-
-/// A Transport Packet laid out by hand, its payload padded with 0xFF
-fn packet(
-    pid: u16,
-    payload_unit_start_indicator: bool,
-    continuity_counter: u8,
-    payload: &[u8],
-) -> Vec<u8> {
-    let [high, low] = pid.to_be_bytes();
-    let flag = if payload_unit_start_indicator {
-        0x40
-    } else {
-        0x00
-    };
-    let mut bytes = vec![0x47, high | flag, low, 0x10 | continuity_counter];
-    bytes.extend_from_slice(payload);
-    bytes.resize(188, 0xFF);
-    bytes
-}
 
 // Why not test through poll_event: a section kept in the buffer changes no
 // event, only the memory the demuxer holds, so the test reads the buffer. Why

@@ -164,15 +164,23 @@ impl PacketFramer {
         self.buffer.extend_from_slice(bytes);
     }
 
+    #[cfg(test)]
+    pub(super) fn buffer_len(&self) -> usize {
+        self.buffer.len()
+    }
+
     /// Drops the bytes reported or cut, once no output's range points at
-    /// them
+    /// them, if they are no fewer than the bytes left
     pub(super) fn compact(&mut self) {
         // Why not a VecDeque, which drops the front without moving the rest:
         // a packet straddling its wrap has no single slice to lend, so every
-        // packet would be copied out. Why not compact as each packet is cut:
-        // that moves what is left on every packet; compacting before input
-        // is appended moves it once per chunk, less than a stride plus one
-        // unreported run.
+        // packet would be copied out. Why not compact whenever bytes were
+        // consumed: that moves the unread rest of a large chunk on every
+        // packet. Compacting only once the consumed bytes are no fewer than
+        // the rest moves each byte a bounded number of times in all.
+        if self.consumed < self.buffer.len().saturating_sub(self.consumed) {
+            return;
+        }
         self.buffer.drain(..self.consumed);
         self.position = self.offset_of(self.consumed);
         self.consumed = 0;
