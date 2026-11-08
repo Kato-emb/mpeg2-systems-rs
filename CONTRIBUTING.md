@@ -52,6 +52,8 @@ cargo test --workspace -- --ignored
 
 The `conformance` job pins the versions it installs; a difference between your
 tools and the pinned ones is a reason to look at the job, not at the test.
+`scripts/fetch-tools.sh <directory>` puts the same pinned tools in
+`<directory>/bin` on a Linux host, for you to put on `PATH`.
 
 ### Fixtures
 
