@@ -140,6 +140,10 @@ impl Demuxer {
     /// Hands over the next bytes of the stream, cut anywhere
     ///
     /// The bytes are only kept; [`Demuxer::poll_event`] reads them.
+    ///
+    /// # Panics
+    /// Panics if called after [`Demuxer::finish`] before
+    /// [`Demuxer::poll_event`] has returned `None`.
     pub fn handle_input(&mut self, bytes: &[u8]) {
         self.framer.extend(bytes);
     }
@@ -166,9 +170,9 @@ impl Demuxer {
     ///
     /// The events [`Demuxer::poll_event`] returns next include a last packet
     /// that lacks only the carrier bytes after it, and every other byte left
-    /// as [`Event::Unsynchronized`], so nothing is joined across the end. The
-    /// packet size found stays, so the same demuxer can take a stream that
-    /// goes on.
+    /// as [`Event::Unsynchronized`], so nothing is joined across the end. Poll
+    /// until `None` before handing over more input. The packet size found
+    /// stays, so the same demuxer can then take a stream that goes on.
     pub fn finish(&mut self) {
         self.framer.finish();
     }

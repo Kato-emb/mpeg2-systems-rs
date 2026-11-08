@@ -192,46 +192,31 @@ fn the_end_reports_a_partial_packet_on_the_grid_as_unsynchronized() {
 }
 
 #[test]
-fn input_after_the_end_is_framed_on_the_grid_kept() {
+fn input_after_a_drained_end_goes_on_at_the_next_offset_on_the_grid_kept() {
     let mut framer = PacketFramer::new(None);
     let mut seen = Vec::new();
-    framer.extend(&STANDARD_188[..188 * 5]);
+    framer.extend(&STANDARD_188[..188 * 5 + 100]);
     framer.finish();
-    framer.extend(&STANDARD_188[188 * 5..188 * 6]);
     drain(&mut framer, &mut seen);
-    assert_eq!(seen, {
-        let mut expected = vec![Seen::SyncAcquired(PacketSize::Standard188)];
-        expected.extend(packets_of(
-            &STANDARD_188[..188 * 6],
-            PacketSize::Standard188,
-            0,
-        ));
-        expected
-    });
+    framer.extend(&STANDARD_188[188 * 6..]);
+    framer.finish();
+    drain(&mut framer, &mut seen);
+    let mut input = STANDARD_188[..188 * 5 + 100].to_vec();
+    input.extend_from_slice(&STANDARD_188[188 * 6..]);
+    let mut expected = vec![Seen::SyncAcquired(PacketSize::Standard188)];
+    expected.extend(packets_of(&input[..188 * 5], PacketSize::Standard188, 0));
+    expected.push(Seen::Unsynchronized(input[188 * 5..188 * 5 + 100].to_vec()));
+    expected.extend(packets_of(&input, PacketSize::Standard188, 188 * 5 + 100));
+    assert_eq!(seen, expected);
 }
 
 #[test]
-fn every_end_of_input_is_kept_until_the_bytes_before_it_are_reported() {
+#[should_panic(expected = "after finish")]
+fn input_before_the_end_is_drained_is_refused() {
     let mut framer = PacketFramer::new(None);
-    let mut seen = Vec::new();
-    framer.extend(&STANDARD_188[..188 * 5]);
-    drain(&mut framer, &mut seen);
-    framer.extend(&STANDARD_188[188 * 5..188 * 5 + 100]);
+    framer.extend(&STANDARD_188[..188 * 5 + 100]);
     framer.finish();
-    framer.extend(&STANDARD_188[188 * 5 + 100..188 * 6]);
-    framer.finish();
-    drain(&mut framer, &mut seen);
-    let mut expected = vec![Seen::SyncAcquired(PacketSize::Standard188)];
-    expected.extend(packets_of(
-        &STANDARD_188[..188 * 5],
-        PacketSize::Standard188,
-        0,
-    ));
-    expected.extend([
-        Seen::Unsynchronized(STANDARD_188[188 * 5..188 * 5 + 100].to_vec()),
-        Seen::Unsynchronized(STANDARD_188[188 * 5 + 100..188 * 6].to_vec()),
-    ]);
-    assert_eq!(seen, expected);
+    framer.extend(&STANDARD_188[188 * 6..]);
 }
 
 #[test]

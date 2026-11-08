@@ -147,4 +147,34 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn a_clone_equals_the_demuxer_it_was_cloned_from() {
+        let mut demuxer = Demuxer::new(DemuxerConfig::default());
+        demuxer.handle_input(&STANDARD_188[..1000]);
+        let _ = demuxer.poll_event();
+        assert_eq!(demuxer.clone(), demuxer);
+    }
+
+    #[test]
+    fn demuxers_fed_the_same_input_in_different_chunks_are_equal_once_drained() {
+        let drained = |chunk_length: usize| {
+            let mut demuxer = Demuxer::new(DemuxerConfig::default());
+            for chunk in STANDARD_188[..5000].chunks(chunk_length) {
+                demuxer.handle_input(chunk);
+                while demuxer.poll_event().is_some() {}
+            }
+            demuxer
+        };
+        assert_eq!(drained(7), drained(1000));
+    }
+
+    #[test]
+    #[should_panic(expected = "after finish")]
+    fn input_handed_over_before_the_end_is_drained_is_refused() {
+        let mut demuxer = Demuxer::new(DemuxerConfig::default());
+        demuxer.handle_input(STANDARD_188);
+        demuxer.finish();
+        demuxer.handle_input(STANDARD_188);
+    }
 }

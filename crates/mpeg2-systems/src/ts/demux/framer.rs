@@ -4,8 +4,8 @@
 //! bytes it takes on the wire, counted from the first byte ever handed to
 //! [`PacketFramer::extend`]; every other byte is reported as unsynchronized.
 
-use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+use core::hash::{Hash, Hasher};
 use core::ops::Range;
 
 use crate::ts::packet::{PACKET_LENGTH, SYNC_BYTE};
@@ -28,6 +28,9 @@ enum State {
     Searching {
         /// Bytes after the consumed ones that the search walked past and has
         /// not reported yet
+        // Why not rescan from consumed instead: the run is reported only at a
+        // grid, the report limit or the end, so rescanning it on every step
+        // costs time quadratic in the run.
         skipped: usize,
     },
     Synced {
@@ -97,19 +100,36 @@ struct Transition {
 
 /// Grid synchronization state machine over the input buffer
 ///
-/// `position` is the input offset of `buffer[0]`. Bytes before `consumed`
-/// were reported or cut and are dropped at the next [`PacketFramer::extend`];
-/// until then the ranges an [`Output`] carries still point at them.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Two framers are equal when they will report the same outputs for the
+/// same input: the bytes before `consumed`, which are reported but not yet
+/// dropped, take no part.
+#[derive(Debug, Clone)]
 pub(super) struct PacketFramer {
     fixed_packet_size: Option<PacketSize>,
     state: State,
     buffer: Vec<u8>,
+    /// Bytes at the front of `buffer` that were reported or cut; the ranges
+    /// an [`Output`] carries still point at them
     consumed: usize,
+    /// Input offset of `buffer[0]`, counted from the first byte ever extended
     position: u64,
-    /// Buffer indices where [`PacketFramer::finish`] ended the input, in
-    /// order, each kept until the framer has reported every byte before it
-    ends: VecDeque<usize>,
+    /// [`PacketFramer::finish`] ended the input, and the framer has not yet
+    /// reported every byte before the end
+    ended: bool,
+}
+
+impl PartialEq for PacketFramer {
+    fn eq(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
+}
+
+impl Eq for PacketFramer {}
+
+impl Hash for PacketFramer {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.key().hash(state);
+    }
 }
 
 impl PacketFramer {
@@ -120,20 +140,27 @@ impl PacketFramer {
             buffer: Vec::new(),
             consumed: 0,
             position: 0,
-            ends: VecDeque::new(),
+            ended: false,
         }
     }
 
+    /// Appends input
+    ///
+    /// # Panics
+    /// Panics if called after [`PacketFramer::finish`] before
+    /// [`PacketFramer::step`] has returned [`Output::NeedMoreData`].
     pub(super) fn extend(&mut self, bytes: &[u8]) {
+        assert!(
+            !self.ended,
+            "input handed over after finish, before the events it left were polled"
+        );
         // Why not a VecDeque, which drops the front without moving the rest:
         // a packet straddling its wrap has no single slice to lend, so every
-        // packet would be copied out. Draining moves only what is not yet cut,
-        // less than a stride plus one unreported run.
+        // packet would be copied out. Why not drain as each packet is cut:
+        // that moves what is left on every packet; draining here moves it
+        // once per extend, less than a stride plus one unreported run.
         self.buffer.drain(..self.consumed);
         self.position = self.offset_of(self.consumed);
-        for end in &mut self.ends {
-            *end = end.saturating_sub(self.consumed);
-        }
         self.consumed = 0;
         // Why copy every chunk, not only the tail that crosses into the
         // next: an event borrows the demuxer rather than the caller's chunk,
@@ -145,15 +172,32 @@ impl PacketFramer {
     ///
     /// The steps that follow cut a final packet the grid holds without the
     /// carrier bytes after it, and report every other byte before the end as
-    /// [`Output::Unsynchronized`]. Bytes extended after the end are framed
-    /// once the end is reported.
+    /// [`Output::Unsynchronized`]. The state stays, so input extended once
+    /// the end is reported goes on on the grid found.
     pub(super) fn finish(&mut self) {
-        self.ends.push_back(self.buffer.len());
+        self.ended = true;
     }
 
     /// Returns the bytes of a range an [`Output`] carries
     pub(super) fn bytes(&self, range: Range<usize>) -> &[u8] {
         self.buffer.get(range).unwrap_or_default()
+    }
+
+    /// What equality and hashing compare: everything but the bytes already
+    /// reported or cut
+    fn key(&self) -> (Option<PacketSize>, State, bool, u64, &[u8]) {
+        (
+            self.fixed_packet_size,
+            self.state,
+            self.ended,
+            self.offset_of(self.consumed),
+            self.unconsumed(),
+        )
+    }
+
+    /// The bytes not yet reported or cut
+    fn unconsumed(&self) -> &[u8] {
+        self.buffer.get(self.consumed..).unwrap_or_default()
     }
 
     /// Input offset of the buffer byte at `index`
@@ -168,8 +212,8 @@ impl PacketFramer {
     /// Steps the state machine until it has something to report
     pub(super) fn step(&mut self) -> Output {
         loop {
-            while self.ends.front() == Some(&self.consumed) {
-                self.ends.pop_front();
+            if self.ended && self.consumed == self.buffer.len() {
+                self.ended = false;
             }
             let transition = self.transition();
             self.state = transition.next_state;
@@ -182,11 +226,10 @@ impl PacketFramer {
 
     fn transition(&self) -> Transition {
         let consumed = self.consumed;
-        let limit = self.ends.front().copied().unwrap_or(self.buffer.len());
-        let input = if self.ends.is_empty() {
-            Input::Continues
-        } else {
+        let input = if self.ended {
             Input::Ends
+        } else {
+            Input::Continues
         };
         match self.state {
             // Why report before observing again: the report is capped, so a
@@ -197,7 +240,7 @@ impl PacketFramer {
             }
             State::Searching { skipped } => {
                 let cursor = consumed.saturating_add(skipped);
-                let bytes = self.buffer.get(cursor..limit).unwrap_or_default();
+                let bytes = self.buffer.get(cursor..).unwrap_or_default();
                 // Why cap the garbage counted at what the report has room
                 // for: one chunk can carry far more garbage than the limit,
                 // and taking it all would make one report exceed the bound;
@@ -245,7 +288,7 @@ impl PacketFramer {
                 packet_size,
                 consecutive_misses,
             } => {
-                let bytes = self.buffer.get(consumed..limit).unwrap_or_default();
+                let bytes = self.unconsumed();
                 match observe(bytes, packet_size, input) {
                     FrameObservation::OnGrid => Transition {
                         next_state: State::Synced {
@@ -290,7 +333,7 @@ impl PacketFramer {
                     FrameObservation::Leftover => Transition {
                         next_state: self.state,
                         consume: bytes.len(),
-                        output: Some(Output::Unsynchronized(consumed..limit)),
+                        output: Some(Output::Unsynchronized(consumed..self.buffer.len())),
                     },
                     FrameObservation::NeedMoreData => Transition {
                         next_state: self.state,
