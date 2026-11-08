@@ -89,13 +89,23 @@ mod tests {
         use mpeg2_systems::ts::Pid;
         use mpeg2_systems::ts::demux;
 
-        let errors: [&dyn Error; 2] = [
+        let errors: [&dyn Error; 5] = [
             &demux::Error::Packet {
                 error: packet::Error::SyncByte { sync_byte: 0x00 },
             },
             &demux::Error::Section {
                 pid: Pid::PAT,
                 error: section::Error::ForbiddenTableId,
+            },
+            &demux::Error::ProgramAssociationSection {
+                error: pat::Error::SectionSyntaxIndicator,
+            },
+            &demux::Error::TsProgramMapSection {
+                pid: Pid::try_from(0x1000).unwrap(),
+                error: pmt::Error::SectionSyntaxIndicator,
+            },
+            &demux::Error::CaSection {
+                error: cat::Error::SectionSyntaxIndicator,
             },
         ];
 
@@ -107,7 +117,7 @@ mod tests {
                     source.is_some_and(|source| error.to_string().contains(&source)),
                 )
             }),
-            [(true, false); 2]
+            [(true, false); 5]
         );
     }
 }
