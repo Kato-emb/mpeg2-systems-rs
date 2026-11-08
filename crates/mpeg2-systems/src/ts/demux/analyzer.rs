@@ -5,7 +5,8 @@
 //! nothing else; any other gives a discontinuity, then its PCR, then the
 //! sections it completes, each read or failed.
 
-use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
+use alloc::collections::{BTreeMap, VecDeque};
+use core::mem;
 use core::ops::Range;
 
 use super::{Error, Event, Lent, Pending};
@@ -28,13 +29,6 @@ use section_reassembly::{Completed, SectionReassembler};
 pub(super) struct PacketAnalyzer {
     continuity: ContinuityTracker,
     reassemblers: BTreeMap<Pid, SectionReassembler>,
-    /// The PIDs PAT sections have named for a program map
-    // Why not read these from the map's keys, which, but for the PAT and CAT,
-    // are always the same set: the map lends the PAT's reassembler while the
-    // PAT's section is read, so the PIDs it names are gathered here and the
-    // map takes them afterwards. The per-version routes that a later change
-    // adds replace this set.
-    program_map_pids: BTreeSet<Pid>,
     /// The PID whose reassembler holds sections completed since the last
     /// [`PacketAnalyzer::release`], read or not
     // Why not release every reassembler instead: that walks them all on
@@ -47,7 +41,6 @@ impl PacketAnalyzer {
         Self {
             continuity: ContinuityTracker::new(),
             reassemblers: BTreeMap::new(),
-            program_map_pids: BTreeSet::new(),
             completed_on: None,
         }
     }
@@ -126,105 +119,149 @@ impl PacketAnalyzer {
                 program_clock_reference,
             }));
         }
-        let reassembler = if pid == Pid::PAT || pid == Pid::CAT {
-            Some(
-                self.reassemblers
-                    .entry(pid)
-                    .or_insert_with(SectionReassembler::new),
-            )
-        } else {
-            self.reassemblers.get_mut(&pid)
-        };
-        let mut program_map_pids = (pid == Pid::PAT).then_some(&mut self.program_map_pids);
-        let mut named_new_pid = false;
-        let Some(reassembler) = reassembler else {
-            return;
-        };
-        match verdict {
-            Verdict::InOrder => {}
-            // Why not reassemble a duplicate: its payload repeats bytes already
-            // gathered, so the same section would complete twice.
-            Verdict::Duplicate => return,
-            // Why drop the section in flight, on a packet without payload too:
-            // after lost bytes or a splice, the bytes gathered and those that
-            // follow belong to different sections.
-            Verdict::Broken { .. } | Verdict::Excused => reassembler.discard_in_flight(),
-        }
-        let Some(payload) = packet.payload else {
-            return;
-        };
-        let payload_start = packet_start.saturating_add(bytes.len().saturating_sub(payload.len()));
-        let completed_on = &mut self.completed_on;
-        reassembler.push(
-            packet.payload_unit_start_indicator,
-            payload,
-            &mut |completed, section_bytes| {
-                // Why before the section is read: a section that fails to read
-                // still fills the reassembler, which must be drained all the
-                // same.
-                if let Completed::Reassembled(_) = completed {
-                    *completed_on = Some(pid);
-                }
-                let section = match Section::read(section_bytes) {
-                    Ok(section) => section,
-                    Err(error) => {
-                        pending
-                            .push_back(Pending::Ready(Event::Error(Error::Section { pid, error })));
-                        return;
-                    }
-                };
-                if let Some(program_map_pids) = program_map_pids.as_deref_mut()
-                    && let Ok(table) = ProgramAssociationSection::try_from(&section)
-                {
-                    for program in table.programs {
-                        // Why skip the PAT, CAT and null PIDs: a broken PAT can
-                        // name them, and the PAT and CAT are reassembled
-                        // anyway while null packets carry stuffing, not
-                        // sections.
-                        if let Ok(Program::ProgramMap {
-                            program_map_pid, ..
-                        }) = program
-                            && ![Pid::PAT, Pid::CAT, Pid::NULL].contains(&program_map_pid)
-                        {
-                            named_new_pid |= program_map_pids.insert(program_map_pid);
-                        }
-                    }
-                }
-                let header_length = if section.syntax.is_some() {
-                    PREFIX_LENGTH.saturating_add(SYNTAX_LENGTH)
+        let payload_start = packet.payload.map_or(packet_start, |payload| {
+            packet_start.saturating_add(bytes.len().saturating_sub(payload.len()))
+        });
+        match pid {
+            Pid::PAT => {
+                // Why not keep the PAT's reassembler in the map while it
+                // pushes: the program maps a PAT names are added to the map
+                // as its sections are read. Putting it back with insert on the
+                // key already there allocates nothing.
+                let mut reassembler = mem::replace(
+                    self.reassemblers
+                        .entry(pid)
+                        .or_insert_with(SectionReassembler::new),
+                    SectionReassembler::new(),
+                );
+                reassemble(
+                    &mut reassembler,
+                    Some(&mut self.reassemblers),
+                    &mut self.completed_on,
+                    verdict,
+                    &packet,
+                    payload_start,
+                    pending,
+                );
+                self.reassemblers.insert(pid, reassembler);
+            }
+            _ => {
+                let reassembler = if pid == Pid::CAT {
+                    Some(
+                        self.reassemblers
+                            .entry(pid)
+                            .or_insert_with(SectionReassembler::new),
+                    )
                 } else {
-                    PREFIX_LENGTH
+                    self.reassemblers.get_mut(&pid)
                 };
-                let body = |section_start: usize| {
-                    let start = section_start.saturating_add(header_length);
-                    start..start.saturating_add(section.body.len())
-                };
-                pending.push_back(Pending::Section {
-                    pid,
-                    body: match completed {
-                        Completed::InPayload(start) => {
-                            Lent::Packet(body(payload_start.saturating_add(start)))
-                        }
-                        Completed::Reassembled(start) => Lent::Reassembled(body(start)),
-                    },
-                    section: Section {
-                        table_id: section.table_id,
-                        private_indicator: section.private_indicator,
-                        reserved_before_section_length: section.reserved_before_section_length,
-                        syntax: section.syntax,
-                        body: &[],
-                    },
-                });
-            },
-        );
-        if named_new_pid {
-            for &program_map_pid in &self.program_map_pids {
-                self.reassemblers
-                    .entry(program_map_pid)
-                    .or_insert_with(SectionReassembler::new);
+                if let Some(reassembler) = reassembler {
+                    reassemble(
+                        reassembler,
+                        None,
+                        &mut self.completed_on,
+                        verdict,
+                        &packet,
+                        payload_start,
+                        pending,
+                    );
+                }
             }
         }
     }
+}
+
+/// Feeds a packet's payload, which starts at `payload_start` in the framer's
+/// buffer, to the reassembler of its PID, and queues the sections it
+/// completes
+///
+/// With `program_maps`, the packet is on the PAT PID, and each program map
+/// its sections name gains a reassembler there.
+fn reassemble(
+    reassembler: &mut SectionReassembler,
+    mut program_maps: Option<&mut BTreeMap<Pid, SectionReassembler>>,
+    completed_on: &mut Option<Pid>,
+    verdict: Verdict,
+    packet: &TransportPacket<'_>,
+    payload_start: usize,
+    pending: &mut VecDeque<Pending>,
+) {
+    let pid = packet.pid;
+    match verdict {
+        Verdict::InOrder => {}
+        // Why not reassemble a duplicate: its payload repeats bytes already
+        // gathered, so the same section would complete twice.
+        Verdict::Duplicate => return,
+        // Why drop the section in flight, on a packet without payload too:
+        // after lost bytes or a splice, the bytes gathered and those that
+        // follow belong to different sections.
+        Verdict::Broken { .. } | Verdict::Excused => reassembler.discard_in_flight(),
+    }
+    let Some(payload) = packet.payload else {
+        return;
+    };
+    reassembler.push(
+        packet.payload_unit_start_indicator,
+        payload,
+        &mut |completed, section_bytes| {
+            // Why before the section is read: a section that fails to read
+            // still fills the reassembler, which must be drained all the
+            // same.
+            if let Completed::Reassembled(_) = completed {
+                *completed_on = Some(pid);
+            }
+            let section = match Section::read(section_bytes) {
+                Ok(section) => section,
+                Err(error) => {
+                    pending.push_back(Pending::Ready(Event::Error(Error::Section { pid, error })));
+                    return;
+                }
+            };
+            if let Some(program_maps) = program_maps.as_deref_mut()
+                && let Ok(table) = ProgramAssociationSection::try_from(&section)
+            {
+                for program in table.programs {
+                    // Why skip the PAT, CAT and null PIDs: a broken PAT can
+                    // name them, and the PAT and CAT are reassembled anyway
+                    // while null packets carry stuffing, not sections.
+                    if let Ok(Program::ProgramMap {
+                        program_map_pid, ..
+                    }) = program
+                        && ![Pid::PAT, Pid::CAT, Pid::NULL].contains(&program_map_pid)
+                    {
+                        program_maps
+                            .entry(program_map_pid)
+                            .or_insert_with(SectionReassembler::new);
+                    }
+                }
+            }
+            let header_length = if section.syntax.is_some() {
+                PREFIX_LENGTH.saturating_add(SYNTAX_LENGTH)
+            } else {
+                PREFIX_LENGTH
+            };
+            let body = |section_start: usize| {
+                let start = section_start.saturating_add(header_length);
+                start..start.saturating_add(section.body.len())
+            };
+            pending.push_back(Pending::Section {
+                pid,
+                body: match completed {
+                    Completed::InPayload(start) => {
+                        Lent::Packet(body(payload_start.saturating_add(start)))
+                    }
+                    Completed::Reassembled(start) => Lent::Reassembled(body(start)),
+                },
+                section: Section {
+                    table_id: section.table_id,
+                    private_indicator: section.private_indicator,
+                    reserved_before_section_length: section.reserved_before_section_length,
+                    syntax: section.syntax,
+                    body: &[],
+                },
+            });
+        },
+    );
 }
 
 #[cfg(test)]

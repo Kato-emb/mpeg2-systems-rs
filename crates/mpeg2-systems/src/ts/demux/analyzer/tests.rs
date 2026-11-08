@@ -73,15 +73,10 @@ fn a_pat_across_packets_names_its_program_maps_and_is_drained_once_polled() {
     demuxer.handle_input(&stream);
     while demuxer.poll_event().is_some() {}
     let analyzer = &demuxer.analyzer;
-    let learned: Vec<u16> = analyzer
-        .program_map_pids
-        .iter()
-        .map(|pid| pid.get())
-        .collect();
     let followed: Vec<u16> = analyzer.reassemblers.keys().map(|pid| pid.get()).collect();
     let pat = analyzer.reassemblers.get(&Pid::PAT).unwrap();
     assert_eq!(
-        (learned, followed, pat.buffer_len()),
-        (pids.clone(), [&[0x0000][..], &pids].concat(), 0)
+        (followed, pat.buffer_len()),
+        ([&[0x0000][..], &pids].concat(), 0)
     );
 }
