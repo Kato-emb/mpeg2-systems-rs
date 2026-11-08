@@ -360,6 +360,15 @@ fn observe_search(bytes: &[u8]) -> Search {
 
 /// Reads the pack header `bytes` start with, if they hold enough to tell
 fn observe_pack(bytes: &[u8]) -> Option<Result<(PackHeader, usize), Error>> {
+    // Why not wait for the length of an ISO/IEC 13818-1 pack header first:
+    // the bits after pack_start_code tell another kind of pack, such as an
+    // ISO/IEC 11172-1 one, whose header is shorter, so it would be held
+    // back, and cut short at the end of input, for bytes it does not have.
+    let marker = *bytes.get(PACK_START_CODE.len())?;
+    if marker >> 6 != 0b01 {
+        let error = PackHeader::read(bytes.get(..=PACK_START_CODE.len())?).err()?;
+        return Some(Err(Error::PackHeader { error }));
+    }
     let stuffing = bytes.get(PACK_HEADER_LENGTH.saturating_sub(1))? & 0x07;
     let length = PACK_HEADER_LENGTH.saturating_add(usize::from(stuffing));
     let header = bytes.get(..length)?;
@@ -373,7 +382,16 @@ fn observe_pack(bytes: &[u8]) -> Option<Result<(PackHeader, usize), Error>> {
 /// Classifies the front of the input while synchronized
 fn observe_synced(bytes: &[u8]) -> Synced {
     let Some(&[first, second, third, stream_id]) = bytes.first_chunk::<4>() else {
-        return Synced::NeedMoreData;
+        // Why wait only for bytes that can begin a start code: others are
+        // unframable however many follow, and the end of input would report
+        // them as an element cut short.
+        return if START_CODE_PREFIX
+            .starts_with(bytes.get(..START_CODE_PREFIX.len()).unwrap_or(bytes))
+        {
+            Synced::NeedMoreData
+        } else {
+            Synced::Unknown
+        };
     };
     if [first, second, third] != START_CODE_PREFIX {
         return Synced::Unknown;

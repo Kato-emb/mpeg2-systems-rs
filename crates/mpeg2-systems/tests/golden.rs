@@ -117,27 +117,40 @@ mod program_stream {
         format!("{} bytes [{}{ellipsis}]", bytes.len(), shown.join(" "))
     }
 
-    /// The event as `Debug` prints it, but lent bytes and a PES payload as
-    /// their length and leading bytes, so a snapshot stays a readable event
-    /// list
+    /// The kind of the event, an error by its variants, and the bytes passed
+    /// over or cut short by their length and leading bytes
+    ///
+    /// The elements read are not shown: what they hold is checked against
+    /// the stream FFmpeg wrote, not pinned here.
     fn describe(event: &Event<'_>) -> String {
         match event {
             Event::Unsynchronized { bytes } => format!("Unsynchronized {{ {} }}", preview(bytes)),
             Event::Unframable { bytes } => format!("Unframable {{ {} }}", preview(bytes)),
             Event::Truncated { bytes } => format!("Truncated {{ {} }}", preview(bytes)),
-            Event::PesPacket(packet) => format!(
-                "PesPacket {{ stream_id: {:?}, optional_header: {:?}, payload: {} }}",
-                packet.stream_id,
-                packet.optional_header,
-                preview(packet.payload)
-            ),
-            other @ (Event::SyncAcquired
-            | Event::PackHeader(_)
-            | Event::SystemHeader(_)
-            | Event::ProgramStreamMap(_)
-            | Event::ProgramEnd
-            | Event::Error(_)
-            | _) => format!("{other:?}"),
+            Event::Error(error) => {
+                let variant = |debug: String| -> String {
+                    debug
+                        .split([' ', '(', '{'])
+                        .next()
+                        .unwrap_or_default()
+                        .to_owned()
+                };
+                let inner = core::error::Error::source(error)
+                    .map(|source| format!("{source:?}"))
+                    .unwrap_or_default();
+                format!(
+                    "Error({} {{ {} }})",
+                    variant(format!("{error:?}")),
+                    variant(inner)
+                )
+            }
+            Event::SyncAcquired => "SyncAcquired".to_owned(),
+            Event::PackHeader(_) => "PackHeader".to_owned(),
+            Event::SystemHeader(_) => "SystemHeader".to_owned(),
+            Event::ProgramStreamMap(_) => "ProgramStreamMap".to_owned(),
+            Event::PesPacket(_) => "PesPacket".to_owned(),
+            Event::ProgramEnd => "ProgramEnd".to_owned(),
+            other => format!("{other:?}"),
         }
     }
 

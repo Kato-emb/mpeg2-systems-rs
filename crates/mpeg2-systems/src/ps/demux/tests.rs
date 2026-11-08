@@ -564,3 +564,58 @@ fn reports_why_a_pes_packet_that_does_not_read_was_passed_over() {
         ]
     );
 }
+
+#[test]
+fn bytes_that_cannot_begin_a_start_code_are_unframable_without_waiting_for_four() {
+    let pack_bytes = pack_header_bytes(&[]);
+    for tail in [&[0xFF][..], &[0xFF, 0x12, 0x34]] {
+        let mut demuxer = Demuxer::new();
+        let mut events = events_of(&mut demuxer, &concat(&[&pack_bytes, tail]));
+        demuxer.finish();
+        events.extend(drained(&mut demuxer));
+        assert_eq!(
+            events,
+            [acquired(), pack(&pack_bytes), unframable(tail)],
+            "{tail:02x?}"
+        );
+    }
+}
+
+#[test]
+fn the_start_of_a_start_code_left_at_the_end_is_truncated() {
+    let pack_bytes = pack_header_bytes(&[]);
+    for tail in [&[0x00][..], &[0x00, 0x00], &[0x00, 0x00, 0x01]] {
+        let mut demuxer = Demuxer::new();
+        let mut events = events_of(&mut demuxer, &concat(&[&pack_bytes, tail]));
+        demuxer.finish();
+        events.extend(drained(&mut demuxer));
+        assert_eq!(
+            events,
+            [acquired(), pack(&pack_bytes), truncated(tail)],
+            "{tail:02x?}"
+        );
+    }
+}
+
+#[test]
+fn an_iso_11172_pack_is_reported_without_waiting_for_the_length_of_a_13818_pack() {
+    let pack_bytes = pack_header_bytes(&[]);
+    let iso_11172 = [
+        0x00, 0x00, 0x01, 0xBA, 0x21, 0x00, 0x01, 0x00, 0x01, 0x80, 0x00, 0x01,
+    ];
+    let mut demuxer = Demuxer::new();
+    let mut events = events_of(&mut demuxer, &concat(&[&pack_bytes, &iso_11172]));
+    demuxer.finish();
+    events.extend(drained(&mut demuxer));
+    assert_eq!(
+        events,
+        [
+            acquired(),
+            pack(&pack_bytes),
+            error(Error::PackHeader {
+                error: crate::ps::pack_header::Error::Iso11172Pack,
+            }),
+            unframable(&iso_11172),
+        ]
+    );
+}
