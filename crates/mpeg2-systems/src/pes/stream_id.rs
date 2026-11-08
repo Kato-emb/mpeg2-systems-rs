@@ -11,7 +11,7 @@
 /// [`is_video`](Self::is_video) test.
 #[doc(alias = "stream_id")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StreamId(u8);
+pub struct StreamId(pub(crate) u8);
 
 impl StreamId {
     /// `program_stream_map`
