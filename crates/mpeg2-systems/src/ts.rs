@@ -2,6 +2,8 @@
 
 pub mod adaptation_field;
 pub mod continuity_counter;
+#[cfg(feature = "alloc")]
+pub mod demux;
 pub mod packet;
 pub mod pid;
 

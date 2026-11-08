@@ -12,14 +12,14 @@ use crate::field::{self, FieldReader, TwoBitFieldOutOfRange};
 use crate::field::{FieldWriter, write_or_truncate};
 
 /// Bytes in a Transport Packet
-const PACKET_LENGTH: usize = 188;
+pub(crate) const PACKET_LENGTH: usize = 188;
 
 /// Bytes in the header of a Transport Packet, `sync_byte` to `continuity_counter`
 #[cfg(feature = "alloc")]
 const HEADER_LENGTH: usize = 4;
 
 /// Value of `sync_byte`
-const SYNC_BYTE: u8 = 0x47;
+pub(crate) const SYNC_BYTE: u8 = 0x47;
 
 /// Failure to read or write a Transport Packet
 #[non_exhaustive]

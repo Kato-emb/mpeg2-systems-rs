@@ -1,0 +1,11 @@
+---
+source: crates/mpeg2-systems/tests/golden.rs
+expression: events_of(&stream)
+---
+[
+    "SyncAcquired { packet_size: Standard188 }",
+    "Error(SyncByteMissing { found: 0 })",
+    "Error(SyncLost)",
+    "Unsynchronized { bytes: 188 bytes [00 01 00 18 20 b2 8b 40 0e 80 74 59 45 a1 39 d0 ..] }",
+    "SyncAcquired { packet_size: Standard188 }",
+]

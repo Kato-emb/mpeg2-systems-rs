@@ -16,5 +16,8 @@ categories.workspace = true
 default = ["alloc"]
 alloc = []
 
+[dev-dependencies]
+insta = { version = "=1.48.0", default-features = false }
+
 [lints]
 workspace = true
