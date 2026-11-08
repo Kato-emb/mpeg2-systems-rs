@@ -81,7 +81,8 @@ impl<'input> ElementaryStreamLoop<'input> {
     ///
     /// # Errors
     ///
-    /// * [`Forbidden`](Error::Forbidden): a `stream_type` of 0x05, or an
+    /// * [`Forbidden`](Error::Forbidden): a `stream_type` carried in sections
+    ///   ([`StreamType::is_carried_in_sections`]), or an
     ///   `elementary_stream_id` that is not the `stream_id` of an elementary
     ///   stream: below 0xBD, 0xBE (`padding_stream`) or 0xFF
     ///   (`program_stream_directory`).
@@ -133,7 +134,7 @@ impl<'input> ElementaryStreamLoop<'input> {
         write_or_truncate(out, |out| {
             for stream in entries {
                 let stream = stream?;
-                if stream.stream_type == StreamType::ISO_IEC_13818_1_PRIVATE_SECTIONS {
+                if stream.stream_type.is_carried_in_sections() {
                     return Err(Error::Forbidden {
                         field: "stream_type",
                         value: u32::from(stream.stream_type.get()),

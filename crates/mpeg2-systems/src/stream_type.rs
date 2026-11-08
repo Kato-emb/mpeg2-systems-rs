@@ -160,10 +160,44 @@ impl StreamType {
     pub const fn is_user_private(self) -> bool {
         self.0 >= 0x80
     }
+
+    /// Returns whether Table 2-34 names the stream type as carried in sections
+    ///
+    /// These are 0x05, 0x13, 0x16, 0x2C, 0x2F and 0x30.
+    #[must_use]
+    pub const fn is_carried_in_sections(self) -> bool {
+        matches!(
+            self,
+            Self::ISO_IEC_13818_1_PRIVATE_SECTIONS
+                | Self::ISO_IEC_14496_1_IN_SECTIONS
+                | Self::METADATA_IN_METADATA_SECTIONS
+                | Self::GREEN_ACCESS_UNITS_IN_SECTIONS
+                | Self::QUALITY_ACCESS_UNITS_IN_SECTIONS
+                | Self::MEDIA_ORCHESTRATION_ACCESS_UNITS_IN_SECTIONS
+        )
+    }
 }
 
 impl From<u8> for StreamType {
     fn from(value: u8) -> Self {
         Self(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StreamType;
+
+    #[test]
+    fn only_the_types_table_2_34_names_as_in_sections_are_carried_in_sections() {
+        let carried_in_sections = |value: u8| StreamType::from(value).is_carried_in_sections();
+
+        assert_eq!(
+            (
+                [0x05, 0x13, 0x16, 0x2c, 0x2f, 0x30].map(carried_in_sections),
+                [0x02, 0x0a, 0x14, 0x15].map(carried_in_sections),
+            ),
+            ([true; 6], [false; 4])
+        );
     }
 }

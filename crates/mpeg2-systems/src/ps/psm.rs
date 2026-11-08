@@ -761,6 +761,40 @@ mod tests {
 
     #[cfg(feature = "alloc")]
     #[test]
+    fn a_stream_type_carried_in_sections_is_not_written_in_a_map() {
+        let video = ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, StreamId::from(0xe0));
+        let section_types = [0x05, 0x13, 0x16, 0x2c, 0x2f, 0x30];
+        let forbidden = |stream_type: u8| {
+            Err(Error::Forbidden {
+                field: "stream_type",
+                value: u32::from(stream_type),
+            })
+        };
+        let entries = section_types
+            .map(|stream_type| [0x02, 0xe0, 0x00, 0x00, stream_type, 0xc0, 0x00, 0x00]);
+        let mut written = Vec::new();
+
+        assert_eq!(
+            section_types.map(|stream_type| {
+                let stream =
+                    ElementaryStream::new(StreamType::from(stream_type), StreamId::from(0xc0));
+                ElementaryStreamLoop::write_from([video, stream], &mut written)
+            }),
+            section_types.map(forbidden)
+        );
+        assert_eq!(
+            entries.each_ref().map(|entries| {
+                let mut psm = ProgramStreamMap::new(version(0));
+                psm.elementary_streams = ElementaryStreamLoop::from(entries.as_slice());
+                psm.write(&mut written)
+            }),
+            section_types.map(forbidden)
+        );
+        assert_eq!(written, []);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
     fn a_map_is_written_only_with_values_the_specification_allows() {
         let map = |single_extension_stream_flag, elementary_streams: &'static [u8]| {
             let mut psm = ProgramStreamMap::new(version(0));
