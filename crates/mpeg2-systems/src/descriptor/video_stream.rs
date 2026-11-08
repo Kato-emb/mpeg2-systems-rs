@@ -122,12 +122,13 @@ impl TryFrom<u8> for ChromaFormat {
 /// Profile and level of a video stream
 ///
 /// `profile_and_level_indication`, coded as in Rec. ITU-T H.262 | ISO/IEC
-/// 13818-2 §8
+/// 13818-2 §8, Tables 8-1 to 8-4
 ///
 /// The first bit is the escape bit, then 3 bits of profile and 4 of level.
 /// With the escape bit `'0'`, the profiles `'001'` (High) to `'101'`
-/// (Simple) and the levels `'0100'` (High), `'0110'` (High 1440), `'1000'`
-/// (Main) and `'1010'` (Low) are assigned; with it `'1'`, 0x82 and 0x85 (4:2:2 profile at High and Main Level) and 0x8A,
+/// (Simple) and the levels `'0010'` (`HighP`), `'0100'` (High), `'0110'`
+/// (High 1440), `'1000'` (Main) and `'1010'` (Low) are assigned; with it
+/// `'1'`, 0x82 and 0x85 (4:2:2 profile at High and Main Level) and 0x8A,
 /// 0x8B, 0x8D and 0x8E (Multi-view profile at High, High 1440, Main and Low
 /// Level). Every other value is reserved, which
 /// [`is_reserved`](Self::is_reserved) tests.
@@ -181,7 +182,7 @@ impl ProfileAndLevelIndication {
             !matches!(self.0, 0x82 | 0x85 | 0x8a | 0x8b | 0x8d | 0x8e)
         } else {
             !matches!(self.profile(), 0b001..=0b101)
-                || !matches!(self.level(), 0b0100 | 0b0110 | 0b1000 | 0b1010)
+                || !matches!(self.level(), 0b0010 | 0b0100 | 0b0110 | 0b1000 | 0b1010)
         }
     }
 }
@@ -541,6 +542,7 @@ mod tests {
                 reserved_indication(0x45),
                 reserved_indication(0x80),
                 reserved_indication(0x8f),
+                reserved_indication(0x42),
                 reserved_indication(0x85),
             ]
             .map(|descriptor| descriptor.write(&mut written)),
@@ -590,8 +592,12 @@ mod tests {
                     value: 0x8f
                 }),
                 Ok(()),
+                Ok(()),
             ]
         );
-        assert_eq!(written, [0x02, 0x03, 0x22, 0x85, 0x5f]);
+        assert_eq!(
+            written,
+            [0x02, 0x03, 0x22, 0x42, 0x5f, 0x02, 0x03, 0x22, 0x85, 0x5f]
+        );
     }
 }
