@@ -1,7 +1,7 @@
 [package]
 name = "mpeg2-systems"
 version = "0.0.0"
-description = "Sans-IO reading and writing of MPEG-2 Systems streams (ISO/IEC 13818-1)"
+description = "Sans-IO reading and writing of MPEG-2 Systems streams (ISO/IEC 13818-1): the Transport Stream and the Program Stream"
 publish = false
 edition.workspace = true
 rust-version.workspace = true

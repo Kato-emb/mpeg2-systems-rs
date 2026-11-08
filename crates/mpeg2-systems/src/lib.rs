@@ -1,5 +1,5 @@
 //! Sans-IO reading and writing of MPEG-2 Systems streams (ISO/IEC 13818-1):
-//! the Transport Stream and the Program Stream.
+//! the Transport Stream and the Program Stream
 //!
 //! No type does I/O. A reader is handed the bytes the caller has read, and a
 //! writer appends bytes to a buffer the caller owns, so the crate is `no_std`
@@ -169,28 +169,40 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! Reading the PAT out of the first Transport Packet of a stream with the
-//! syntax layer alone, which allocates nothing:
+//! Reading the PAT out of a stream with the syntax layer alone, which
+//! allocates nothing:
 //!
 //! ```
+//! use mpeg2_systems::field::FieldReader;
 //! use mpeg2_systems::psi::pat::{Program, ProgramAssociationSection};
 //! use mpeg2_systems::psi::section::Section;
+//! use mpeg2_systems::ts::Pid;
 //! use mpeg2_systems::ts::packet::TransportPacket;
 //!
 //! let stream = std::fs::read("tests/fixtures/188.ts")?;
-//! let packet = TransportPacket::read(&stream[..188])?;
-//! assert!(packet.payload_unit_start_indicator);
-//! // Skip the pointer_field and the bytes it counts, then cut the section to
-//! // the 3 bytes up to section_length and the section_length after them
-//! let payload = packet.payload.ok_or("no payload")?;
-//! let pointer_field = usize::from(payload[0]);
-//! let bytes = &payload[1 + pointer_field..];
-//! let section_length = usize::from(u16::from_be_bytes([bytes[1], bytes[2]]) & 0x0fff);
-//! let section = Section::read(&bytes[..3 + section_length])?;
+//! // The first Transport Packet that starts a section on the PID of the PAT
+//! let packet = stream
+//!     .chunks(188)
+//!     .filter_map(|bytes| TransportPacket::read(bytes).ok())
+//!     .find(|packet| packet.pid == Pid::PAT && packet.payload_unit_start_indicator)
+//!     .ok_or("no PAT")?;
+//! // Skip the pointer_field and the bytes it counts
+//! let (&pointer_field, rest) = packet.payload.and_then(<[u8]>::split_first).ok_or("no payload")?;
+//! let bytes = rest.get(usize::from(pointer_field)..).ok_or("pointer_field past the payload")?;
+//! // Cut the section to its length: section_length counts the bytes after it
+//! let mut reader = FieldReader::new(bytes);
+//! let _table_id = reader.read_u8::<8>()?;
+//! let _flags_and_reserved = reader.read_u8::<4>()?;
+//! let section_length = usize::from(reader.read_u16::<12>()?);
+//! let section = Section::read(bytes.get(..3 + section_length).ok_or("section cut short")?)?;
+//! // Read the PAT from the section
 //! let pat = ProgramAssociationSection::try_from(&section)?;
-//! let programs: Vec<Program> = pat.programs.iter().collect::<Result<_, _>>()?;
 //! assert_eq!(pat.transport_stream_id, 1);
-//! assert_eq!(programs.len(), 1);
+//! for program in pat.programs.iter() {
+//!     if let Program::ProgramMap { program_number, program_map_pid } = program? {
+//!         assert_eq!((program_number.get(), program_map_pid), (1, Pid::try_from(0x1000)?));
+//!     }
+//! }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
