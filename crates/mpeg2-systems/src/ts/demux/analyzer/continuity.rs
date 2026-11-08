@@ -5,7 +5,7 @@ use alloc::collections::BTreeMap;
 use crate::ts::packet::TransportPacket;
 use crate::ts::{ContinuityCounter, Pid};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy)]
 struct PidContinuity {
     counter: ContinuityCounter,
     duplicate_tolerated: bool,
@@ -44,7 +44,7 @@ pub(super) enum Verdict {
 }
 
 /// The last `continuity_counter` of each PID since the last reset
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub(super) struct ContinuityTracker {
     last: BTreeMap<Pid, PidContinuity>,
 }

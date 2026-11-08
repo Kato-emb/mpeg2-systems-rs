@@ -1,20 +1,19 @@
 //! Demuxing a Transport Stream: input of any length in, events out
 
 use alloc::collections::VecDeque;
-use core::fmt;
 use core::ops::Range;
 
-use crate::psi::cat::{self, CaSection};
-use crate::psi::pat::{self, ProgramAssociationSection};
-use crate::psi::pmt::{self, TsProgramMapSection};
-use crate::psi::section::{self, Section};
-use crate::time::ClockReference;
-use crate::ts::{ContinuityCounter, Pid, packet};
+use crate::pes::PesPacket;
+use crate::psi::section::Section;
+use crate::ts::Pid;
+use crate::ts::packet::TransportScramblingControl;
 
 mod analyzer;
+mod event;
 mod framer;
 
 use analyzer::PacketAnalyzer;
+pub use event::{Error, Event};
 pub use framer::sync::PacketSize;
 use framer::{Output, PacketFramer};
 
@@ -29,259 +28,39 @@ use framer::{Output, PacketFramer};
 /// config.packet_size = Some(PacketSize::Timestamped192);
 /// let demuxer = Demuxer::new(config);
 /// ```
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct DemuxerConfig {
     /// The packet size the stream is known to have, or `None` to detect it
     /// from the input (the default)
     pub packet_size: Option<PacketSize>,
+    /// The most bytes a PES packet may gather on one subscribed PID before it
+    /// is dropped as [`Error::PesBufferOverrun`] (4 MiB by default)
+    ///
+    /// The only limit the demuxer takes: a PES packet of a video elementary
+    /// stream in a Transport Stream may leave its length unspecified, so
+    /// nothing in the stream bounds it. A packet whose `PES_packet_length`
+    /// is all in hand is never dropped, though it be longer.
+    pub pes_buffer_limit: usize,
 }
 
-/// What a [`Demuxer`] observed in its input
-///
-/// An event borrows the bytes it carries from the demuxer, until the next call
-/// on the demuxer.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum Event<'a> {
-    /// The packet grid was found, and Transport Packets are cut off it from
-    /// here on
-    SyncAcquired {
-        /// The packet size the grid has
-        packet_size: PacketSize,
-    },
-    /// A program clock reference, the 27 MHz time a decoder locks its clock
-    /// to, found in a Transport Packet
-    ///
-    /// Reported for every packet that carries one, whichever PID the program
-    /// map names as `PCR_PID`, but not for a packet with
-    /// `transport_error_indicator` set. The demuxer does not recover a clock
-    /// from the values; that is up to the caller.
-    #[doc(alias = "PCR")]
-    ProgramClockReference {
-        /// The PID of the packet
-        pid: Pid,
-        /// The value found
-        program_clock_reference: ClockReference,
-    },
-    /// A section of a PAT, the first time each of its sections is seen at a
-    /// version
-    ///
-    /// Each section of the table comes as an event of its own; the demuxer
-    /// does not join them into one table, so a caller gathers the sections of
-    /// one `version_number` by `section_number` and `last_section_number`. A
-    /// section resent at the version last reported, and one with
-    /// `current_next_indicator` `'0'`, which announces the next version, are
-    /// not reported. The versions reported are remembered across
-    /// [`Error::SyncLost`] and [`Demuxer::finish`].
-    ///
-    /// The demuxer follows the program maps the PAT names: once every
-    /// section of a version is in, a program the version no longer names
-    /// stops being followed, and its PMT is reported again if it comes back,
-    /// even at the version last reported.
-    #[doc(alias = "PAT")]
-    ProgramAssociationSection(ProgramAssociationSection<'a>),
-    /// A section of a PMT, on a PID a PAT names for a program map, the first
-    /// time it is seen at a version
-    ///
-    /// Only the PMT of a program the PAT names on that PID is typed; one of
-    /// another `program_number` comes as an [`Event::Section`]. Reported by
-    /// version per program, as
-    /// [`Event::ProgramAssociationSection`] is. No packet after the one
-    /// that completes the section is analyzed before this event is polled.
-    #[doc(alias = "PMT")]
-    TsProgramMapSection {
-        /// The PID the section was carried on
-        pid: Pid,
-        /// The section, borrowed from the demuxer
-        section: TsProgramMapSection<'a>,
-    },
-    /// A section of the CAT, the first time each of its sections is seen at
-    /// a version
-    ///
-    /// Reported by version, as [`Event::ProgramAssociationSection`] is.
-    #[doc(alias = "CAT")]
-    CaSection(CaSection<'a>),
-    /// A section of another table, reassembled on a PID that carries PSI,
-    /// its `CRC_32` verified
-    ///
-    /// Sections are reassembled on the PAT and CAT PIDs, and on each PID a
-    /// PAT names for a program map; the PAT and CAT sections among them, and
-    /// the PMT sections of the programs the PAT names, come as their own
-    /// events. A section with `section_syntax_indicator`
-    /// `'0'` has no `CRC_32` and is reported as read. The demuxer reports
-    /// every such section, a repeated one included; reading a table from it
-    /// is up to the caller.
-    Section {
-        /// The PID the section was carried on
-        pid: Pid,
-        /// The section, borrowed from the demuxer
-        section: Section<'a>,
-    },
-    /// Input that was not cut into a Transport Packet
-    ///
-    /// Reported for the bytes before the grid is found, those the search
-    /// walks past after [`Error::SyncLost`], and those [`Demuxer::finish`]
-    /// leaves that fill no packet. A long run arrives as several events, so
-    /// the bytes the demuxer holds stay bounded. The bytes
-    /// of these events and of the packets cut add up to every byte handed to
-    /// [`Demuxer::handle_input`].
-    Unsynchronized {
-        /// The bytes, in input order
-        bytes: &'a [u8],
-    },
-    /// The input broke a rule of the Transport Stream; demuxing goes on
-    Error(Error),
-}
+/// [`DemuxerConfig::pes_buffer_limit`] of the default settings
+const DEFAULT_PES_BUFFER_LIMIT: usize = 4 * 1024 * 1024;
 
-/// Failure of the Transport Stream a [`Demuxer`] reads, reported as an
-/// [`Event::Error`]
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Error {
-    /// One packet on the grid did not start with `sync_byte` 0x47
-    ///
-    /// The packet's bytes are passed over and the grid is kept.
-    SyncByteMissing {
-        /// The byte found where `sync_byte` was expected
-        found: u8,
-    },
-    /// Two packets in a row did not start with `sync_byte` 0x47, and the grid
-    /// was dropped
-    ///
-    /// The search for a grid starts again at the second of them; what it
-    /// walks past comes as [`Event::Unsynchronized`].
-    SyncLost,
-    /// A Transport Packet on the grid could not be read
-    ///
-    /// Nothing else is taken from the packet.
-    Packet {
-        /// How the packet failed
-        error: packet::Error,
-    },
-    /// A Transport Packet has `transport_error_indicator` set
-    ///
-    /// Nothing else is taken from the packet: its counter, PCR and payload
-    /// are passed over.
-    TransportErrorIndicator {
-        /// The PID of the packet
-        pid: Pid,
-    },
-    /// A Transport Packet's `continuity_counter` is not the one expected
-    ///
-    /// A section being reassembled on the PID is dropped. One repeat of the
-    /// previous counter is a duplicate, which ISO/IEC 13818-1 §2.4.3.3
-    /// allows; a second repeat is reported here.
-    Discontinuity {
-        /// The PID of the packet
-        pid: Pid,
-        /// The counter a continuous stream would carry
-        expected: ContinuityCounter,
-        /// The counter found
-        found: ContinuityCounter,
-    },
-    /// A section reassembled on a PID that carries PSI could not be read,
-    /// its `CRC_32` failing included
-    ///
-    /// The bytes of the section are dropped.
-    Section {
-        /// The PID the section was carried on
-        pid: Pid,
-        /// How the section failed
-        error: section::Error,
-    },
-    /// A section on the PAT PID with the PAT's `table_id` is not a PAT
-    /// section
-    ///
-    /// The section is dropped.
-    ProgramAssociationSection {
-        /// How the section failed
-        error: pat::Error,
-    },
-    /// A section with the PMT's `table_id`, on a PID a PAT names for a
-    /// program map, is not a PMT section
-    ///
-    /// The section is dropped.
-    TsProgramMapSection {
-        /// The PID the section was carried on
-        pid: Pid,
-        /// How the section failed
-        error: pmt::Error,
-    },
-    /// A section on the CAT PID with the CAT's `table_id` is not a CAT
-    /// section
-    ///
-    /// The section is dropped.
-    CaSection {
-        /// How the section failed
-        error: cat::Error,
-    },
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SyncByteMissing { found } => {
-                write!(formatter, "sync_byte {found:#04x} is not 0x47")
-            }
-            Self::SyncLost => write!(
-                formatter,
-                "sync_byte is missing from two transport packets in a row"
-            ),
-            Self::Packet { .. } => write!(formatter, "a transport packet could not be read"),
-            Self::TransportErrorIndicator { pid } => write!(
-                formatter,
-                "transport_error_indicator is set in a transport packet of PID {:#06x}",
-                pid.get()
-            ),
-            Self::Discontinuity {
-                pid,
-                expected,
-                found,
-            } => write!(
-                formatter,
-                "continuity_counter {} of PID {:#06x} is not the expected {}",
-                found.get(),
-                pid.get(),
-                expected.get()
-            ),
-            Self::Section { pid, .. } => write!(
-                formatter,
-                "a section on PID {:#06x} could not be read",
-                pid.get()
-            ),
-            Self::ProgramAssociationSection { .. } => {
-                write!(formatter, "a program association section could not be read")
-            }
-            Self::TsProgramMapSection { pid, .. } => write!(
-                formatter,
-                "a TS program map section on PID {:#06x} could not be read",
-                pid.get()
-            ),
-            Self::CaSection { .. } => write!(formatter, "a CA section could not be read"),
-        }
-    }
-}
-
-impl core::error::Error for Error {
-    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
-        match self {
-            Self::Packet { error } => Some(error),
-            Self::Section { error, .. } => Some(error),
-            Self::ProgramAssociationSection { error } => Some(error),
-            Self::TsProgramMapSection { error, .. } => Some(error),
-            Self::CaSection { error } => Some(error),
-            Self::SyncByteMissing { .. }
-            | Self::SyncLost
-            | Self::TransportErrorIndicator { .. }
-            | Self::Discontinuity { .. } => None,
+impl Default for DemuxerConfig {
+    // Why not derive Default: it would set pes_buffer_limit to 0, under which
+    // no PES packet longer than one Transport Packet could be reassembled.
+    fn default() -> Self {
+        Self {
+            packet_size: None,
+            pes_buffer_limit: DEFAULT_PES_BUFFER_LIMIT,
         }
     }
 }
 
 /// An event queued for [`Demuxer::poll_event`], holding the ranges of the
 /// bytes it lends rather than the bytes
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 enum Pending {
     /// An event that lends nothing
     Ready(Event<'static>),
@@ -293,15 +72,36 @@ enum Pending {
         section: Section<'static>,
         body: Lent,
     },
+    /// The bytes of a PES packet that ended, read when polled
+    PesPacket {
+        pid: Pid,
+        bytes: Lent,
+        start_offset: u64,
+    },
+    /// A range of the PES reassembly buffer of `pid`: a PES packet whose
+    /// Transport Packets are scrambled
+    ScrambledPesPacket {
+        pid: Pid,
+        bytes: Range<usize>,
+        transport_scrambling_control: TransportScramblingControl,
+        start_offset: u64,
+    },
+    /// A range of the PES reassembly buffer of `pid`: a PES packet cut short
+    TruncatedPesPacket {
+        pid: Pid,
+        bytes: Range<usize>,
+        start_offset: u64,
+    },
 }
 
-/// Where the body of a queued section is
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Where the bytes a queued section or PES packet lends are
+#[derive(Debug, Clone)]
 enum Lent {
-    /// A range of the framer's buffer: the section lay inside one packet
+    /// A range of the framer's buffer: the section or PES packet lay inside
+    /// one packet
     Packet(Range<usize>),
-    /// A range of the reassembly buffer of the section's PID: the section
-    /// crossed packets
+    /// A range of the section, or PES, reassembly buffer of the PID: the
+    /// section or PES packet crossed packets
     Reassembled(Range<usize>),
 }
 
@@ -312,8 +112,9 @@ enum Lent {
 /// Packets off it, and reports each byte it could not cut. From each packet it
 /// reports a broken `continuity_counter`, a PCR, and the PSI sections it
 /// reassembles: those of the PAT, the PMTs the PAT names and the CAT typed,
-/// each at a version not reported before. Handing input over never fails: a broken stream is reported
-/// as [`Event::Error`] and demuxing goes on. The demuxer does no I/O; reading
+/// each at a version not reported before; and the PES packets of the PIDs
+/// [`Demuxer::subscribe_pes`] names. Handing input over never fails: a broken
+/// stream is reported as [`Event::Error`] and demuxing goes on. The demuxer does no I/O; reading
 /// the stream is up to the caller.
 ///
 /// ```
@@ -359,7 +160,7 @@ enum Lent {
 /// let acquired = Event::SyncAcquired { packet_size: PacketSize::Standard188 };
 /// assert_eq!(others, [format!("{acquired:?}")]);
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct Demuxer {
     framer: PacketFramer,
     analyzer: PacketAnalyzer,
@@ -372,9 +173,76 @@ impl Demuxer {
     pub const fn new(config: DemuxerConfig) -> Self {
         Self {
             framer: PacketFramer::new(config.packet_size),
-            analyzer: PacketAnalyzer::new(),
+            analyzer: PacketAnalyzer::new(config.pes_buffer_limit),
             pending: VecDeque::new(),
         }
+    }
+
+    /// Reassembles the PES packets of `pid` from here on, reported as
+    /// [`Event::PesPacket`]
+    ///
+    /// Reassembly starts at the next packet of the PID with
+    /// `payload_unit_start_indicator` set. Subscribing a PID already
+    /// subscribed keeps the PES packet in flight. A subscription stays across
+    /// [`Error::SyncLost`] and [`Demuxer::finish`]. The demuxer does not
+    /// choose the PIDs to subscribe to; the elementary streams a
+    /// [`Event::TsProgramMapSection`] names are the usual choice, and
+    /// subscribing on its event takes the PES packets that follow it.
+    ///
+    /// ```
+    /// use mpeg2_systems::ts::Pid;
+    /// use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event};
+    ///
+    /// let stream = include_bytes!("../../tests/fixtures/188.ts");
+    /// let mut demuxer = Demuxer::new(DemuxerConfig::default());
+    /// let (mut video, mut audio) = (Vec::new(), Vec::new());
+    /// let mut take = |demuxer: &mut Demuxer| {
+    ///     while let Some(event) = demuxer.poll_event() {
+    ///         match event {
+    ///             // Subscribe to every elementary stream the program map names
+    ///             Event::TsProgramMapSection { section, .. } => {
+    ///                 let pids: Vec<Pid> = section
+    ///                     .elementary_streams
+    ///                     .iter()
+    ///                     .flatten()
+    ///                     .map(|stream| stream.elementary_pid)
+    ///                     .collect();
+    ///                 for pid in pids {
+    ///                     demuxer.subscribe_pes(pid);
+    ///                 }
+    ///             }
+    ///             Event::PesPacket { pid, packet, .. } if pid.get() == 0x100 => {
+    ///                 video.push(packet.payload.len());
+    ///             }
+    ///             Event::PesPacket { packet, .. } => audio.push(packet.payload.len()),
+    ///             _ => {}
+    ///         }
+    ///     }
+    /// };
+    ///
+    /// // Hand over the stream, then end it: the last video packet, of an
+    /// // unspecified length, ends there
+    /// demuxer.handle_input(stream);
+    /// take(&mut demuxer);
+    /// demuxer.finish();
+    /// take(&mut demuxer);
+    ///
+    /// assert_eq!(video, [1803, 1050, 716]);
+    /// assert_eq!(audio, [2925, 1881]);
+    /// ```
+    pub fn subscribe_pes(&mut self, pid: Pid) {
+        self.analyzer.subscribe_pes(pid);
+    }
+
+    /// Stops reassembling the PES packets of `pid`
+    ///
+    /// The PES packet in flight on the PID, and the events of the PID not
+    /// yet polled that [`Demuxer::subscribe_pes`] gave, are dropped without
+    /// a word. Unsubscribing a PID not subscribed does nothing. Subscribing
+    /// again starts at the next `payload_unit_start_indicator`, as a first
+    /// subscription does.
+    pub fn unsubscribe_pes(&mut self, pid: Pid) {
+        self.analyzer.unsubscribe_pes(pid, &mut self.pending);
     }
 
     /// Hands over the next bytes of the stream, cut anywhere
@@ -407,10 +275,14 @@ impl Demuxer {
             self.framer.compact();
             let pending = match self.framer.step() {
                 Output::NeedMoreData => return None,
-                Output::Packet { range, .. } => {
+                Output::Packet { range, offset } => {
                     let start = range.start;
-                    self.analyzer
-                        .analyze(self.framer.bytes(range), start, &mut self.pending);
+                    self.analyzer.analyze(
+                        self.framer.bytes(range),
+                        start,
+                        offset,
+                        &mut self.pending,
+                    );
                     continue;
                 }
                 // Why not keep the continuity history and the sections held:
@@ -422,7 +294,7 @@ impl Demuxer {
                     Pending::Ready(Event::Error(Error::SyncLost))
                 }
                 Output::EndOfInput => {
-                    self.analyzer.reset();
+                    self.analyzer.finish(&mut self.pending);
                     continue;
                 }
                 Output::SyncAcquired(packet_size) => {
@@ -455,6 +327,52 @@ impl Demuxer {
                     ..section
                 },
             ),
+            // Why read the PES packet when polled, not when it ends: the
+            // queue holds what it lends as a range, and the packet read
+            // borrows those bytes.
+            Pending::PesPacket {
+                pid,
+                bytes,
+                start_offset,
+            } => {
+                let bytes = match bytes {
+                    Lent::Packet(range) => self.framer.bytes(range),
+                    Lent::Reassembled(range) => self.analyzer.pes_bytes(pid, range),
+                };
+                PesPacket::read(bytes).map_or_else(
+                    |error| Event::UnreadablePesPacket {
+                        pid,
+                        bytes,
+                        error,
+                        start_offset,
+                    },
+                    |packet| Event::PesPacket {
+                        pid,
+                        packet,
+                        start_offset,
+                    },
+                )
+            }
+            Pending::ScrambledPesPacket {
+                pid,
+                bytes,
+                transport_scrambling_control,
+                start_offset,
+            } => Event::ScrambledPesPacket {
+                pid,
+                bytes: self.analyzer.pes_bytes(pid, bytes),
+                transport_scrambling_control,
+                start_offset,
+            },
+            Pending::TruncatedPesPacket {
+                pid,
+                bytes,
+                start_offset,
+            } => Event::TruncatedPesPacket {
+                pid,
+                bytes: self.analyzer.pes_bytes(pid, bytes),
+                start_offset,
+            },
         };
         Some(event)
     }
@@ -463,12 +381,15 @@ impl Demuxer {
     ///
     /// The events [`Demuxer::poll_event`] returns next include a last packet
     /// that lacks only the carrier bytes after it, and every other byte left
-    /// as [`Event::Unsynchronized`], so nothing is joined across the end. The
-    /// sections in flight and the `continuity_counter` history are dropped
-    /// at the end. Poll until `None` before handing over more input. The
-    /// packet size found, the PIDs learned from a PAT and the table versions
-    /// reported stay, so the same demuxer can then take a stream that goes
-    /// on.
+    /// as [`Event::Unsynchronized`], so nothing is joined across the end. A
+    /// PES packet in flight whose `PES_packet_length` is 0 ends there and is
+    /// reported as an [`Event::PesPacket`]; one that has not reached its
+    /// length comes as an [`Event::TruncatedPesPacket`]. The sections in
+    /// flight and the `continuity_counter` history are dropped at the end.
+    /// Poll until `None` before handing over more input. The packet size
+    /// found, the PIDs learned from a PAT, the table versions reported and
+    /// the PES subscriptions stay, so the same demuxer can then take a stream
+    /// that goes on.
     pub fn finish(&mut self) {
         self.framer.finish();
     }

@@ -7,7 +7,8 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use mpeg2_systems::ts::demux::Demuxer;
+use mpeg2_systems::ts::Pid;
+use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig};
 
 /// Length of the inputs the demuxer is measured on
 pub const INPUT_LENGTH: usize = 10 << 20;
@@ -28,6 +29,17 @@ pub const STREAMS: [(&str, &[u8]); 3] = [
         include_bytes!("../../crates/mpeg2-systems/tests/fixtures/204.ts"),
     ),
 ];
+
+/// Returns a demuxer that reassembles the PES packets of the video (PID
+/// 0x100) and the audio (PID 0x101) of [`STREAMS`]
+#[must_use]
+pub fn subscribed_demuxer() -> Demuxer {
+    let mut demuxer = Demuxer::new(DemuxerConfig::default());
+    for pid in [0x0100, 0x0101].map(Pid::try_from).into_iter().flatten() {
+        demuxer.subscribe_pes(pid);
+    }
+    demuxer
+}
 
 /// Hands `input` over in chunks of `chunk_length` and polls each chunk to the
 /// end, returning the number of events

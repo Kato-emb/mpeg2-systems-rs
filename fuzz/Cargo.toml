@@ -1,0 +1,90 @@
+[package]
+name = "mpeg2-systems-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Kept out of the workspace above: the targets need a nightly toolchain and
+# libFuzzer, neither of which the library itself takes on. Without this table
+# cargo walks up to the workspace manifest and refuses a package it does not
+# list.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+mpeg2-systems = { path = "../crates/mpeg2-systems" }
+libfuzzer-sys = "=0.4.13"
+arbitrary = { version = "=1.5.0", features = ["derive"] }
+
+[[bin]]
+name = "ts_demux"
+path = "fuzz_targets/ts_demux.rs"
+test = false
+doc = false
+bench = false
+
+# The workspace's table, which this package cannot inherit, as it stands
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unnameable_types = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+unused_lifetimes = "warn"
+redundant_lifetimes = "warn"
+unused_qualifications = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+non_ascii_idents = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+string_slice = "deny"
+panic_in_result_fn = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_precision_loss = "deny"
+cast_sign_loss = "deny"
+cast_lossless = "deny"
+checked_conversions = "deny"
+float_arithmetic = "deny"
+host_endian_bytes = "deny"
+little_endian_bytes = "deny"
+iter_over_hash_type = "deny"
+dbg_macro = "deny"
+inline_always = "deny"
+mod_module_files = "deny"
+min_ident_chars = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+exhaustive_structs = "deny"
+exhaustive_enums = "deny"
+wildcard_enum_match_arm = "deny"
+must_use_candidate = "warn"
+return_self_not_must_use = "warn"
+needless_pass_by_value = "warn"
+trivially_copy_pass_by_ref = "warn"
+large_types_passed_by_value = "warn"
+alloc_instead_of_core = "warn"
+tests_outside_test_module = "warn"
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+too_long_first_doc_paragraph = "warn"
+doc_markdown = "warn"
+doc_link_with_quotes = "warn"
+cargo_common_metadata = "warn"
+
+[lints.rustdoc]
+missing_crate_level_docs = "warn"
+unescaped_backticks = "warn"

@@ -1,0 +1,100 @@
+name: Fuzz
+
+# Each fuzz target for longer than a pull request can wait, on the nightly the
+# `fuzz` job of ci.yml pins, so the corpus grows past what a pull request's
+# run reaches. Daily, apart from the weekly checks of scheduled.yml, so that
+# the corpus keeps growing while coverage still does; the coverage report each
+# run leaves shows when it no longer does.
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # A failing input is kept for a week as an artifact of the run, to be shrunk
+  # into a unit test; it is never committed. The corpus carries over from one
+  # run to the next, and to the `fuzz` job of ci.yml, through the cache.
+  fuzz:
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [ts_demux]
+    runs-on: ubuntu-latest
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: nightly-2026-10-13
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        with:
+          tool: cargo-fuzz
+      # A cache key cannot be saved twice, so each run saves under a key of its
+      # own, and the prefix restores the newest. Saved here on main, a cache is
+      # one that pull requests can restore; one a pull request saves is not.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      # The seeds are copied out so that every path given is absolute.
+      - run: |
+          mkdir -p "$RUNNER_TEMP/seeds" "$RUNNER_TEMP/corpus"
+          cp fuzz/seeds/* "$RUNNER_TEMP/seeds/"
+      # One worker per core, with LeakSanitizer, as in ci.yml. A failure stops
+      # the run, and its input lands in fuzz/artifacts.
+      - run: cargo fuzz run "$TARGET" --target x86_64-unknown-linux-gnu --sanitizer leak "$RUNNER_TEMP/corpus" "$RUNNER_TEMP/seeds" -- -fork="$(nproc)" -max_total_time=3600
+      # Minimized, so the corpus grows with what it covers rather than with
+      # every run it went through. Not `cargo fuzz cmin`: it moves the result
+      # in from under fuzz/, which fails when the corpus lies on another file
+      # system. A run that fails saves nothing, and the next starts from the
+      # corpus before it.
+      - run: |
+          mv "$RUNNER_TEMP/corpus" "$RUNNER_TEMP/grown"
+          mkdir "$RUNNER_TEMP/corpus"
+          cargo fuzz run "$TARGET" --target x86_64-unknown-linux-gnu --sanitizer leak "$RUNNER_TEMP/corpus" "$RUNNER_TEMP/grown" -- -merge=1
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+      # What of the library the corpus and the seeds reach: a table per file on
+      # the run's page, and the lines themselves as HTML in an artifact. The
+      # report informs and never gates, so it cannot fail the job either.
+      - continue-on-error: true
+        run: |
+          # The build directory is given: by default it is named after the
+          # triple cargo-fuzz itself was built for, musl from the action.
+          cargo fuzz coverage "$TARGET" --target x86_64-unknown-linux-gnu --target-dir "$RUNNER_TEMP/coverage-build" "$RUNNER_TEMP/corpus" "$RUNNER_TEMP/seeds"
+          llvm_cov="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov"
+          set -- "$RUNNER_TEMP/coverage-build/x86_64-unknown-linux-gnu/release/$TARGET" \
+            -instr-profile="fuzz/coverage/$TARGET/coverage.profdata" \
+            -ignore-filename-regex='/[.]cargo/|/rustc/|/fuzz/'
+          {
+            echo "## Coverage of \`$TARGET\`"
+            echo '```'
+            "$llvm_cov" report "$@"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          "$llvm_cov" show "$@" -format=html -output-dir="$RUNNER_TEMP/coverage"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-coverage-${{ matrix.target }}
+          path: ${{ runner.temp }}/coverage/
+          if-no-files-found: ignore
+          retention-days: 30
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          retention-days: 7

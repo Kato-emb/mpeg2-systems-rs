@@ -21,7 +21,7 @@ pub use stream_id::StreamId;
 const PACKET_START_CODE_PREFIX: u32 = 0x00_0001;
 
 /// Bytes from `packet_start_code_prefix` to `PES_packet_length`
-const PREFIX_LENGTH: usize = 6;
+pub(crate) const PREFIX_LENGTH: usize = 6;
 
 /// Failure to read or write a PES packet
 #[non_exhaustive]
