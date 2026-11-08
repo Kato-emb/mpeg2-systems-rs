@@ -75,8 +75,9 @@ pub enum Error {
         /// The `stream_id` of the stream bound
         stream_id: StreamId,
     },
-    /// A stream bound loop to write bounds the same stream twice, where the
-    /// specification has each stream bounded exactly once
+    /// A stream bound loop to write bounds a stream twice, by itself or by
+    /// a bound for all audio, all video or all extended streams that covers
+    /// it, where the specification has each stream bounded exactly once
     DuplicateStreamBound {
         /// The `stream_id` of the stream
         stream_id: StreamId,
@@ -122,12 +123,13 @@ impl fmt::Display for Error {
             } => match stream_id_extension {
                 Some(extension) => write!(
                     formatter,
-                    "stream_id {:#04x} with stream_id_extension {extension:#04x} is bounded twice",
+                    "stream_id {:#04x} with stream_id_extension {extension:#04x} bounds a stream \
+                     already bounded",
                     stream_id.get()
                 ),
                 None => write!(
                     formatter,
-                    "stream_id {:#04x} is bounded twice",
+                    "stream_id {:#04x} bounds a stream already bounded",
                     stream_id.get()
                 ),
             },
@@ -339,8 +341,8 @@ impl<'input> SystemHeader<'input> {
     /// * [`Forbidden`](Error::Forbidden): `rate_bound` is 0, `audio_bound`
     ///   is more than 32 or `video_bound` more than 16; or a stream bound is
     ///   refused as [`StreamBoundLoop::write_from`] refuses it.
-    /// * [`DuplicateStreamBound`](Error::DuplicateStreamBound): two stream
-    ///   bounds are for the same stream.
+    /// * [`DuplicateStreamBound`](Error::DuplicateStreamBound): a stream is
+    ///   bounded twice, by itself or by a group bound that covers it.
     /// * [`StreamBoundStart`](Error::StreamBoundStart),
     ///   [`Field`](Error::Field): the stream bound loop ends inside an entry
     ///   or holds bytes that are not an entry; or `rate_bound` does not fit
@@ -707,6 +709,58 @@ mod tests {
             ]
         );
         assert_eq!(written, []);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_stream_a_group_bound_covers_is_not_bounded_again() {
+        let mut extended = StreamBound::new(StreamBound::WITH_STREAM_ID_EXTENSION, false, 1);
+        extended.stream_id_extension = Some(0x01);
+        let all_audio = StreamBound::new(StreamBound::ALL_AUDIO_STREAMS, false, 1);
+        let all_video = StreamBound::new(StreamBound::ALL_VIDEO_STREAMS, true, 1);
+        let all_extended = StreamBound::new(StreamId::EXTENDED_STREAM_ID, false, 1);
+        let audio = StreamBound::new(stream_id(0xdf), false, 1);
+        let video = StreamBound::new(stream_id(0xe0), true, 1);
+        let duplicate = |bound: StreamBound| {
+            Err(Error::DuplicateStreamBound {
+                stream_id: bound.stream_id,
+                stream_id_extension: bound.stream_id_extension,
+            })
+        };
+        let mut written = Vec::new();
+
+        assert_eq!(
+            [
+                [all_audio, audio],
+                [audio, all_audio],
+                [all_video, video],
+                [video, all_video],
+                [all_extended, extended],
+                [extended, all_extended],
+                [all_audio, video],
+                [all_extended, audio],
+                [all_audio, all_video],
+            ]
+            .map(|bounds| StreamBoundLoop::write_from(bounds, &mut written)),
+            [
+                duplicate(audio),
+                duplicate(all_audio),
+                duplicate(video),
+                duplicate(all_video),
+                duplicate(extended),
+                duplicate(all_extended),
+                Ok(()),
+                Ok(()),
+                Ok(()),
+            ]
+        );
+        assert_eq!(
+            written,
+            [
+                0xb8, 0xc0, 0x01, 0xe0, 0xe0, 0x01, 0xfd, 0xc0, 0x01, 0xdf, 0xc0, 0x01, 0xb8, 0xc0,
+                0x01, 0xb9, 0xe0, 0x01,
+            ]
+        );
     }
 
     #[cfg(feature = "alloc")]

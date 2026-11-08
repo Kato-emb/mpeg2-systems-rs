@@ -10,6 +10,14 @@ use crate::field::FieldReader;
 use crate::field::{FieldWriter, write_or_truncate};
 use crate::pes::StreamId;
 
+/// The audio `stream_id`s 0xC0 to 0xDF, as bits at their low 7 bits
+#[cfg(feature = "alloc")]
+const AUDIO_STREAMS: u128 = 0xffff_ffff_u128.wrapping_shl(0x40);
+
+/// The video `stream_id`s 0xE0 to 0xEF, as bits at their low 7 bits
+#[cfg(feature = "alloc")]
+const VIDEO_STREAMS: u128 = 0xffff_u128.wrapping_shl(0x60);
+
 /// Entry of the stream bound loop of a [`SystemHeader`](super::SystemHeader): the buffer an
 /// elementary stream, or a group of them, needs at most
 ///
@@ -130,8 +138,9 @@ impl<'input> StreamBoundLoop<'input> {
     ///   it is.
     /// * [`Field`](Error::Field): a `stream_id_extension` that does not fit
     ///   7 bits or a `P-STD_buffer_size_bound` that does not fit 13.
-    /// * [`DuplicateStreamBound`](Error::DuplicateStreamBound): two stream
-    ///   bounds for the same stream.
+    /// * [`DuplicateStreamBound`](Error::DuplicateStreamBound): a stream
+    ///   bounded twice, by itself or by a bound for all audio, all video or
+    ///   all extended streams that covers it.
     ///
     /// # Examples
     ///
@@ -170,7 +179,11 @@ pub(super) fn write_entries(
     out: &mut Vec<u8>,
 ) -> Result<(), Error> {
     write_or_truncate(out, |out| {
-        let (mut bounded_stream_ids, mut bounded_extensions) = (0_u128, 0_u128);
+        // Why not the whole `stream_id`: `check` lets through only values
+        // with the first bit set, so the other 7 bits tell them apart, as the
+        // 7 bits of a `stream_id_extension` that fit its field do.
+        let bit = |value: u8| 1_u128.wrapping_shl(u32::from(value & 0x7f));
+        let mut bounded = (0_u128, 0_u128);
         for stream_bound in entries {
             let stream_bound = stream_bound.and_then(StreamBound::check)?;
             let mut writer = FieldWriter::new(out);
@@ -192,21 +205,27 @@ pub(super) fn write_entries(
                 writer.finish()
             })()
             .map_err(field_error("P-STD_buffer_size_bound"))?;
-            // Why not the whole `stream_id`: `check` lets through only values
-            // with the first bit set, so the other 7 bits tell them apart, as
-            // the 7 bits of a `stream_id_extension` that fit its field do.
-            let (bounded, bit) = match stream_bound.stream_id_extension {
-                Some(extension) => (&mut bounded_extensions, extension),
-                None => (&mut bounded_stream_ids, stream_bound.stream_id.get() & 0x7f),
+            let stream_id = stream_bound.stream_id;
+            let covered = match stream_bound.stream_id_extension {
+                Some(extension) => (0, bit(extension)),
+                None if stream_id == StreamBound::ALL_AUDIO_STREAMS => {
+                    (bit(stream_id.get()) | AUDIO_STREAMS, 0)
+                }
+                None if stream_id == StreamBound::ALL_VIDEO_STREAMS => {
+                    (bit(stream_id.get()) | VIDEO_STREAMS, 0)
+                }
+                None if stream_id == StreamId::EXTENDED_STREAM_ID => {
+                    (bit(stream_id.get()), u128::MAX)
+                }
+                None => (bit(stream_id.get()), 0),
             };
-            let mask = 1_u128.wrapping_shl(u32::from(bit));
-            if *bounded & mask != 0 {
+            if covered.0 & bounded.0 != 0 || covered.1 & bounded.1 != 0 {
                 return Err(Error::DuplicateStreamBound {
-                    stream_id: stream_bound.stream_id,
+                    stream_id,
                     stream_id_extension: stream_bound.stream_id_extension,
                 });
             }
-            *bounded |= mask;
+            bounded = (bounded.0 | covered.0, bounded.1 | covered.1);
         }
 
         Ok(())
