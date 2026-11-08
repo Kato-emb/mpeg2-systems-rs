@@ -10,7 +10,7 @@ use core::ops::Range;
 
 use super::Error;
 use crate::input_buffer::InputBuffer;
-use crate::pes::{self, PesPacket, PesPacketLength, pes_packet_length};
+use crate::pes::{self, PesPacket, PesPacketLength, StreamId, pes_packet_length};
 use crate::ps::{
     MPEG_PROGRAM_END_CODE, PACK_START_CODE, PROGRAM_STREAM_MAP_START_CODE, PackHeader,
     ProgramStreamMap, SYSTEM_HEADER_START_CODE, SystemHeader,
@@ -24,10 +24,6 @@ const PACK_HEADER_LENGTH: usize = 14;
 
 /// Bytes of a system header or program stream map up to its length field
 const LENGTH_FIELD_END: usize = 6;
-
-/// The lowest `stream_id` of a PES packet; those below it are the Program
-/// Stream's own start codes, §2.5.3.1 and Table 2-22
-const FIRST_PES_STREAM_ID: u8 = 0xBD;
 
 /// The byte after `packet_start_code_prefix` in each start code the framer
 /// cuts
@@ -407,7 +403,7 @@ fn observe_synced(bytes: &[u8]) -> Synced {
         PROGRAM_STREAM_MAP_STREAM_ID => {
             observe_element(bytes, Element::ProgramStreamMap, length_field(bytes))
         }
-        FIRST_PES_STREAM_ID.. => match pes_packet_length(bytes) {
+        _ if StreamId::from(stream_id).is_pes_packet() => match pes_packet_length(bytes) {
             PesPacketLength::NeedMoreData => Synced::NeedMoreData,
             PesPacketLength::Unbounded => Synced::UnboundedPes,
             PesPacketLength::Bounded(length) => {

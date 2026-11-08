@@ -70,7 +70,7 @@ impl Program {
     #[cfg(feature = "alloc")]
     pub(super) const fn check(self) -> Result<Self, Error> {
         let pid = self.pid();
-        if matches!(pid.get(), 0x0010..=0x1ffe) {
+        if pid.is_assignable() {
             Ok(self)
         } else {
             Err(Error::Pid {

@@ -141,7 +141,7 @@ impl<'input> ElementaryStreamLoop<'input> {
                     });
                 }
                 let elementary_stream_id = stream.elementary_stream_id;
-                if elementary_stream_id <= StreamId::PROGRAM_STREAM_MAP
+                if !elementary_stream_id.is_pes_packet()
                     || elementary_stream_id == StreamId::PADDING_STREAM
                     || elementary_stream_id == StreamId::PROGRAM_STREAM_DIRECTORY
                 {

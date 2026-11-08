@@ -89,10 +89,6 @@ use crate::ts::{ContinuityCounter, Pid};
 /// Bytes of a Transport Packet after its header
 const PAYLOAD_CAPACITY: usize = PACKET_LENGTH - HEADER_LENGTH;
 
-/// The lowest PID a PES packet may go on, the PIDs below it being reserved
-/// (Table 2-3)
-const FIRST_ASSIGNABLE_PID: u16 = 0x0010;
-
 /// `pointer_field` 0: the section starts right after it
 const POINTER_FIELD: u8 = 0x00;
 
@@ -252,13 +248,11 @@ impl Muxer {
         pcr: Option<ClockReference>,
         out: &mut Vec<u8>,
     ) -> Result<usize, Error> {
-        if !(FIRST_ASSIGNABLE_PID..Pid::NULL.get()).contains(&pid.get()) {
+        if !pid.is_assignable() {
             return Err(Error::Pid { pid });
         }
         let stream_id = packet.stream_id;
-        // Why compare with private_stream_1: it is the lowest stream_id of a
-        // PES packet (Table 2-22).
-        if stream_id.get() < StreamId::PRIVATE_STREAM_1.get() {
+        if !stream_id.is_pes_packet() {
             return Err(Error::StreamId { stream_id });
         }
         let adaptation_field = pcr.map(|pcr| {

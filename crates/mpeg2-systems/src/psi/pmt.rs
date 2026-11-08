@@ -273,7 +273,7 @@ impl<'input> TsProgramMapSection<'input> {
             });
         }
         if let Some(pid) = self.pcr_pid
-            && !matches!(pid.get(), 0x0000 | 0x0001 | 0x0010..=0x1ffe)
+            && !(pid.is_assignable() || pid == Pid::PAT || pid == Pid::CAT)
         {
             return Err(Error::PcrPid { pid });
         }
