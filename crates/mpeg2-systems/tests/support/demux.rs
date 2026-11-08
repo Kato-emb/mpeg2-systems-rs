@@ -186,7 +186,7 @@ pub(crate) fn seen_event(event: Event<'_>) -> Seen {
             start_offset,
         },
         Event::Error(error) => Seen::Error(error),
-        other => Seen::Unexpected(format!("{other:?}")),
+        other @ (Event::ScrambledPesPacket { .. } | _) => Seen::Unexpected(format!("{other:?}")),
     }
 }
 

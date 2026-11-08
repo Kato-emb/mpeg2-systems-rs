@@ -760,3 +760,68 @@ fn a_subscribed_pid_whose_buffer_grows_past_the_limit_reports_an_overrun() {
         ]
     );
 }
+
+#[test]
+fn a_packet_with_transport_error_indicator_set_ends_the_pes_packet_in_flight_as_truncated() {
+    let head = pes(0, &[0x01, 0x02, 0x03]);
+    let mut errored = packet(PES_PID, false, 1, &[0x04, 0x05]);
+    *errored.get_mut(1).unwrap() |= 0x80;
+    let pid = Pid::try_from(PES_PID).unwrap();
+    assert_eq!(
+        demux_to_the_end(
+            &mut subscribed(4096),
+            &[
+                packet(PES_PID, true, 0, &head),
+                errored,
+                packet(PES_PID, false, 2, &[0x06, 0x07]),
+            ]
+        ),
+        [
+            acquired(),
+            described(&Event::Error(Error::TransportErrorIndicator { pid })),
+            described(&Event::TruncatedPesPacket {
+                pid,
+                bytes: &stuffed(&head),
+                start_offset: FIRST_PACKET_OFFSET,
+            }),
+            described(&Event::Error(Error::Discontinuity {
+                pid,
+                expected: crate::ts::ContinuityCounter::try_from(1).unwrap(),
+                found: crate::ts::ContinuityCounter::try_from(2).unwrap(),
+            })),
+        ]
+    );
+}
+
+#[test]
+fn a_pes_packet_in_scrambled_transport_packets_is_gathered_to_the_next_unit_start_unread() {
+    let scrambled_start = stuffed(&[0xAA, 0xBB, 0xCC, 0xDD, 0x00, 0x01]);
+    let continuation = [0x5A; 184];
+    let mut first = packet(PES_PID, true, 0, &scrambled_start);
+    *first.get_mut(3).unwrap() |= 0xC0;
+    let mut second = packet(PES_PID, false, 1, &continuation);
+    *second.get_mut(3).unwrap() |= 0xC0;
+    let next = pes(1, &[0x0A]);
+    let pid = Pid::try_from(PES_PID).unwrap();
+    assert_eq!(
+        demux_to_the_end(
+            &mut subscribed(4096),
+            &[first, second, packet(PES_PID, true, 2, &next)]
+        ),
+        [
+            acquired(),
+            described(&Event::ScrambledPesPacket {
+                pid,
+                bytes: &[&scrambled_start[..], &continuation[..]].concat(),
+                transport_scrambling_control:
+                    crate::ts::packet::TransportScramblingControl::try_from(0b11).unwrap(),
+                start_offset: FIRST_PACKET_OFFSET,
+            }),
+            described(&Event::PesPacket {
+                pid,
+                packet: PesPacket::read(&next).unwrap(),
+                start_offset: FIRST_PACKET_OFFSET + 2 * 188,
+            }),
+        ]
+    );
+}

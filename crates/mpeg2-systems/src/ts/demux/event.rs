@@ -9,6 +9,7 @@ use crate::psi::pmt::{self, TsProgramMapSection};
 use crate::psi::section::{self, Section};
 use crate::time::ClockReference;
 use crate::ts::demux::PacketSize;
+use crate::ts::packet::TransportScramblingControl;
 use crate::ts::{ContinuityCounter, Pid, packet};
 
 /// What a [`Demuxer`](super::Demuxer) observed in its input
@@ -149,12 +150,33 @@ pub enum Event<'a> {
         /// before it.
         start_offset: u64,
     },
+    /// The bytes of a PES packet on a subscribed PID whose Transport Packets
+    /// are scrambled
+    ///
+    /// A PES packet that starts in a Transport Packet with
+    /// `transport_scrambling_control` other than `'00'` is gathered without
+    /// reading it, since its `PES_packet_length` is scrambled too, and ends at
+    /// the next `payload_unit_start_indicator` on its PID or at
+    /// [`Demuxer::finish`](super::Demuxer::finish). The demuxer does not
+    /// descramble; a holder of the key can recover the packet from the bytes.
+    ScrambledPesPacket {
+        /// The PID the bytes were carried on
+        pid: Pid,
+        /// The bytes gathered, borrowed from the demuxer
+        bytes: &'a [u8],
+        /// `transport_scrambling_control` of the Transport Packet the PES
+        /// packet started in
+        transport_scrambling_control: TransportScramblingControl,
+        /// Input offset of the Transport Packet the PES packet started in,
+        /// as [`Event::PesPacket`] gives it
+        start_offset: u64,
+    },
     /// The bytes of a PES packet on a subscribed PID that did not reach its
     /// end
     ///
-    /// Reported when an [`Error::Discontinuity`], or a
-    /// `discontinuity_indicator`, ends the packet being reassembled on the
-    /// PID, and when [`Demuxer::finish`](super::Demuxer::finish) ends one
+    /// Reported when an [`Error::Discontinuity`], a
+    /// `discontinuity_indicator` or an [`Error::TransportErrorIndicator`]
+    /// ends the packet being reassembled on the PID, and when [`Demuxer::finish`](super::Demuxer::finish) ends one
     /// whose `PES_packet_length` is not yet in, or not yet read. Nothing is
     /// joined across the gap: reassembly starts again at the next
     /// `payload_unit_start_indicator`.

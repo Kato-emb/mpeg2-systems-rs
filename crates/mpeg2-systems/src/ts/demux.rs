@@ -6,6 +6,7 @@ use core::ops::Range;
 use crate::pes::PesPacket;
 use crate::psi::section::Section;
 use crate::ts::Pid;
+use crate::ts::packet::TransportScramblingControl;
 
 mod analyzer;
 mod event;
@@ -75,6 +76,14 @@ enum Pending {
     PesPacket {
         pid: Pid,
         bytes: Lent,
+        start_offset: u64,
+    },
+    /// A range of the PES reassembly buffer of `pid`: a PES packet whose
+    /// Transport Packets are scrambled
+    ScrambledPesPacket {
+        pid: Pid,
+        bytes: Range<usize>,
+        transport_scrambling_control: TransportScramblingControl,
         start_offset: u64,
     },
     /// A range of the PES reassembly buffer of `pid`: a PES packet cut short
@@ -344,6 +353,17 @@ impl Demuxer {
                     },
                 )
             }
+            Pending::ScrambledPesPacket {
+                pid,
+                bytes,
+                transport_scrambling_control,
+                start_offset,
+            } => Event::ScrambledPesPacket {
+                pid,
+                bytes: self.analyzer.pes_bytes(pid, bytes),
+                transport_scrambling_control,
+                start_offset,
+            },
             Pending::TruncatedPesPacket {
                 pid,
                 bytes,

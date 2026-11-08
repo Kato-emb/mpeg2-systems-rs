@@ -9,14 +9,60 @@ use super::continuity::Verdict;
 use crate::pes::{self, PesPacketLength, pes_packet_length};
 use crate::ts::Pid;
 use crate::ts::demux::{Error, Event, Lent, Pending};
-use crate::ts::packet::{PACKET_LENGTH, TransportPacket};
+use crate::ts::packet::{PACKET_LENGTH, TransportPacket, TransportScramblingControl};
 
-/// What a packet's payload brings to the PES packet in flight on its PID
+/// Where a Transport Packet stands in its PID's sequence, as far as the PES
+/// packet in flight cares
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Sequence {
+    /// The packet follows the one before, or carries no counter to check
+    InOrder,
+    /// The one duplicate §2.4.3.3 allows: its payload repeats bytes already
+    /// gathered
+    Duplicate,
+    /// Packets were lost, or `discontinuity_indicator` excused a jump
+    Gap,
+    /// `transport_error_indicator` is set: nothing in the packet is reliable
+    Errored,
+}
+
+impl From<Verdict> for Sequence {
+    fn from(verdict: Verdict) -> Self {
+        match verdict {
+            Verdict::InOrder => Self::InOrder,
+            Verdict::Duplicate => Self::Duplicate,
+            Verdict::Broken { .. } | Verdict::Excused => Self::Gap,
+        }
+    }
+}
+
+/// What a Transport Packet means for the PES packet in flight on its PID
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Observation {
-    /// No PES packet is in flight, and the payload continues one: nothing in
-    /// it says where a PES packet starts
-    Stray,
+    /// A duplicate, whose payload is already gathered
+    Repeated,
+    /// The packet cannot be trusted: the PES packet in flight is cut short
+    /// and the payload passed over
+    Errored,
+    /// A continuation with no PES packet in flight, after a gap that cut
+    /// short the one in flight (`cut`) or not: nothing in the payload says
+    /// where a PES packet starts
+    Stray { cut: bool },
+    /// `payload_unit_start_indicator` is set: the PES packet in flight ends,
+    /// cut short by a gap (`cut`) or whole, and a new one starts in the
+    /// payload
+    Starts {
+        cut: bool,
+        transport_scrambling_control: TransportScramblingControl,
+        growth: Growth,
+    },
+    /// The payload continues the PES packet in flight
+    Continues(Growth),
+}
+
+/// What a payload does to the PES packet it belongs to
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Growth {
     /// The PES packet ends this many bytes into the payload
     Ends { length: usize },
     /// The whole payload belongs to the PES packet, which goes on within
@@ -39,13 +85,19 @@ pub(super) struct PesReassembly {
 /// `buffer[..in_flight_start]` holds the PES packets the latest packet of
 /// the PID ended, which stay lent until the next packet of the PID;
 /// `buffer[in_flight_start..]` is the PES packet in flight.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct PesReassembler {
     buffer: Vec<u8>,
     in_flight_start: usize,
     /// Input offset of the unit of the Transport Packet the PES packet in
     /// flight started in
     start_offset: u64,
+    /// `transport_scrambling_control` of the Transport Packet the PES packet
+    /// in flight started in
+    // Why not read it from the packets that follow: the packets of one PES
+    // packet need not agree, and the one that starts it decides whether its
+    // header can be read.
+    transport_scrambling_control: TransportScramblingControl,
 }
 
 impl PesReassembly {
@@ -60,7 +112,14 @@ impl PesReassembly {
     /// `payload_unit_start_indicator`, keeping the PES packet in flight of a
     /// PID already subscribed
     pub(super) fn subscribe(&mut self, pid: Pid) {
-        self.reassemblers.entry(pid).or_default();
+        self.reassemblers
+            .entry(pid)
+            .or_insert_with(|| PesReassembler {
+                buffer: Vec::new(),
+                in_flight_start: 0,
+                start_offset: 0,
+                transport_scrambling_control: TransportScramblingControl::NOT_SCRAMBLED,
+            });
     }
 
     /// Drops the PID's subscription, every byte it gathered, and the queued
@@ -73,6 +132,7 @@ impl PesReassembly {
         self.reassemblers.remove(&pid);
         pending.retain(|pending| match pending {
             Pending::PesPacket { pid: queued, .. }
+            | Pending::ScrambledPesPacket { pid: queued, .. }
             | Pending::TruncatedPesPacket { pid: queued, .. }
             | Pending::Ready(Event::Error(Error::PesBufferOverrun { pid: queued, .. })) => {
                 *queued != pid
@@ -105,7 +165,12 @@ impl PesReassembly {
     /// queues it
     pub(super) fn finish(&mut self, pending: &mut VecDeque<Pending>) {
         for (&pid, reassembler) in &mut self.reassemblers {
-            match pes_packet_length(reassembler.in_flight()) {
+            let length = if reassembler.is_scrambled() {
+                PesPacketLength::Unbounded
+            } else {
+                pes_packet_length(reassembler.in_flight())
+            };
+            match length {
                 PesPacketLength::Unbounded => reassembler.close_ended(pid, pending),
                 // Why not read a packet of a declared length: it ends the
                 // moment its bytes are in, so one still in flight is short of
@@ -117,14 +182,14 @@ impl PesReassembly {
         }
     }
 
-    /// Takes a packet, which `verdict` placed in its PID's sequence and
-    /// whose payload starts at `payload_start` in the framer's buffer and
-    /// whose unit starts at input `offset`, and queues the PES packets it
-    /// ends, if its PID is subscribed
+    /// Takes a packet, which `sequence` places in its PID's sequence, whose
+    /// payload starts at `payload_start` in the framer's buffer and whose
+    /// unit starts at input `offset`, and queues the PES packets it ends, if
+    /// its PID is subscribed
     pub(super) fn push(
         &mut self,
         packet: &TransportPacket<'_>,
-        verdict: Verdict,
+        sequence: Sequence,
         payload_start: usize,
         offset: u64,
         pending: &mut VecDeque<Pending>,
@@ -133,55 +198,60 @@ impl PesReassembly {
         let Some(reassembler) = self.reassemblers.get_mut(&pid) else {
             return;
         };
-        // Why not reassemble a duplicate: its payload repeats bytes already
-        // gathered.
-        if verdict == Verdict::Duplicate {
-            return;
-        }
-        reassembler.lend_no_more();
-        if let Verdict::Broken { .. } | Verdict::Excused = verdict {
-            reassembler.close_truncated(pid, pending);
-        }
         let payload = packet.payload.unwrap_or_default();
-        if packet.payload_unit_start_indicator {
-            reassembler.close_ended(pid, pending);
-            reassembler.start_offset = offset;
+        let observation = observe(reassembler, sequence, packet, self.buffer_limit);
+        if observation != Observation::Repeated {
+            reassembler.lend_no_more();
         }
-        let in_flight = reassembler.in_flight();
-        match observe(
-            in_flight,
-            packet.payload_unit_start_indicator,
-            payload,
-            self.buffer_limit,
-        ) {
-            Observation::Stray => {}
-            // Why not copy a PES packet that lies inside one packet: it can
-            // be lent from the packet, and is copied only to cross packets.
-            Observation::Ends { length } if in_flight.is_empty() => {
-                pending.push_back(Pending::PesPacket {
-                    pid,
-                    bytes: Lent::Packet(payload_start..payload_start.saturating_add(length)),
-                    start_offset: offset,
-                });
+        match observation {
+            // Why not reassemble a duplicate: its payload repeats bytes
+            // already gathered.
+            Observation::Repeated => {}
+            // Why cut the PES packet in flight on a packet that cannot be
+            // read: its payload may belong to it or not, so the bytes after
+            // it would be stitched across a gap.
+            Observation::Errored | Observation::Stray { cut: true } => {
+                reassembler.close_truncated(pid, pending);
             }
-            // Why drop the bytes after the end: a PES packet starts only at
-            // a payload_unit_start_indicator, so the bytes after one that
-            // ends inside a Transport Packet are stuffing.
-            Observation::Ends { length } => {
-                reassembler
-                    .buffer
-                    .extend_from_slice(payload.get(..length).unwrap_or_default());
-                reassembler.close_ended(pid, pending);
+            Observation::Stray { cut: false } => {}
+            Observation::Starts {
+                cut,
+                transport_scrambling_control,
+                growth,
+            } => {
+                if cut {
+                    reassembler.close_truncated(pid, pending);
+                } else {
+                    reassembler.close_ended(pid, pending);
+                }
+                reassembler.start_offset = offset;
+                reassembler.transport_scrambling_control = transport_scrambling_control;
+                match growth {
+                    // Why not copy a PES packet that lies inside one packet:
+                    // it can be lent from the packet, and is copied only to
+                    // cross packets.
+                    Growth::Ends { length } => pending.push_back(Pending::PesPacket {
+                        pid,
+                        bytes: Lent::Packet(payload_start..payload_start.saturating_add(length)),
+                        start_offset: offset,
+                    }),
+                    Growth::Gathers => reassembler.buffer.extend_from_slice(payload),
+                    Growth::Overruns => reassembler.overrun(pid, payload, pending),
+                }
             }
-            Observation::Gathers => reassembler.buffer.extend_from_slice(payload),
-            Observation::Overruns => {
-                let discarded_bytes = in_flight.len().saturating_add(payload.len());
-                reassembler.buffer.truncate(reassembler.in_flight_start);
-                pending.push_back(Pending::Ready(Event::Error(Error::PesBufferOverrun {
-                    pid,
-                    discarded_bytes,
-                })));
-            }
+            Observation::Continues(growth) => match growth {
+                // Why drop the bytes after the end: a PES packet starts only
+                // at a payload_unit_start_indicator, so the bytes after one
+                // that ends inside a Transport Packet are stuffing.
+                Growth::Ends { length } => {
+                    reassembler
+                        .buffer
+                        .extend_from_slice(payload.get(..length).unwrap_or_default());
+                    reassembler.close_ended(pid, pending);
+                }
+                Growth::Gathers => reassembler.buffer.extend_from_slice(payload),
+                Growth::Overruns => reassembler.overrun(pid, payload, pending),
+            },
         }
         debug_assert!(
             reassembler.buffer.len() <= self.buffer_limit.saturating_add(PACKET_LENGTH),
@@ -210,15 +280,41 @@ impl PesReassembler {
         (start < self.in_flight_start).then_some(start..self.in_flight_start)
     }
 
-    /// Ends the PES packet in flight, if any, and queues it to be read
+    fn is_scrambled(&self) -> bool {
+        self.transport_scrambling_control != TransportScramblingControl::NOT_SCRAMBLED
+    }
+
+    /// Ends the PES packet in flight, if any, and queues it to be read, or
+    /// as scrambled
     fn close_ended(&mut self, pid: Pid, pending: &mut VecDeque<Pending>) {
-        if let Some(bytes) = self.close() {
-            pending.push_back(Pending::PesPacket {
+        let Some(bytes) = self.close() else {
+            return;
+        };
+        pending.push_back(if self.is_scrambled() {
+            Pending::ScrambledPesPacket {
+                pid,
+                bytes,
+                transport_scrambling_control: self.transport_scrambling_control,
+                start_offset: self.start_offset,
+            }
+        } else {
+            Pending::PesPacket {
                 pid,
                 bytes: Lent::Reassembled(bytes),
                 start_offset: self.start_offset,
-            });
-        }
+            }
+        });
+    }
+
+    /// Drops the PES packet in flight, which `payload` would take past the
+    /// limit, and queues the overrun
+    fn overrun(&mut self, pid: Pid, payload: &[u8], pending: &mut VecDeque<Pending>) {
+        let discarded_bytes = self.in_flight().len().saturating_add(payload.len());
+        self.buffer.truncate(self.in_flight_start);
+        pending.push_back(Pending::Ready(Event::Error(Error::PesBufferOverrun {
+            pid,
+            discarded_bytes,
+        })));
     }
 
     /// Ends the PES packet in flight, if any, and queues it as cut short
@@ -233,17 +329,46 @@ impl PesReassembler {
     }
 }
 
-/// Classifies `payload` against `in_flight`, the PES packet in flight once a
-/// `payload_unit_start_indicator` has ended the previous one
+/// Classifies a packet of a subscribed PID against the PES packet in flight
 fn observe(
-    in_flight: &[u8],
-    payload_unit_start_indicator: bool,
-    payload: &[u8],
+    reassembler: &PesReassembler,
+    sequence: Sequence,
+    packet: &TransportPacket<'_>,
     buffer_limit: usize,
 ) -> Observation {
-    if !payload_unit_start_indicator && in_flight.is_empty() {
-        return Observation::Stray;
+    let payload = packet.payload.unwrap_or_default();
+    let cut = sequence == Sequence::Gap;
+    match (sequence, packet.payload_unit_start_indicator) {
+        (Sequence::Duplicate, _) => Observation::Repeated,
+        (Sequence::Errored, _) => Observation::Errored,
+        (Sequence::InOrder | Sequence::Gap, true) => {
+            let transport_scrambling_control = packet.transport_scrambling_control;
+            Observation::Starts {
+                cut,
+                transport_scrambling_control,
+                growth: growth(
+                    &[],
+                    transport_scrambling_control != TransportScramblingControl::NOT_SCRAMBLED,
+                    payload,
+                    buffer_limit,
+                ),
+            }
+        }
+        (Sequence::InOrder | Sequence::Gap, false) if cut || reassembler.in_flight().is_empty() => {
+            Observation::Stray { cut }
+        }
+        (Sequence::InOrder | Sequence::Gap, false) => Observation::Continues(growth(
+            reassembler.in_flight(),
+            reassembler.is_scrambled(),
+            payload,
+            buffer_limit,
+        )),
     }
+}
+
+/// Classifies `payload` against `in_flight`, the PES packet it belongs to,
+/// whose length is read unless it is `scrambled`
+fn growth(in_flight: &[u8], scrambled: bool, payload: &[u8], buffer_limit: usize) -> Growth {
     // Why copy the prefix only while the packet in flight is shorter than
     // it: once its first bytes are gathered, they alone give the length.
     let mut joined = [0; pes::PREFIX_LENGTH];
@@ -257,12 +382,20 @@ fn observe(
             .count();
         joined.get(..copied).unwrap_or_default()
     };
+    // Why not read the length of a packet in scrambled Transport Packets:
+    // PES_packet_length is scrambled with the rest, so the packet runs to
+    // the next payload_unit_start_indicator, bounded by the limit.
+    let length = if scrambled {
+        PesPacketLength::Unbounded
+    } else {
+        pes_packet_length(prefix)
+    };
     let gathered = in_flight.len().saturating_add(payload.len());
-    match pes_packet_length(prefix) {
+    match length {
         // Why end before checking the limit: a PES packet whose declared
         // length is all in hand is whole, and dropping it as an overrun would
         // lose it for nothing.
-        PesPacketLength::Bounded(length) if length <= gathered => Observation::Ends {
+        PesPacketLength::Bounded(length) if length <= gathered => Growth::Ends {
             length: length.saturating_sub(in_flight.len()),
         },
         PesPacketLength::Bounded(_)
@@ -270,11 +403,11 @@ fn observe(
         | PesPacketLength::NeedMoreData
             if gathered > buffer_limit =>
         {
-            Observation::Overruns
+            Growth::Overruns
         }
         PesPacketLength::Bounded(_)
         | PesPacketLength::Unbounded
-        | PesPacketLength::NeedMoreData => Observation::Gathers,
+        | PesPacketLength::NeedMoreData => Growth::Gathers,
     }
 }
 

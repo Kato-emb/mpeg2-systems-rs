@@ -138,9 +138,10 @@ fn seen(reassembly: &PesReassembly, payload: &[u8], pending: VecDeque<Pending>) 
                 assert_eq!(pid, PID);
                 Seen::Overrun { discarded_bytes }
             }
-            other @ (Pending::Ready(_) | Pending::Unsynchronized(_) | Pending::Section { .. }) => {
-                Seen::Unexpected(format!("{other:?}"))
-            }
+            other @ (Pending::Ready(_)
+            | Pending::Unsynchronized(_)
+            | Pending::Section { .. }
+            | Pending::ScrambledPesPacket { .. }) => Seen::Unexpected(format!("{other:?}")),
         })
         .collect()
 }
@@ -155,7 +156,7 @@ fn push(reassembly: &mut PesReassembly, arrival: &Arrival<'_>) -> Vec<Seen> {
     let mut pending = VecDeque::new();
     reassembly.push(
         &packet,
-        arrival.verdict,
+        arrival.verdict.into(),
         PAYLOAD_START,
         arrival.offset,
         &mut pending,
@@ -376,7 +377,7 @@ fn a_pes_packet_that_ended_stays_lent_until_the_next_packet_of_its_pid() {
     let mut pending = VecDeque::new();
     reassembly.push(
         &packet,
-        Verdict::InOrder,
+        Sequence::InOrder,
         PAYLOAD_START,
         SECOND_PACKET,
         &mut pending,

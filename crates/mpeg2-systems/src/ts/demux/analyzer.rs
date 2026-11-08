@@ -27,7 +27,7 @@ mod section_reassembly;
 mod version_gate;
 
 use continuity::{ContinuityTracker, Verdict};
-use pes_reassembly::PesReassembly;
+use pes_reassembly::{PesReassembly, Sequence};
 use program_map_routes::ProgramMapRoutes;
 use section_reassembly::{Completed, SectionReassembler};
 use version_gate::{Admission, TableSection, VersionGate};
@@ -170,6 +170,8 @@ impl PacketAnalyzer {
             pending.push_back(Pending::Ready(Event::Error(
                 Error::TransportErrorIndicator { pid },
             )));
+            self.pes
+                .push(&packet, Sequence::Errored, packet_start, offset, pending);
             return;
         }
         let verdict = self.continuity.check(&packet);
@@ -243,7 +245,7 @@ impl PacketAnalyzer {
             }
         }
         self.pes
-            .push(&packet, verdict, payload_start, offset, pending);
+            .push(&packet, verdict.into(), payload_start, offset, pending);
     }
 }
 
