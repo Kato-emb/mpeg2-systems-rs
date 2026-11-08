@@ -17,7 +17,27 @@ default = ["alloc"]
 alloc = []
 
 [dev-dependencies]
+# Measures the per-packet paths; not run in CI.
+criterion = { version = "=0.8.2", default-features = false }
 insta = { version = "=1.48.0", default-features = false }
+# Counts the allocations of a measured routine in the framer and demuxer
+# benchmarks, as a global allocator this crate cannot write while it forbids
+# unsafe code.
+stats_alloc = { version = "=0.1.10", default-features = false }
+
+[[bench]]
+name = "packet"
+harness = false
+
+[[bench]]
+name = "framer"
+harness = false
+required-features = ["alloc"]
+
+[[bench]]
+name = "demux"
+harness = false
+required-features = ["alloc"]
 
 [lints]
 workspace = true
