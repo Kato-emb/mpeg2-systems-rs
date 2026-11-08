@@ -50,12 +50,12 @@ from [TSDuck](https://tsduck.io) and `ffprobe` from
 cargo test --workspace -- --ignored
 ```
 
+`scripts/fetch-tools.sh <directory>` downloads into `<directory>/bin` the
+builds the `conformance` job pins, which are built for the Linux x86-64 runner
+the job uses. On any other host, install TSDuck and FFmpeg's `ffprobe` the way
+you usually do and put them on `PATH`.
 The `conformance` job pins the versions it installs; a difference between your
 tools and the pinned ones is a reason to look at the job, not at the test.
-`scripts/fetch-tools.sh <directory>` puts the same pinned tools in
-`<directory>/bin` on an Ubuntu 24.04 host, for you to put on `PATH`; the
-TSDuck package is built for that release, and another distribution may lack
-the shared libraries it needs.
 
 ### Fixtures
 
