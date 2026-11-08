@@ -244,6 +244,45 @@ jobs:
       # allocator, and an allocation sized by the input is a bug here.
       - run: cargo fuzz run "$TARGET" --target x86_64-unknown-linux-gnu --sanitizer leak "$RUNNER_TEMP/corpus" "$RUNNER_TEMP/seeds" -- -max_total_time=180
 
+  # The ignored tests, which compare this crate's reading of the fixtures, and
+  # what its muxer writes, with TSDuck's and ffprobe's.
+  conformance:
+    # Not ubuntu-latest: the TSDuck package is built for Ubuntu 24.04, and the
+    # libraries it links to are taken from the runner's release.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The script pins the tools by hash, so its hash keys what it fetches.
+      - id: tools
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tools
+          key: conformance-tools-${{ hashFiles('scripts/fetch-tools.sh') }}
+      - if: steps.tools.outputs.cache-hit != 'true'
+        timeout-minutes: 5
+        run: scripts/fetch-tools.sh "$RUNNER_TEMP/tools"
+      - if: steps.tools.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tools
+          key: ${{ steps.tools.outputs.cache-primary-key }}
+      # The script unpacks TSDuck's package rather than installing it, so the
+      # packages it depends on are installed here.
+      - name: Install the packages TSDuck depends on
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update
+          xargs sudo apt-get install -y --no-install-recommends < "$RUNNER_TEMP/tools/tsduck-depends"
+      - run: PATH="$RUNNER_TEMP/tools/bin:$PATH" cargo test --workspace --all-features -- --ignored
+
   # Advisories, license policy, banned crates and sources, per deny.toml.
   deny:
     runs-on: ubuntu-latest
@@ -265,7 +304,7 @@ jobs:
   # `test` is skipped on pull requests by design.
   ci-success:
     if: always()
-    needs: [lint, clippy, coverage, test, msrv, no-std, docs, fuzz, deny]
+    needs: [lint, clippy, coverage, test, msrv, no-std, docs, fuzz, conformance, deny]
     runs-on: ubuntu-latest
     steps:
       - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')

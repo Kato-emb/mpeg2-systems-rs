@@ -18,6 +18,7 @@ alloc = []
 
 [dev-dependencies]
 insta = { version = "=1.48.0", default-features = false }
+serde_json = { version = "=1.0.154", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true
