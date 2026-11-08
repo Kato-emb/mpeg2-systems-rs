@@ -1,19 +1,14 @@
 ---
 source: crates/mpeg2-systems/tests/golden.rs
+assertion_line: 69
 expression: "events_of(&STANDARD_188[..STANDARD_188.len() - 100])"
 ---
 [
     "SyncAcquired { packet_size: Standard188 }",
-    "Section { pid: Pid(0), section: Section { table_id: TableId(0), private_indicator: false, reserved_before_section_length: 3, syntax: Some(SectionSyntax { table_id_extension: 1, reserved_before_version_number: 3, version_number: VersionNumber(0), current_next_indicator: true, section_number: 0, last_section_number: 0 }), body: [0, 1, 240, 0] } }",
-    "Section { pid: Pid(4096), section: Section { table_id: TableId(2), private_indicator: false, reserved_before_section_length: 3, syntax: Some(SectionSyntax { table_id_extension: 1, reserved_before_version_number: 3, version_number: VersionNumber(0), current_next_indicator: true, section_number: 0, last_section_number: 0 }), body: [225, 0, 240, 0, 2, 225, 0, 240, 0, 3, 225, 1, 240, 0] } }",
+    "ProgramAssociationSection(ProgramAssociationSection { transport_stream_id: 1, version_number: VersionNumber(0), current_next_indicator: true, section_number: 0, last_section_number: 0, programs: ProgramLoop([0, 1, 240, 0]) })",
+    "TsProgramMapSection { pid: Pid(4096), section: TsProgramMapSection { program_number: 1, version_number: VersionNumber(0), current_next_indicator: true, section_number: 0, last_section_number: 0, pcr_pid: Some(Pid(256)), program_info: DescriptorLoop([]), elementary_streams: ElementaryStreamLoop([2, 225, 0, 240, 0, 3, 225, 1, 240, 0]) } }",
     "ProgramClockReference { pid: Pid(256), program_clock_reference: ClockReference { base: 63000, extension: 0 } }",
-    "Section { pid: Pid(0), section: Section { table_id: TableId(0), private_indicator: false, reserved_before_section_length: 3, syntax: Some(SectionSyntax { table_id_extension: 1, reserved_before_version_number: 3, version_number: VersionNumber(0), current_next_indicator: true, section_number: 0, last_section_number: 0 }), body: [0, 1, 240, 0] } }",
-    "Section { pid: Pid(4096), section: Section { table_id: TableId(2), private_indicator: false, reserved_before_section_length: 3, syntax: Some(SectionSyntax { table_id_extension: 1, reserved_before_version_number: 3, version_number: VersionNumber(0), current_next_indicator: true, section_number: 0, last_section_number: 0 }), body: [225, 0, 240, 0, 2, 225, 0, 240, 0, 3, 225, 1, 240, 0] } }",
     "ProgramClockReference { pid: Pid(256), program_clock_reference: ClockReference { base: 81000, extension: 0 } }",
-    "Section { pid: Pid(0), section: Section { table_id: TableId(0), private_indicator: false, reserved_before_section_length: 3, syntax: Some(SectionSyntax { table_id_extension: 1, reserved_before_version_number: 3, version_number: VersionNumber(0), current_next_indicator: true, section_number: 0, last_section_number: 0 }), body: [0, 1, 240, 0] } }",
-    "Section { pid: Pid(4096), section: Section { table_id: TableId(2), private_indicator: false, reserved_before_section_length: 3, syntax: Some(SectionSyntax { table_id_extension: 1, reserved_before_version_number: 3, version_number: VersionNumber(0), current_next_indicator: true, section_number: 0, last_section_number: 0 }), body: [225, 0, 240, 0, 2, 225, 0, 240, 0, 3, 225, 1, 240, 0] } }",
     "ProgramClockReference { pid: Pid(256), program_clock_reference: ClockReference { base: 99000, extension: 0 } }",
-    "Section { pid: Pid(0), section: Section { table_id: TableId(0), private_indicator: false, reserved_before_section_length: 3, syntax: Some(SectionSyntax { table_id_extension: 1, reserved_before_version_number: 3, version_number: VersionNumber(0), current_next_indicator: true, section_number: 0, last_section_number: 0 }), body: [0, 1, 240, 0] } }",
-    "Section { pid: Pid(4096), section: Section { table_id: TableId(2), private_indicator: false, reserved_before_section_length: 3, syntax: Some(SectionSyntax { table_id_extension: 1, reserved_before_version_number: 3, version_number: VersionNumber(0), current_next_indicator: true, section_number: 0, last_section_number: 0 }), body: [225, 0, 240, 0, 2, 225, 0, 240, 0, 3, 225, 1, 240, 0] } }",
     "Unsynchronized { bytes: 88 bytes [47 01 01 3a 7e 00 ff ff ff ff ff ff ff ff ff ff ..] }",
 ]

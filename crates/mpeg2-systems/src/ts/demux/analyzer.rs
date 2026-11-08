@@ -3,32 +3,43 @@
 //! The events of one packet are queued in a fixed order: a packet that cannot
 //! be read, or one with `transport_error_indicator` set, gives one error and
 //! nothing else; any other gives a discontinuity, then its PCR, then the
-//! sections it completes, each read or failed.
+//! sections it completes, each read or failed. A PAT, PMT or CAT section is
+//! queued only at a version not reported before.
 
 use alloc::collections::{BTreeMap, VecDeque};
 use core::mem;
 use core::ops::Range;
 
 use super::{Error, Event, Lent, Pending};
-use crate::psi::pat::{Program, ProgramAssociationSection};
+use crate::psi::TableId;
+use crate::psi::cat::CaSection;
+use crate::psi::pat::ProgramAssociationSection;
+use crate::psi::pmt::TsProgramMapSection;
 use crate::psi::section::{PREFIX_LENGTH, SYNTAX_LENGTH, Section};
 use crate::ts::Pid;
 use crate::ts::packet::TransportPacket;
 
 mod continuity;
+mod program_map_routes;
 mod section_reassembly;
+mod version_gate;
 
 use continuity::{ContinuityTracker, Verdict};
+use program_map_routes::ProgramMapRoutes;
 use section_reassembly::{Completed, SectionReassembler};
+use version_gate::{Admission, TableSection, VersionGate};
 
-/// Continuity and section reassembly state of the PIDs a demuxer follows
+/// Continuity, section reassembly and table version state of the PIDs a
+/// demuxer follows
 ///
-/// Sections are reassembled on the PAT and CAT PIDs, and on every PID a PAT
-/// has named for a program map.
+/// Sections are reassembled on the PAT and CAT PIDs, and on every PID the
+/// PAT names for a program map.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct PacketAnalyzer {
     continuity: ContinuityTracker,
     reassemblers: BTreeMap<Pid, SectionReassembler>,
+    routes: ProgramMapRoutes,
+    gate: VersionGate,
 }
 
 impl PacketAnalyzer {
@@ -36,16 +47,23 @@ impl PacketAnalyzer {
         Self {
             continuity: ContinuityTracker::new(),
             reassemblers: BTreeMap::new(),
+            routes: ProgramMapRoutes::new(),
+            gate: VersionGate::new(),
         }
     }
 
-    /// Drops the continuity history and every section, once no event is
-    /// queued; the PIDs learned from a PAT stay
+    /// Drops the continuity history, every section and the PAT sections
+    /// gathered, once no event is queued; the PIDs learned from a PAT and the
+    /// versions reported stay
     pub(super) fn reset(&mut self) {
         self.continuity.reset();
         for reassembler in self.reassemblers.values_mut() {
             reassembler.clear();
         }
+        // Why not forget the versions reported: after a resynchronization or
+        // across an end of input, the tables on air are most likely the same,
+        // and reporting them again would read as a change.
+        self.routes.reset();
     }
 
     /// Returns the bytes of a [`Lent::Reassembled`] range of `pid`
@@ -119,7 +137,8 @@ impl PacketAnalyzer {
                 );
                 reassemble(
                     &mut reassembler,
-                    Some(&mut self.reassemblers),
+                    Some((&mut self.routes, &mut self.reassemblers)),
+                    &mut self.gate,
                     verdict,
                     &packet,
                     payload_start,
@@ -138,7 +157,15 @@ impl PacketAnalyzer {
                     self.reassemblers.get_mut(&pid)
                 };
                 if let Some(reassembler) = reassembler {
-                    reassemble(reassembler, None, verdict, &packet, payload_start, pending);
+                    reassemble(
+                        reassembler,
+                        None,
+                        &mut self.gate,
+                        verdict,
+                        &packet,
+                        payload_start,
+                        pending,
+                    );
                 }
             }
         }
@@ -149,11 +176,15 @@ impl PacketAnalyzer {
 /// buffer, to the reassembler of its PID, and queues the sections it
 /// completes
 ///
-/// With `program_maps`, the packet is on the PAT PID, and each program map
-/// its sections name gains a reassembler there.
+/// With `program_maps`, the packet is on the PAT PID, and the routes follow
+/// the program maps its sections name in the reassembler map.
 fn reassemble(
     reassembler: &mut SectionReassembler,
-    mut program_maps: Option<&mut BTreeMap<Pid, SectionReassembler>>,
+    mut program_maps: Option<(
+        &mut ProgramMapRoutes,
+        &mut BTreeMap<Pid, SectionReassembler>,
+    )>,
+    gate: &mut VersionGate,
     verdict: Verdict,
     packet: &TransportPacket<'_>,
     payload_start: usize,
@@ -184,22 +215,55 @@ fn reassemble(
                     return;
                 }
             };
-            if let Some(program_maps) = program_maps.as_deref_mut()
-                && let Ok(table) = ProgramAssociationSection::try_from(&section)
-            {
-                for program in table.programs {
-                    // Why skip the PAT, CAT and null PIDs: a broken PAT can
-                    // name them, and the PAT and CAT are reassembled anyway
-                    // while null packets carry stuffing, not sections.
-                    if let Ok(Program::ProgramMap {
-                        program_map_pid, ..
-                    }) = program
-                        && ![Pid::PAT, Pid::CAT, Pid::NULL].contains(&program_map_pid)
-                    {
-                        program_maps
-                            .entry(program_map_pid)
-                            .or_insert_with(SectionReassembler::new);
-                    }
+            let event = section_event(pid, &section);
+            let tracked = match &event {
+                Event::ProgramAssociationSection(pat) => Some((
+                    TableSection::ProgramAssociation {
+                        transport_stream_id: pat.transport_stream_id,
+                        section_number: pat.section_number,
+                    },
+                    pat.version_number,
+                    pat.current_next_indicator,
+                )),
+                Event::TsProgramMapSection { section: pmt, .. } => Some((
+                    TableSection::TsProgramMap {
+                        program_number: pmt.program_number,
+                        section_number: pmt.section_number,
+                    },
+                    pmt.version_number,
+                    pmt.current_next_indicator,
+                )),
+                Event::CaSection(cat) => Some((
+                    TableSection::ConditionalAccess {
+                        section_number: cat.section_number,
+                    },
+                    cat.version_number,
+                    cat.current_next_indicator,
+                )),
+                Event::Error(error) => {
+                    pending.push_back(Pending::Ready(Event::Error(*error)));
+                    return;
+                }
+                Event::SyncAcquired { .. }
+                | Event::ProgramClockReference { .. }
+                | Event::Section { .. }
+                | Event::Unsynchronized { .. } => None,
+            };
+            if let Some((table_section, version_number, current_next_indicator)) = tracked {
+                // Why not take a section with current_next_indicator '0' as a
+                // change: it announces the next table, and the table in force
+                // stays until that version comes with the indicator set
+                // (§2.4.4.5).
+                if !current_next_indicator {
+                    return;
+                }
+                if let (Some((routes, reassemblers)), Event::ProgramAssociationSection(pat)) =
+                    (program_maps.as_mut(), &event)
+                {
+                    routes.follow(pat, reassemblers, gate);
+                }
+                if gate.admit(table_section, version_number) == Admission::Resent {
+                    return;
                 }
             }
             let header_length = if section.syntax.is_some() {
@@ -220,15 +284,42 @@ fn reassemble(
                     Completed::Reassembled(start) => Lent::Reassembled(body(start)),
                 },
                 section: Section {
-                    table_id: section.table_id,
-                    private_indicator: section.private_indicator,
-                    reserved_before_section_length: section.reserved_before_section_length,
-                    syntax: section.syntax,
                     body: &[],
+                    ..section
                 },
             });
         },
     );
+}
+
+/// Returns the event of a section read whole on `pid`
+///
+/// A section of the PAT, of the CAT, or of a PMT on any other PID, is typed,
+/// or failed if it cannot be; any other section is reported as read.
+pub(super) fn section_event<'a>(pid: Pid, section: &Section<'a>) -> Event<'a> {
+    match (pid, section.table_id) {
+        (Pid::PAT, TableId::PROGRAM_ASSOCIATION) => ProgramAssociationSection::try_from(section)
+            .map_or_else(
+                |error| Event::Error(Error::ProgramAssociationSection { error }),
+                Event::ProgramAssociationSection,
+            ),
+        (Pid::CAT, TableId::CONDITIONAL_ACCESS) => CaSection::try_from(section).map_or_else(
+            |error| Event::Error(Error::CaSection { error }),
+            Event::CaSection,
+        ),
+        (Pid::PAT | Pid::CAT, _) => Event::Section {
+            pid,
+            section: section.clone(),
+        },
+        (_, TableId::TS_PROGRAM_MAP) => TsProgramMapSection::try_from(section).map_or_else(
+            |error| Event::Error(Error::TsProgramMapSection { pid, error }),
+            |section| Event::TsProgramMapSection { pid, section },
+        ),
+        _ => Event::Section {
+            pid,
+            section: section.clone(),
+        },
+    }
 }
 
 #[cfg(test)]

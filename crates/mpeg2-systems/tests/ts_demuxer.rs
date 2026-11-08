@@ -9,8 +9,11 @@
     reason = "streams are cut at constant offsets well inside their length"
 )]
 mod tests {
-    use mpeg2_systems::psi::TableId;
+    use core::num::NonZeroU16;
+
+    use mpeg2_systems::psi::pat::Program;
     use mpeg2_systems::psi::section::{self, Section, SectionSyntax};
+    use mpeg2_systems::psi::{TableId, VersionNumber};
     use mpeg2_systems::time::ClockReference;
     use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Error, Event, PacketSize};
     use mpeg2_systems::ts::{ContinuityCounter, Pid};
@@ -26,7 +29,7 @@ mod tests {
     const REED_SOLOMON_204: &[u8] = include_bytes!("fixtures/204.ts");
 
     /// An [`Event`] with what it lends copied out of the demuxer
-    #[derive(Debug, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     enum Seen {
         SyncAcquired(PacketSize),
         Unsynchronized(Vec<u8>),
@@ -41,6 +44,33 @@ mod tests {
             reserved_before_section_length: u8,
             syntax: Option<SectionSyntax>,
             body: Vec<u8>,
+        },
+        ProgramAssociationSection {
+            transport_stream_id: u16,
+            version_number: VersionNumber,
+            current_next_indicator: bool,
+            section_number: u8,
+            last_section_number: u8,
+            programs: Vec<Program>,
+        },
+        TsProgramMapSection {
+            pid: u16,
+            program_number: u16,
+            version_number: VersionNumber,
+            current_next_indicator: bool,
+            section_number: u8,
+            last_section_number: u8,
+            pcr_pid: Option<u16>,
+            program_info: Vec<u8>,
+            /// `stream_type`, `elementary_PID` and `ES_info` of each stream
+            elementary_streams: Vec<(u8, u16, Vec<u8>)>,
+        },
+        CaSection {
+            version_number: VersionNumber,
+            current_next_indicator: bool,
+            section_number: u8,
+            last_section_number: u8,
+            descriptors: Vec<u8>,
         },
         Error(Error),
         /// An event this test does not expect, so the comparison fails on it
@@ -65,6 +95,43 @@ mod tests {
                 program_clock_reference,
             },
             Event::Section { pid, section } => seen_section(pid.get(), &section),
+            Event::ProgramAssociationSection(section) => Seen::ProgramAssociationSection {
+                transport_stream_id: section.transport_stream_id,
+                version_number: section.version_number,
+                current_next_indicator: section.current_next_indicator,
+                section_number: section.section_number,
+                last_section_number: section.last_section_number,
+                programs: section.programs.iter().map(Result::unwrap).collect(),
+            },
+            Event::TsProgramMapSection { pid, section } => Seen::TsProgramMapSection {
+                pid: pid.get(),
+                program_number: section.program_number,
+                version_number: section.version_number,
+                current_next_indicator: section.current_next_indicator,
+                section_number: section.section_number,
+                last_section_number: section.last_section_number,
+                pcr_pid: section.pcr_pid.map(Pid::get),
+                program_info: section.program_info.as_bytes().to_vec(),
+                elementary_streams: section
+                    .elementary_streams
+                    .iter()
+                    .map(Result::unwrap)
+                    .map(|stream| {
+                        (
+                            stream.stream_type.get(),
+                            stream.elementary_pid.get(),
+                            stream.es_info.as_bytes().to_vec(),
+                        )
+                    })
+                    .collect(),
+            },
+            Event::CaSection(section) => Seen::CaSection {
+                version_number: section.version_number,
+                current_next_indicator: section.current_next_indicator,
+                section_number: section.section_number,
+                last_section_number: section.last_section_number,
+                descriptors: section.descriptors.as_bytes().to_vec(),
+            },
             Event::Error(error) => Seen::Error(error),
             other => Seen::Unexpected(format!("{other:?}")),
         }
@@ -93,24 +160,48 @@ mod tests {
         }
     }
 
-    /// The section that starts packet `index` of the fixture, read directly
-    /// from its bytes
-    fn fixture_section(pid: u16, index: usize) -> Seen {
-        let packet = &STANDARD_188[188 * index..188 * (index + 1)];
-        let start = 5 + usize::from(packet[4]);
-        let length = 3 + usize::from(u16::from_be_bytes([
-            packet[start + 1] & 0x0F,
-            packet[start + 2],
-        ]));
-        seen_section(pid, &Section::read(&packet[start..start + length]).unwrap())
+    fn version(value: u8) -> VersionNumber {
+        VersionNumber::try_from(value).unwrap()
     }
 
+    /// The PAT of the fixture, `transport_stream_id` 1 naming program 1 on
+    /// PID 0x1000, as the previous implementation reported it
     fn pat() -> Seen {
-        fixture_section(0x0000, 1)
+        pat_of(0, vec![program(1, 0x1000)])
     }
 
+    fn pat_of(version_number: u8, programs: Vec<Program>) -> Seen {
+        Seen::ProgramAssociationSection {
+            transport_stream_id: 1,
+            version_number: version(version_number),
+            current_next_indicator: true,
+            section_number: 0,
+            last_section_number: 0,
+            programs,
+        }
+    }
+
+    fn program(program_number: u16, program_map_pid: u16) -> Program {
+        Program::ProgramMap {
+            program_number: NonZeroU16::new(program_number).unwrap(),
+            program_map_pid: Pid::try_from(program_map_pid).unwrap(),
+        }
+    }
+
+    /// The PMT of the fixture, its PCR on the video PID 0x100 and its audio
+    /// on 0x101, as the previous implementation reported it
     fn pmt() -> Seen {
-        fixture_section(0x1000, 2)
+        Seen::TsProgramMapSection {
+            pid: 0x1000,
+            program_number: 1,
+            version_number: version(0),
+            current_next_indicator: true,
+            section_number: 0,
+            last_section_number: 0,
+            pcr_pid: Some(0x0100),
+            program_info: Vec::new(),
+            elementary_streams: vec![(0x02, 0x0100, Vec::new()), (0x03, 0x0101, Vec::new())],
+        }
     }
 
     fn pcr(base: u64) -> Seen {
@@ -121,21 +212,10 @@ mod tests {
     }
 
     /// The events of the fixture after `SyncAcquired`, in packet order, as
-    /// read from it with a script independent of this crate
+    /// read from it with a script independent of this crate: the PAT and PMT
+    /// the fixture resends at the same version come once
     fn fixture_events() -> Vec<Seen> {
-        vec![
-            pat(),
-            pmt(),
-            pcr(63_000),
-            pat(),
-            pmt(),
-            pcr(81_000),
-            pat(),
-            pmt(),
-            pcr(99_000),
-            pat(),
-            pmt(),
-        ]
+        vec![pat(), pmt(), pcr(63_000), pcr(81_000), pcr(99_000)]
     }
 
     fn acquired_then(packet_size: PacketSize, rest: Vec<Seen>) -> Vec<Seen> {
@@ -249,11 +329,17 @@ mod tests {
             },
         };
         // Why no PMT from packet 2: the PAT that names its PID is the one that failed
-        let mut expected = acquired_then(
+        let expected = acquired_then(
             PacketSize::Standard188,
-            vec![Seen::Error(crc_error), pcr(63_000)],
+            vec![
+                Seen::Error(crc_error),
+                pcr(63_000),
+                pat(),
+                pmt(),
+                pcr(81_000),
+                pcr(99_000),
+            ],
         );
-        expected.extend(fixture_events().into_iter().skip(3));
         assert_eq!(seen, expected);
     }
 
@@ -285,14 +371,11 @@ mod tests {
             acquired_then(PacketSize::Standard188, fixture_events())
         );
         let mut expected = acquired_then(PacketSize::Standard188, vec![pat()]);
-        expected.extend([
-            Seen::Error(Error::Discontinuity {
-                pid: Pid::PAT,
-                expected: ContinuityCounter::try_from(1).unwrap(),
-                found: ContinuityCounter::try_from(0).unwrap(),
-            }),
-            pat(),
-        ]);
+        expected.push(Seen::Error(Error::Discontinuity {
+            pid: Pid::PAT,
+            expected: ContinuityCounter::try_from(1).unwrap(),
+            found: ContinuityCounter::try_from(0).unwrap(),
+        }));
         expected.extend(fixture_events().into_iter().skip(1));
         assert_eq!(demux(&with_copies(2), 1000), expected);
     }
@@ -434,6 +517,166 @@ mod tests {
                 next_input.len()
             );
         }
+    }
+
+    /// The events of each stream in turn through one demuxer, the input
+    /// ended after each
+    fn demux_in_turn(streams: &[&[u8]]) -> Vec<Vec<Seen>> {
+        let mut demuxer = Demuxer::new(DemuxerConfig::default());
+        let mut turns = Vec::new();
+        for stream in streams {
+            let mut seen = Vec::new();
+            demuxer.handle_input(stream);
+            drain(&mut demuxer, &mut seen);
+            demuxer.finish();
+            drain(&mut demuxer, &mut seen);
+            turns.push(seen);
+        }
+        turns
+    }
+
+    /// A long-form section of `table_id`, with `table_id_extension`, at
+    /// version `version_number`, in force, its `CRC_32` computed
+    fn table_section(
+        table_id: u8,
+        table_id_extension: u16,
+        version_number: u8,
+        body: &[u8],
+    ) -> Vec<u8> {
+        let [high, low] = u16::try_from(body.len() + 9).unwrap().to_be_bytes();
+        let mut bytes = vec![table_id, 0xB0 | high, low];
+        bytes.extend_from_slice(&table_id_extension.to_be_bytes());
+        bytes.extend_from_slice(&[0xC1 | (version_number << 1), 0x00, 0x00]);
+        bytes.extend_from_slice(body);
+        bytes.extend_from_slice(&mpeg2_systems::crc::crc_32(&bytes).to_be_bytes());
+        bytes
+    }
+
+    /// The fixture with each PAT replaced by one of `transport_stream_id` 1
+    /// at `version_number`, naming `programs` (`program_number`, PID)
+    fn with_pat(version_number: u8, programs: &[(u16, u16)]) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (program_number, pid) in programs {
+            body.extend_from_slice(&program_number.to_be_bytes());
+            body.extend_from_slice(&(0xE000 | pid).to_be_bytes());
+        }
+        let section = table_section(0x00, 0x0001, version_number, &body);
+        let mut stream = STANDARD_188.to_vec();
+        for packet in stream.chunks_mut(188) {
+            if packet[1] & 0x1F == 0 && packet[2] == 0 {
+                packet[4] = 0x00;
+                packet[5..5 + section.len()].copy_from_slice(&section);
+                packet[5 + section.len()..].fill(0xFF);
+            }
+        }
+        stream
+    }
+
+    fn pcrs() -> Vec<Seen> {
+        vec![pcr(63_000), pcr(81_000), pcr(99_000)]
+    }
+
+    #[test]
+    fn the_pat_and_pmt_the_stream_resends_are_not_reported_again() {
+        assert_eq!(
+            demux_in_turn(&[STANDARD_188, STANDARD_188]),
+            [
+                acquired_then(PacketSize::Standard188, fixture_events()),
+                pcrs()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_pat_version_is_reported_once() {
+        assert_eq!(
+            demux_in_turn(&[STANDARD_188, &with_pat(1, &[(1, 0x1000)])]),
+            [
+                acquired_then(PacketSize::Standard188, fixture_events()),
+                [vec![pat_of(1, vec![program(1, 0x1000)])], pcrs()].concat(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_program_dropped_from_the_pat_and_named_again_reports_its_pmt_again() {
+        assert_eq!(
+            demux_in_turn(&[
+                STANDARD_188,
+                &with_pat(1, &[]),
+                &with_pat(2, &[(1, 0x1000)])
+            ]),
+            [
+                acquired_then(PacketSize::Standard188, fixture_events()),
+                [vec![pat_of(1, Vec::new())], pcrs()].concat(),
+                [vec![pat_of(2, vec![program(1, 0x1000)]), pmt()], pcrs()].concat(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cat_is_reported() {
+        let descriptors = [0x09, 0x04, 0x0B, 0x00, 0xE1, 0x23];
+        let cat = table_section(0x01, 0xFFFF, 4, &descriptors);
+        let stream = behind_null_packets(&[packet(
+            0x0001,
+            true,
+            0,
+            None,
+            Some(&[&[0x00][..], &cat].concat()),
+        )]);
+        assert_eq!(
+            demux(&stream, 1000),
+            acquired_then(
+                PacketSize::Standard188,
+                vec![Seen::CaSection {
+                    version_number: version(4),
+                    current_next_indicator: true,
+                    section_number: 0,
+                    last_section_number: 0,
+                    descriptors: descriptors.to_vec(),
+                }]
+            )
+        );
+    }
+
+    #[test]
+    fn the_packets_after_a_pmt_are_analyzed_once_the_pmt_is_polled() {
+        let mut stream = STANDARD_188[..188 * 3].to_vec();
+        let mut skipping = STANDARD_188[188 * 2..188 * 3].to_vec();
+        skipping[3] = (skipping[3] & 0xF0) | ((skipping[3] + 2) & 0x0F);
+        stream.extend_from_slice(&skipping);
+        // Why a packet after: the framer cuts a packet once the sync_byte
+        // after it confirms the grid
+        stream.extend(packet(0x1FFF, false, 0, None, Some(&[])));
+        let mut demuxer = Demuxer::new(DemuxerConfig::default());
+        demuxer.handle_input(&stream);
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            seen.push(seen_event(demuxer.poll_event().unwrap()));
+        }
+        let pmt_polled = seen.last() == Some(&pmt());
+        seen.push(seen_event(demuxer.poll_event().unwrap()));
+        let continuity_counter = ContinuityCounter::try_from(skipping[3] & 0x0F).unwrap();
+        assert_eq!(
+            (pmt_polled, seen),
+            (
+                true,
+                acquired_then(
+                    PacketSize::Standard188,
+                    vec![
+                        pat(),
+                        pmt(),
+                        Seen::Error(Error::Discontinuity {
+                            pid: Pid::try_from(0x1000).unwrap(),
+                            expected: ContinuityCounter::try_from((skipping[3] + 15) & 0x0F)
+                                .unwrap(),
+                            found: continuity_counter,
+                        }),
+                    ]
+                )
+            )
+        );
     }
 
     #[test]
