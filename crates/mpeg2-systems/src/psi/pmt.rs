@@ -377,9 +377,7 @@ mod tests {
     use alloc::vec::Vec;
     use core::array;
 
-    #[cfg(feature = "alloc")]
-    use super::ElementaryStreamLoop;
-    use super::{ElementaryStream, Error, TsProgramMapSection};
+    use super::{ElementaryStream, ElementaryStreamLoop, Error, TsProgramMapSection};
     #[cfg(feature = "alloc")]
     use crate::descriptor;
     use crate::descriptor::DescriptorLoop;
@@ -476,6 +474,38 @@ mod tests {
     }
 
     #[test]
+    fn an_element_cut_short_names_the_field_it_ends_in() {
+        let truncated = |required_bits, remaining_bits| field::Error::Truncated {
+            required_bits,
+            remaining_bits,
+        };
+        let first_entry =
+            |bytes: &'static [u8]| ElementaryStreamLoop::from(bytes).iter().next().unwrap();
+
+        assert_eq!(
+            [
+                first_entry(&[0x02, 0xe1]),
+                first_entry(&[0x02, 0xe1, 0x00, 0xf0]),
+                first_entry(&[0x02, 0xe1, 0x00, 0xf0, 0x03, 0x0a]),
+            ],
+            [
+                Err(Error::Field {
+                    field: "elementary_PID",
+                    error: truncated(13, 5)
+                }),
+                Err(Error::Field {
+                    field: "ES_info_length",
+                    error: truncated(12, 4)
+                }),
+                Err(Error::Field {
+                    field: "ES_info",
+                    error: truncated(24, 8)
+                }),
+            ]
+        );
+    }
+
+    #[test]
     fn an_element_whose_descriptors_run_past_the_loop_ends_it_after_the_elements_before() {
         let body = [
             0xff, 0xff, 0xf0, 0x00, 0x02, 0xe1, 0x00, 0xf0, 0x00, 0x0f, 0xe1, 0x01, 0xf0, 0x05,
@@ -495,7 +525,7 @@ mod tests {
                         pid(0x0100)
                     ))),
                     Some(Err(Error::Field {
-                        field: "ES_info_length",
+                        field: "ES_info",
                         error: field::Error::Truncated {
                             required_bits: 40,
                             remaining_bits: 16
@@ -616,7 +646,7 @@ mod tests {
                 Err(Error::ElementaryPid { pid: pid(0x000f) }),
                 Err(Error::ElementaryPid { pid: Pid::NULL }),
                 Err(Error::Field {
-                    field: "ES_info_length",
+                    field: "elementary_PID",
                     error: field::Error::Truncated {
                         required_bits: 13,
                         remaining_bits: 5
