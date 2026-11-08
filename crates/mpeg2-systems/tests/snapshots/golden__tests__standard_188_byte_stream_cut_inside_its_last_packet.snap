@@ -1,0 +1,8 @@
+---
+source: crates/mpeg2-systems/tests/golden.rs
+expression: "events_of(&STANDARD_188[..STANDARD_188.len() - 100])"
+---
+[
+    "SyncAcquired { packet_size: Standard188 }",
+    "Unsynchronized { bytes: 88 bytes [47 01 01 3a 7e 00 ff ff ff ff ff ff ff ff ff ff ..] }",
+]
