@@ -136,6 +136,18 @@ pub enum Event<'a> {
         bytes: &'a [u8],
         /// How the bytes failed to read as a PES packet
         error: pes::Error,
+        /// Input offset of the Transport Packet the PES packet started in,
+        /// counted from the first byte handed to
+        /// [`Demuxer::handle_input`](super::Demuxer::handle_input)
+        ///
+        /// Every byte handed over is counted, those reported as
+        /// [`Event::Unsynchronized`] and those after the end
+        /// [`Demuxer::finish`](super::Demuxer::finish) marks included, so the
+        /// offset matches a caller's own count across an end and a resume,
+        /// and tells which call handed over the packet's head. The offset is
+        /// that of the packet's unit: for a 192-byte packet, of the timestamp
+        /// before it.
+        start_offset: u64,
     },
     /// The bytes of a PES packet on a subscribed PID that did not reach its
     /// end
@@ -151,6 +163,18 @@ pub enum Event<'a> {
         pid: Pid,
         /// The bytes gathered, borrowed from the demuxer
         bytes: &'a [u8],
+        /// Input offset of the Transport Packet the PES packet started in,
+        /// counted from the first byte handed to
+        /// [`Demuxer::handle_input`](super::Demuxer::handle_input)
+        ///
+        /// Every byte handed over is counted, those reported as
+        /// [`Event::Unsynchronized`] and those after the end
+        /// [`Demuxer::finish`](super::Demuxer::finish) marks included, so the
+        /// offset matches a caller's own count across an end and a resume,
+        /// and tells which call handed over the packet's head. The offset is
+        /// that of the packet's unit: for a 192-byte packet, of the timestamp
+        /// before it.
+        start_offset: u64,
     },
     /// Input that was not cut into a Transport Packet
     ///

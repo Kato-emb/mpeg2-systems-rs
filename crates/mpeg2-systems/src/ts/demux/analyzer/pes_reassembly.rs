@@ -224,7 +224,11 @@ impl PesReassembler {
     /// Ends the PES packet in flight, if any, and queues it as cut short
     fn close_truncated(&mut self, pid: Pid, pending: &mut VecDeque<Pending>) {
         if let Some(bytes) = self.close() {
-            pending.push_back(Pending::TruncatedPesPacket { pid, bytes });
+            pending.push_back(Pending::TruncatedPesPacket {
+                pid,
+                bytes,
+                start_offset: self.start_offset,
+            });
         }
     }
 }

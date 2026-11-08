@@ -51,7 +51,10 @@ enum Seen {
         from_packet: bool,
         start_offset: u64,
     },
-    Truncated(Vec<u8>),
+    Truncated {
+        bytes: Vec<u8>,
+        start_offset: u64,
+    },
     Overrun {
         discarded_bytes: usize,
     },
@@ -120,9 +123,14 @@ fn seen(reassembly: &PesReassembly, payload: &[u8], pending: VecDeque<Pending>) 
                 from_packet: false,
                 start_offset,
             },
-            Pending::TruncatedPesPacket { pid, bytes } => {
-                Seen::Truncated(reassembly.bytes(pid, bytes).to_vec())
-            }
+            Pending::TruncatedPesPacket {
+                pid,
+                bytes,
+                start_offset,
+            } => Seen::Truncated {
+                bytes: reassembly.bytes(pid, bytes).to_vec(),
+                start_offset,
+            },
             Pending::Ready(Event::Error(Error::PesBufferOverrun {
                 pid,
                 discarded_bytes,
@@ -320,7 +328,10 @@ fn a_gap_in_the_counter_ends_the_pes_packet_in_flight_as_truncated() {
             ),
             [
                 vec![],
-                vec![Seen::Truncated(head.clone())],
+                vec![Seen::Truncated {
+                    bytes: head.clone(),
+                    start_offset: FIRST_PACKET,
+                }],
                 vec![Seen::Ended {
                     bytes: next.clone(),
                     from_packet: true,
@@ -474,7 +485,13 @@ fn the_end_of_input_truncates_a_pes_packet_short_of_its_declared_length() {
     let head = pes(20, &[0x01, 0x02, 0x03]);
     let mut reassembly = subscribed(BUFFER_LIMIT);
     push(&mut reassembly, &start(&head, FIRST_PACKET));
-    assert_eq!(finish(&mut reassembly), [Seen::Truncated(head)]);
+    assert_eq!(
+        finish(&mut reassembly),
+        [Seen::Truncated {
+            bytes: head,
+            start_offset: FIRST_PACKET,
+        }]
+    );
 }
 
 #[test]
@@ -483,7 +500,10 @@ fn the_end_of_input_truncates_a_pes_packet_too_short_to_tell_its_length() {
     push(&mut reassembly, &start(&[0x00, 0x00, 0x01], FIRST_PACKET));
     assert_eq!(
         finish(&mut reassembly),
-        [Seen::Truncated(vec![0x00, 0x00, 0x01])]
+        [Seen::Truncated {
+            bytes: vec![0x00, 0x00, 0x01],
+            start_offset: FIRST_PACKET,
+        }]
     );
 }
 

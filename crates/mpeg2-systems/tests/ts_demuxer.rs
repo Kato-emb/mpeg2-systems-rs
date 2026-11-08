@@ -87,10 +87,12 @@ mod tests {
             pid: u16,
             bytes: Vec<u8>,
             error: pes::Error,
+            start_offset: u64,
         },
         TruncatedPesPacket {
             pid: u16,
             bytes: Vec<u8>,
+            start_offset: u64,
         },
         Error(Error),
         /// An event this test does not expect, so the comparison fails on it
@@ -172,14 +174,25 @@ mod tests {
                 payload_length: packet.payload.len(),
                 start_offset,
             },
-            Event::UnreadablePesPacket { pid, bytes, error } => Seen::UnreadablePesPacket {
+            Event::UnreadablePesPacket {
+                pid,
+                bytes,
+                error,
+                start_offset,
+            } => Seen::UnreadablePesPacket {
                 pid: pid.get(),
                 bytes: bytes.to_vec(),
                 error,
+                start_offset,
             },
-            Event::TruncatedPesPacket { pid, bytes } => Seen::TruncatedPesPacket {
+            Event::TruncatedPesPacket {
+                pid,
+                bytes,
+                start_offset,
+            } => Seen::TruncatedPesPacket {
                 pid: pid.get(),
                 bytes: bytes.to_vec(),
+                start_offset,
             },
             Event::Error(error) => Seen::Error(error),
             other => Seen::Unexpected(format!("{other:?}")),
@@ -942,6 +955,7 @@ mod tests {
                 Seen::TruncatedPesPacket {
                     pid: AUDIO_PID,
                     bytes: head.clone(),
+                    start_offset: 28 * 188,
                 },
                 Seen::PesPacket {
                     pid: AUDIO_PID,
@@ -968,6 +982,7 @@ mod tests {
                     Seen::TruncatedPesPacket {
                         pid: AUDIO_PID,
                         bytes: head,
+                        start_offset: 47 * 188,
                     },
                 ],
                 vec![

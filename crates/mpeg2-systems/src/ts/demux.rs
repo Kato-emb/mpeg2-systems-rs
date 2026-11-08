@@ -78,7 +78,11 @@ enum Pending {
         start_offset: u64,
     },
     /// A range of the PES reassembly buffer of `pid`: a PES packet cut short
-    TruncatedPesPacket { pid: Pid, bytes: Range<usize> },
+    TruncatedPesPacket {
+        pid: Pid,
+        bytes: Range<usize>,
+        start_offset: u64,
+    },
 }
 
 /// Where the bytes a queued section or PES packet lends are
@@ -327,7 +331,12 @@ impl Demuxer {
                     Lent::Reassembled(range) => self.analyzer.pes_bytes(pid, range),
                 };
                 PesPacket::read(bytes).map_or_else(
-                    |error| Event::UnreadablePesPacket { pid, bytes, error },
+                    |error| Event::UnreadablePesPacket {
+                        pid,
+                        bytes,
+                        error,
+                        start_offset,
+                    },
                     |packet| Event::PesPacket {
                         pid,
                         packet,
@@ -335,9 +344,14 @@ impl Demuxer {
                     },
                 )
             }
-            Pending::TruncatedPesPacket { pid, bytes } => Event::TruncatedPesPacket {
+            Pending::TruncatedPesPacket {
+                pid,
+                bytes,
+                start_offset,
+            } => Event::TruncatedPesPacket {
                 pid,
                 bytes: self.analyzer.pes_bytes(pid, bytes),
+                start_offset,
             },
         };
         Some(event)

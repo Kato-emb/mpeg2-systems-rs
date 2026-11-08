@@ -662,6 +662,7 @@ fn the_end_of_input_reports_a_pes_packet_cut_short_as_truncated() {
             described(&Event::TruncatedPesPacket {
                 pid: Pid::try_from(PES_PID).unwrap(),
                 bytes: &stuffed(&head),
+                start_offset: FIRST_PACKET_OFFSET,
             }),
         ]
     );
@@ -689,6 +690,7 @@ fn a_continuity_break_reports_the_pes_packet_in_flight_as_truncated() {
             described(&Event::TruncatedPesPacket {
                 pid,
                 bytes: &stuffed(&head),
+                start_offset: FIRST_PACKET_OFFSET,
             }),
         ]
     );
@@ -733,6 +735,7 @@ fn reassembled_bytes_that_do_not_read_as_a_pes_packet_are_reported_with_the_erro
                 error: pes::Error::PacketStartCodePrefix {
                     packet_start_code_prefix: 0xAA_BBCC,
                 },
+                start_offset: FIRST_PACKET_OFFSET,
             }),
         ]
     );
