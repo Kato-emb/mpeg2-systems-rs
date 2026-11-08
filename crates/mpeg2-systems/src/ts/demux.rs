@@ -59,7 +59,7 @@ impl Default for DemuxerConfig {
 
 /// An event queued for [`Demuxer::poll_event`], holding the ranges of the
 /// bytes it lends rather than the bytes
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 enum Pending {
     /// An event that lends nothing
     Ready(Event<'static>),
@@ -86,7 +86,7 @@ enum Pending {
 }
 
 /// Where the bytes a queued section or PES packet lends are
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 enum Lent {
     /// A range of the framer's buffer: the section or PES packet lay inside
     /// one packet

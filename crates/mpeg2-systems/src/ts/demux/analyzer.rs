@@ -37,7 +37,7 @@ use version_gate::{Admission, TableSection, VersionGate};
 ///
 /// Sections are reassembled on the PAT and CAT PIDs, and on every PID the
 /// PAT names for a program map; PES packets on the PIDs subscribed to.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub(super) struct PacketAnalyzer {
     continuity: ContinuityTracker,
     reassemblers: BTreeMap<Pid, SectionReassembler>,
@@ -46,7 +46,7 @@ pub(super) struct PacketAnalyzer {
 }
 
 /// What the analyzer knows of the PAT, PMTs and CAT on air
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 struct Tables {
     routes: ProgramMapRoutes,
     gate: VersionGate,

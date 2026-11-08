@@ -56,7 +56,7 @@ pub(super) enum Completed {
 /// `buffer[..in_flight_start]` holds the sections the latest packet
 /// completed, which stay lent until the next packet of the PID;
 /// `buffer[in_flight_start..]` is the section in flight.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SectionReassembler {
     buffer: Vec<u8>,
     in_flight_start: usize,

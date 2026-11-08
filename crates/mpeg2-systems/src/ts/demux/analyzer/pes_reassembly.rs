@@ -28,7 +28,7 @@ enum Observation {
 }
 
 /// The PIDs subscribed to, and the PES packet in flight on each
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub(super) struct PesReassembly {
     buffer_limit: usize,
     reassemblers: BTreeMap<Pid, PesReassembler>,
@@ -39,7 +39,7 @@ pub(super) struct PesReassembly {
 /// `buffer[..in_flight_start]` holds the PES packets the latest packet of
 /// the PID ended, which stay lent until the next packet of the PID;
 /// `buffer[in_flight_start..]` is the PES packet in flight.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default)]
 struct PesReassembler {
     buffer: Vec<u8>,
     in_flight_start: usize,

@@ -34,7 +34,7 @@ pub(super) enum Admission {
 }
 
 /// The version each table section in force was last reported at
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct VersionGate {
     reported: BTreeMap<TableSection, VersionNumber>,
 }

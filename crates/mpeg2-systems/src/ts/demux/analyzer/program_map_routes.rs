@@ -11,7 +11,7 @@ use crate::psi::pat::{Program, ProgramAssociationSection};
 use crate::ts::Pid;
 
 /// The PAT sections of the latest version, and the programs the PAT names
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ProgramMapRoutes {
     gathering: Option<Gathering>,
     // Why not keep these in Gathering: the vectors are swapped, cleared and
@@ -26,7 +26,7 @@ pub(super) struct ProgramMapRoutes {
 }
 
 /// Which PAT sections of one version are in
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Gathering {
     transport_stream_id: u16,
     version_number: VersionNumber,
