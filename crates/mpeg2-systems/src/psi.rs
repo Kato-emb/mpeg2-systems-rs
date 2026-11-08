@@ -158,7 +158,7 @@ impl From<u8> for TableId {
 /// # Ok::<(), VersionNumberOutOfRange>(())
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct VersionNumber(u8);
+pub struct VersionNumber(pub(crate) u8);
 
 impl VersionNumber {
     /// Number of distinct versions, 32

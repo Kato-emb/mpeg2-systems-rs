@@ -5,7 +5,7 @@
 mod tests {
     use core::error::Error;
 
-    use mpeg2_systems::ps::{pack_header, system_header};
+    use mpeg2_systems::ps::{pack_header, psm, system_header};
     use mpeg2_systems::psi::{cat, pat, pmt, section};
     use mpeg2_systems::ts::{adaptation_field, packet};
     use mpeg2_systems::{descriptor, field, pes};
@@ -24,7 +24,7 @@ mod tests {
             field: "descriptor_length",
             error: cause,
         };
-        let errors: [&dyn Error; 15] = [
+        let errors: [&dyn Error; 17] = [
             &packet::Error::AdaptationField(adaptation_field::Error::Field {
                 field: "PCR",
                 error: cause,
@@ -64,6 +64,11 @@ mod tests {
                 field: "rate_bound",
                 error: cause,
             },
+            &psm::Error::Field {
+                field: "program_stream_info",
+                error: cause,
+            },
+            &psm::Error::Descriptor(descriptor),
         ];
 
         assert_eq!(
@@ -74,7 +79,7 @@ mod tests {
                     source.is_some_and(|source| error.to_string().contains(&source)),
                 )
             }),
-            [(true, false); 15]
+            [(true, false); 17]
         );
     }
 }
