@@ -65,20 +65,28 @@ impl VersionGate {
     }
 
     /// Forgets the PAT sections of a Transport Stream other than
-    /// `transport_stream_id`, and the PMT sections of each `program_map_PID`
-    /// and `program_number` that `named` refuses
+    /// `transport_stream_id` or past `last_section_number`, if given, and the
+    /// PMT sections of each `program_map_PID` and `program_number` that
+    /// `named` refuses
     pub(super) fn retain(
         &mut self,
         transport_stream_id: u16,
+        last_section_number: Option<u8>,
         mut named: impl FnMut(Pid, u16) -> bool,
     ) {
         // Why forget another transport_stream_id: the memory would otherwise
         // grow with each one a stream names, which untrusted input chooses.
         self.reported.retain(|section, _| match *section {
+            // Why forget a section past the last: its version stays
+            // remembered otherwise, and when the version numbers come round
+            // to it again, the section that comes back is taken for a resend.
             TableSection::ProgramAssociation {
                 transport_stream_id: remembered,
-                ..
-            } => remembered == transport_stream_id,
+                section_number,
+            } => {
+                remembered == transport_stream_id
+                    && last_section_number.is_none_or(|last| section_number <= last)
+            }
             TableSection::TsProgramMap {
                 pid,
                 program_number,
@@ -166,20 +174,25 @@ mod tests {
     }
 
     #[test]
-    fn forgotten_programs_and_transport_streams_are_new_again_at_the_same_version() {
+    fn forgotten_programs_transport_streams_and_sections_are_new_again_at_the_same_version() {
         let mut gate = VersionGate::new();
-        let sections = [pmt(1), pmt(2), pat(1), pat(2)];
+        let past_the_last = TableSection::ProgramAssociation {
+            transport_stream_id: 2,
+            section_number: 1,
+        };
+        let sections = [pmt(1), pmt(2), pat(1), pat(2), past_the_last];
         for section in sections {
             gate.admit(section, version(3));
         }
-        gate.retain(2, |_, program_number| program_number == 2);
+        gate.retain(2, Some(0), |_, program_number| program_number == 2);
         assert_eq!(
             sections.map(|section| gate.admit(section, version(3))),
             [
                 Admission::New,
                 Admission::Resent,
                 Admission::New,
-                Admission::Resent
+                Admission::Resent,
+                Admission::New
             ]
         );
     }

@@ -2,6 +2,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::mem;
 
 use super::section_reassembly::SectionReassembler;
 use super::version_gate::VersionGate;
@@ -9,16 +10,19 @@ use crate::psi::VersionNumber;
 use crate::psi::pat::{Program, ProgramAssociationSection};
 use crate::ts::Pid;
 
-/// The PAT sections of the latest version, and the programs they name
+/// The PAT sections of the latest version, and the programs the PAT names
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct ProgramMapRoutes {
     gathering: Option<Gathering>,
-    // Why not keep this in Gathering: the vector is cleared and reused from
-    // version to version, so following a PAT allocates nothing once it has
-    // grown.
-    /// The `program_map_PID` and `program_number` of each program the
-    /// sections gathered name, sorted
-    programs: Vec<(Pid, u16)>,
+    // Why not keep these in Gathering: the vectors are swapped, cleared and
+    // reused from version to version, so following a PAT allocates nothing
+    // once they have grown.
+    /// The `program_map_PID` and `program_number` of each program the latest
+    /// whole version names, sorted
+    named: Vec<(Pid, u16)>,
+    /// The same, for each program the sections of the version being gathered
+    /// name, sorted
+    gathered: Vec<(Pid, u16)>,
 }
 
 /// Which PAT sections of one version are in
@@ -47,25 +51,29 @@ impl ProgramMapRoutes {
     pub(super) const fn new() -> Self {
         Self {
             gathering: None,
-            programs: Vec::new(),
+            named: Vec::new(),
+            gathered: Vec::new(),
         }
     }
 
-    /// Returns whether a section of the latest version names `program_number`
-    /// on `program_map_pid`
+    /// Returns whether the latest whole version, or a section of the version
+    /// being gathered, names `program_number` on `program_map_pid`
     pub(super) fn names(&self, program_map_pid: Pid, program_number: u16) -> bool {
-        self.programs
-            .binary_search(&(program_map_pid, program_number))
-            .is_ok()
+        [&self.named, &self.gathered].into_iter().any(|programs| {
+            programs
+                .binary_search(&(program_map_pid, program_number))
+                .is_ok()
+        })
     }
 
     /// Takes a PAT section in force, and follows the program maps it names
     ///
-    /// Each program map named gains a reassembler at once, and the programs
-    /// of a version replace those of the previous one as its sections come
-    /// in. Once every section of the version is in, a program map PID the
-    /// version no longer names loses its reassembler, and a program it no
-    /// longer names loses its version memory.
+    /// Each program a section names is named at once, and its program map
+    /// gains a reassembler. Once every section of the version is in, the
+    /// version's programs replace those of the previous one: a program map
+    /// PID the version no longer names loses its reassembler, and a program
+    /// it no longer names, or a PAT section past its `last_section_number`,
+    /// loses its version memory.
     pub(super) fn follow(
         &mut self,
         pat: &ProgramAssociationSection<'_>,
@@ -76,14 +84,14 @@ impl ProgramMapRoutes {
             (Observation::Repeated, _) => return,
             (Observation::Joins, Some(gathering)) => gathering,
             (Observation::Joins | Observation::Starts, gathering) => {
-                // Why forget the programs of two versions back here, not only
-                // once a version is whole: a stream that never completes a
-                // version would otherwise grow the version memory with every
-                // version it starts.
-                gate.retain(pat.transport_stream_id, |pid, program_number| {
-                    self.programs.binary_search(&(pid, program_number)).is_ok()
+                // Why forget the programs of a version left unfinished here,
+                // not only once a version is whole: a stream that never
+                // completes a version would otherwise grow the version memory
+                // with every version it starts.
+                gate.retain(pat.transport_stream_id, None, |pid, program_number| {
+                    self.named.binary_search(&(pid, program_number)).is_ok()
                 });
-                self.programs.clear();
+                self.gathered.clear();
                 gathering.insert(Gathering {
                     transport_stream_id: pat.transport_stream_id,
                     version_number: pat.version_number,
@@ -111,7 +119,7 @@ impl ProgramMapRoutes {
                 reassemblers
                     .entry(program_map_pid)
                     .or_insert_with(SectionReassembler::new);
-                self.programs.push((program_map_pid, program_number.get()));
+                self.gathered.push((program_map_pid, program_number.get()));
             }
         }
         // Why sort and search rather than scan the programs for each key: a
@@ -119,8 +127,8 @@ impl ProgramMapRoutes {
         // multiply with the PIDs followed and the PMT sections looked up.
         // Why not sort: a stable sort allocates a scratch buffer for a long
         // vector, and equal pairs need no order kept.
-        self.programs.sort_unstable();
-        self.programs.dedup();
+        self.gathered.sort_unstable();
+        self.gathered.dedup();
         // Why compare the count with last_section_number: Section::read
         // refuses a section_number past last_section_number, so the bits set
         // are all within 0..=last_section_number, and the version is whole
@@ -133,16 +141,20 @@ impl ProgramMapRoutes {
         if received <= u32::from(gathering.last_section_number) {
             return;
         }
+        mem::swap(&mut self.named, &mut self.gathered);
+        self.gathered.clear();
         reassemblers.retain(|pid, _| {
             [Pid::PAT, Pid::CAT].contains(pid)
                 || self
-                    .programs
+                    .named
                     .binary_search_by_key(pid, |&(named, _)| named)
                     .is_ok()
         });
-        gate.retain(pat.transport_stream_id, |pid, program_number| {
-            self.names(pid, program_number)
-        });
+        gate.retain(
+            pat.transport_stream_id,
+            Some(pat.last_section_number),
+            |pid, program_number| self.named.binary_search(&(pid, program_number)).is_ok(),
+        );
     }
 }
 
@@ -225,10 +237,10 @@ mod tests {
         gate: VersionGate,
     }
 
-    /// The PIDs reassembled, the programs named (`program_map_PID`,
-    /// `program_number`), and whether the version memory holds each PMT asked
-    /// about
-    type State = (Vec<u16>, Vec<(u16, u16)>, Vec<bool>);
+    /// The PIDs reassembled, the programs of the latest whole version and of
+    /// the version being gathered (`program_map_PID`, `program_number`), and
+    /// whether the version memory holds each PMT asked about
+    type State = (Vec<u16>, Vec<(u16, u16)>, Vec<(u16, u16)>, Vec<bool>);
 
     impl Fixture {
         fn new() -> Self {
@@ -258,12 +270,12 @@ mod tests {
 
         fn state(&self, programs: &[(u16, u16)]) -> State {
             let pids = self.reassemblers.keys().map(|pid| pid.get()).collect();
-            let named = self
-                .routes
-                .programs
-                .iter()
-                .map(|&(pid, program_number)| (pid.get(), program_number))
-                .collect();
+            let listed = |programs: &[(Pid, u16)]| {
+                programs
+                    .iter()
+                    .map(|&(pid, program_number)| (pid.get(), program_number))
+                    .collect()
+            };
             let mut gate = self.gate.clone();
             let remembered = programs
                 .iter()
@@ -271,7 +283,12 @@ mod tests {
                     gate.admit(pmt(pid, program_number), version_0()) == Admission::Resent
                 })
                 .collect();
-            (pids, named, remembered)
+            (
+                pids,
+                listed(&self.routes.named),
+                listed(&self.routes.gathered),
+                remembered,
+            )
         }
     }
 
@@ -303,6 +320,7 @@ mod tests {
             (
                 vec![0x0000, 0x0100, 0x0200],
                 vec![(0x0100, 1), (0x0200, 2)],
+                vec![],
                 vec![]
             )
         );
@@ -322,12 +340,14 @@ mod tests {
             (
                 (
                     vec![0x0000, 0x0100, 0x0200, 0x0300],
+                    vec![(0x0100, 1), (0x0200, 2)],
                     vec![(0x0300, 3)],
                     vec![true, true, false]
                 ),
                 (
                     vec![0x0000, 0x0100, 0x0300],
                     vec![(0x0100, 1), (0x0300, 3)],
+                    vec![],
                     vec![true, false, false]
                 ),
             )
@@ -346,6 +366,7 @@ mod tests {
             (
                 vec![0x0000, 0x0200, 0x0300],
                 vec![(0x0200, 2), (0x0300, 3)],
+                vec![],
                 vec![false, true, false]
             )
         );
@@ -361,7 +382,12 @@ mod tests {
             .follow(&pat_section(1, 0, 0, &[(2, 0x0100)]));
         assert_eq!(
             fixture.state(&shared),
-            (vec![0x0000, 0x0100], vec![(0x0100, 2)], vec![false, true])
+            (
+                vec![0x0000, 0x0100],
+                vec![(0x0100, 2)],
+                vec![],
+                vec![false, true]
+            )
         );
     }
 

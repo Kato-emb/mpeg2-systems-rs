@@ -100,6 +100,18 @@ fn table_section(
     version_number: u8,
     body: &[u8],
 ) -> Vec<u8> {
+    section_of_table(table_id, table_id_extension, version_number, (0, 0), body)
+}
+
+/// A long-form section as [`table_section`] makes, `section_number` and
+/// `last_section_number` given
+fn section_of_table(
+    table_id: u8,
+    table_id_extension: u16,
+    version_number: u8,
+    (section_number, last_section_number): (u8, u8),
+    body: &[u8],
+) -> Vec<u8> {
     let length = u16::try_from(body.len().checked_add(9).unwrap()).unwrap();
     let [high, low] = length.to_be_bytes();
     let [extension_high, extension_low] = table_id_extension.to_be_bytes();
@@ -110,8 +122,8 @@ fn table_section(
         extension_high,
         extension_low,
         0xC1 | (version_number << 1),
-        0x00,
-        0x00,
+        section_number,
+        last_section_number,
     ];
     bytes.extend_from_slice(body);
     bytes.extend_from_slice(&crate::crc::crc_32(&bytes).to_be_bytes());
@@ -119,12 +131,18 @@ fn table_section(
 }
 
 fn pat_section(version_number: u8, programs: &[(u16, u16)]) -> Vec<u8> {
+    pat_section_of(version_number, (0, 0), programs)
+}
+
+/// A PAT section as [`pat_section`] makes, `section_number` and
+/// `last_section_number` given
+fn pat_section_of(version_number: u8, numbers: (u8, u8), programs: &[(u16, u16)]) -> Vec<u8> {
     let mut body = Vec::new();
     for (program_number, pid) in programs {
         body.extend_from_slice(&program_number.to_be_bytes());
         body.extend_from_slice(&(0xE000 | pid).to_be_bytes());
     }
-    table_section(0x00, 0x0001, version_number, &body)
+    section_of_table(0x00, 0x0001, version_number, numbers, &body)
 }
 
 fn pmt_section(program_number: u16, version_number: u8, streams: &[(u8, u16)]) -> Vec<u8> {
@@ -492,4 +510,56 @@ fn the_version_memory_holds_no_more_pmts_than_the_pat_names() {
     let mut demuxer = Demuxer::new(DemuxerConfig::default());
     events_of(&mut demuxer, &behind_null_packets(&packets));
     assert_eq!(demuxer.analyzer.tables.gate.len(), 2);
+}
+
+#[test]
+fn the_programs_of_a_version_stay_named_until_the_next_version_is_whole() {
+    let first = pat_section(0, &[(1, 0x0100), (2, 0x0200)]);
+    let next_without_program_1 = pat_section_of(1, (0, 1), &[(2, 0x0200)]);
+    let next_with_program_1 = pat_section_of(1, (1, 1), &[(1, 0x0100)]);
+    let pmt_0 = pmt_section(1, 0, &[(0x1B, 0x0101)]);
+    let pmt_1 = pmt_section(1, 1, &[(0x1B, 0x0101)]);
+    assert_eq!(
+        demux(&[
+            section_packet(0x0000, 0, &first),
+            section_packet(0x0100, 0, &pmt_0),
+            section_packet(0x0000, 1, &next_without_program_1),
+            section_packet(0x0100, 1, &pmt_1),
+            section_packet(0x0100, 2, &pmt_1),
+            section_packet(0x0000, 2, &next_with_program_1),
+            section_packet(0x0100, 3, &pmt_1),
+        ]),
+        [
+            acquired(),
+            pat_event(&first),
+            pmt_event(0x0100, &pmt_0),
+            pat_event(&next_without_program_1),
+            pmt_event(0x0100, &pmt_1),
+            pat_event(&next_with_program_1),
+        ]
+    );
+}
+
+#[test]
+fn a_section_a_whole_version_lacks_is_new_again_when_its_version_comes_back() {
+    let two_sections = [
+        pat_section_of(0, (0, 1), &[(1, 0x0100)]),
+        pat_section_of(0, (1, 1), &[(2, 0x0200)]),
+    ];
+    let pmt = pmt_section(2, 0, &[(0x1B, 0x0201)]);
+    let mut continuity_counters = (0_u8..16).cycle();
+    let mut on_pat =
+        |section: &[u8]| section_packet(0x0000, continuity_counters.next().unwrap(), section);
+    let mut packets: Vec<Vec<u8>> = two_sections.iter().map(|section| on_pat(section)).collect();
+    packets.push(section_packet(0x0200, 0, &pmt));
+    for version_number in 1..32 {
+        packets.push(on_pat(&pat_section(version_number, &[(1, 0x0100)])));
+    }
+    packets.extend(two_sections.iter().map(|section| on_pat(section)));
+    packets.push(section_packet(0x0200, 1, &pmt));
+    let pmts: Vec<String> = demux(&packets)
+        .into_iter()
+        .filter(|event| event.starts_with("TsProgramMapSection"))
+        .collect();
+    assert_eq!(pmts, [pmt_event(0x0200, &pmt), pmt_event(0x0200, &pmt)]);
 }
