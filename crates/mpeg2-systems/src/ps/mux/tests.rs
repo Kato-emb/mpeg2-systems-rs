@@ -2,7 +2,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::*;
-use crate::pes::{OptionalHeader, PesPacket, PesPacketLength, pes_packet_length};
+use crate::pes::{OptionalHeader, PesPacketLength, pes_packet_length};
+use crate::time::{ClockReference, Timestamp};
 
 /// `stream_id` of the first video stream
 const VIDEO: u8 = 0xE0;
@@ -55,7 +56,9 @@ fn shapes(packets: &[PesPacket<'_>]) -> Vec<(Option<u64>, Option<u64>, usize)> {
         .collect()
 }
 
-fn video_packet<'a>(pts: Option<u64>, dts: Option<u64>, payload: &'a [u8]) -> PesPacket<'a> {
+/// A video PES packet carrying `payload`, with an optional header holding
+/// the timestamps given
+fn video_packet(pts: Option<u64>, dts: Option<u64>, payload: &[u8]) -> PesPacket<'_> {
     let mut header = OptionalHeader::new();
     header.pts = pts.map(timestamp);
     header.dts = dts.map(timestamp);
@@ -64,18 +67,16 @@ fn video_packet<'a>(pts: Option<u64>, dts: Option<u64>, payload: &'a [u8]) -> Pe
     packet
 }
 
+fn write(packet: &PesPacket<'_>) -> (usize, Vec<u8>) {
+    let mut out = Vec::new();
+    let written = Muxer::new().write_pes_packets(packet, &mut out).unwrap();
+    (written, out)
+}
+
 #[test]
 fn a_payload_too_long_for_one_packet_splits_and_rejoins() {
     let payload = counting_payload(200_000);
-    let mut out = Vec::new();
-    let written = write_pes_packets(
-        StreamId::from(VIDEO),
-        Some(timestamp(90_000)),
-        Some(timestamp(86_400)),
-        &payload,
-        &mut out,
-    )
-    .unwrap();
+    let (written, out) = write(&video_packet(Some(90_000), Some(86_400), &payload));
     let packets = packets(&out);
     assert_eq!(
         (
@@ -99,33 +100,15 @@ fn a_payload_too_long_for_one_packet_splits_and_rejoins() {
 #[test]
 fn a_payload_filling_one_packet_exactly_is_not_split() {
     let payload = counting_payload(65_527);
-    let mut out = Vec::new();
-    let written = write_pes_packets(
-        StreamId::from(VIDEO),
-        Some(timestamp(0)),
-        None,
-        &payload,
-        &mut out,
-    )
-    .unwrap();
-    assert_eq!(
-        (written, packets(&out)),
-        (1, vec![video_packet(Some(0), None, &payload)])
-    );
+    let packet = video_packet(Some(0), None, &payload);
+    let (written, out) = write(&packet);
+    assert_eq!((written, packets(&out)), (1, vec![packet]));
 }
 
 #[test]
 fn a_payload_one_byte_over_one_packet_goes_on_in_a_second_without_timestamps() {
     let payload = counting_payload(65_528);
-    let mut out = Vec::new();
-    let written = write_pes_packets(
-        StreamId::from(VIDEO),
-        Some(timestamp(0)),
-        None,
-        &payload,
-        &mut out,
-    )
-    .unwrap();
+    let (written, out) = write(&video_packet(Some(0), None, &payload));
     let (first, second) = payload.split_at(65_527);
     assert_eq!(
         (written, packets(&out)),
@@ -140,57 +123,57 @@ fn a_payload_one_byte_over_one_packet_goes_on_in_a_second_without_timestamps() {
 }
 
 #[test]
-fn an_empty_payload_still_carries_its_timestamps() {
-    let mut out = Vec::new();
-    let written = write_pes_packets(
-        StreamId::from(VIDEO),
-        Some(timestamp(45_000)),
-        None,
-        &[],
-        &mut out,
-    )
-    .unwrap();
+fn the_packets_after_the_first_keep_its_header_but_its_times() {
+    let payload = counting_payload(70_000);
+    let mut header = OptionalHeader::new();
+    header.pts = Some(timestamp(90_000));
+    header.escr = Some(ClockReference::new(1_000, 0).unwrap());
+    header.copyright = true;
+    header.stuffing_bytes = 2;
+    let mut packet = PesPacket::new(StreamId::from(VIDEO), &payload);
+    packet.optional_header = Some(header.clone());
+    let (written, out) = write(&packet);
+    let mut continued = header.clone();
+    continued.pts = None;
+    continued.escr = None;
+    let first_length = usize::from(u16::MAX) - header.encoded_len();
+    let (first, second) = payload.split_at(first_length);
+    let mut expected_first = PesPacket::new(StreamId::from(VIDEO), first);
+    expected_first.optional_header = Some(header);
+    let mut expected_second = PesPacket::new(StreamId::from(VIDEO), second);
+    expected_second.optional_header = Some(continued);
     assert_eq!(
         (written, packets(&out)),
-        (1, vec![video_packet(Some(45_000), None, &[])])
+        (2, vec![expected_first, expected_second])
     );
 }
 
 #[test]
+fn an_empty_payload_still_carries_its_timestamps() {
+    let packet = video_packet(Some(45_000), None, &[]);
+    let (written, out) = write(&packet);
+    assert_eq!((written, packets(&out)), (1, vec![packet]));
+}
+
+#[test]
 fn a_packet_written_without_timestamps_round_trips() {
-    let mut out = Vec::new();
-    let written =
-        write_pes_packets(StreamId::from(VIDEO), None, None, &[0xAA, 0xBB], &mut out).unwrap();
-    assert_eq!(
-        (written, packets(&out)),
-        (1, vec![video_packet(None, None, &[0xAA, 0xBB])])
-    );
+    let packet = video_packet(None, None, &[0xAA, 0xBB]);
+    let (written, out) = write(&packet);
+    assert_eq!((written, packets(&out)), (1, vec![packet]));
 }
 
 #[test]
 fn a_timestamp_at_the_top_of_its_range_round_trips() {
     let top = (1 << 33) - 1;
-    let mut out = Vec::new();
-    write_pes_packets(
-        StreamId::from(VIDEO),
-        Some(timestamp(top)),
-        Some(timestamp(top)),
-        &[0x00],
-        &mut out,
-    )
-    .unwrap();
-    assert_eq!(
-        packets(&out),
-        vec![video_packet(Some(top), Some(top), &[0x00])]
-    );
+    let packet = video_packet(Some(top), Some(top), &[0x00]);
+    let (_, out) = write(&packet);
+    assert_eq!(packets(&out), vec![packet]);
 }
 
 #[test]
 fn a_stream_without_an_optional_header_gets_its_payload_alone() {
     let payload = counting_payload(70_000);
-    let mut out = Vec::new();
-    let written =
-        write_pes_packets(StreamId::PRIVATE_STREAM_2, None, None, &payload, &mut out).unwrap();
+    let (written, out) = write(&PesPacket::new(StreamId::PRIVATE_STREAM_2, &payload));
     let (first, second) = payload.split_at(65_535);
     assert_eq!(
         (written, packets(&out)),
@@ -204,34 +187,38 @@ fn a_stream_without_an_optional_header_gets_its_payload_alone() {
     );
 }
 
-/// Writes after a byte already in `out`, and returns the result and what
-/// `out` holds after
-fn written_after_a_byte(
-    stream_id: StreamId,
-    pts: Option<Timestamp>,
-    dts: Option<Timestamp>,
-    payload: &[u8],
-) -> (Result<usize, Error>, Vec<u8>) {
+/// Writes `packet` after a byte already in `out`, and returns the result
+/// and what `out` holds after
+fn written_after_a_byte(packet: &PesPacket<'_>) -> (Result<usize, Error>, Vec<u8>) {
     let mut out = vec![0x47];
-    let result = write_pes_packets(stream_id, pts, dts, payload, &mut out);
+    let result = Muxer::new().write_pes_packets(packet, &mut out);
     (result, out)
 }
 
 #[test]
 fn rejects_a_dts_without_a_pts() {
     assert_eq!(
-        written_after_a_byte(StreamId::from(VIDEO), None, Some(timestamp(0)), &[0x00]),
-        (Err(Error::DtsWithoutPts), vec![0x47])
+        written_after_a_byte(&video_packet(None, Some(0), &[0x00])),
+        (
+            Err(Error::PesPacket {
+                error: pes::Error::ForbiddenPtsDtsFlags
+            }),
+            vec![0x47]
+        )
     );
 }
 
 #[test]
 fn rejects_a_timestamp_on_a_stream_that_carries_no_optional_header() {
+    let mut packet = video_packet(Some(0), None, &[0x00]);
+    packet.stream_id = StreamId::PADDING_STREAM;
     assert_eq!(
-        written_after_a_byte(StreamId::PADDING_STREAM, Some(timestamp(0)), None, &[0x00]),
+        written_after_a_byte(&packet),
         (
-            Err(Error::TimestampsOnStreamWithoutOptionalHeader {
-                stream_id: StreamId::PADDING_STREAM
+            Err(Error::PesPacket {
+                error: pes::Error::OptionalHeaderPresence {
+                    stream_id: StreamId::PADDING_STREAM
+                }
             }),
             vec![0x47]
         )
@@ -243,7 +230,7 @@ fn rejects_the_stream_id_of_an_element_that_is_not_a_pes_packet() {
     for value in [0xB9, 0xBA, 0xBB, 0xBC, 0x00] {
         let stream_id = StreamId::from(value);
         assert_eq!(
-            written_after_a_byte(stream_id, None, None, &[0x00]),
+            written_after_a_byte(&PesPacket::new(stream_id, &[0x00])),
             (Err(Error::StreamId { stream_id }), vec![0x47]),
             "{value:#04x}"
         );
@@ -251,9 +238,24 @@ fn rejects_the_stream_id_of_an_element_that_is_not_a_pes_packet() {
 }
 
 #[test]
+fn rejects_a_packet_of_an_unspecified_length() {
+    let mut packet = video_packet(None, None, &[0x00]);
+    packet.length_unspecified = true;
+    assert_eq!(
+        written_after_a_byte(&packet),
+        (
+            Err(Error::LengthUnspecified {
+                stream_id: StreamId::from(VIDEO)
+            }),
+            vec![0x47]
+        )
+    );
+}
+
+#[test]
 fn a_packet_the_pes_layer_refuses_leaves_the_output_as_it_was() {
     assert_eq!(
-        written_after_a_byte(StreamId::PRIVATE_STREAM_2, None, None, &[]),
+        written_after_a_byte(&PesPacket::new(StreamId::PRIVATE_STREAM_2, &[])),
         (
             Err(Error::PesPacket {
                 error: pes::Error::LengthUnspecified {

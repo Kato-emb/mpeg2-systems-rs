@@ -12,9 +12,9 @@ mod tests {
         OptionalHeader, PesPacket, PesPacketLength, StreamId, pes_packet_length,
     };
     use mpeg2_systems::ps::demux::{Demuxer, Event};
-    use mpeg2_systems::ps::mux::write_pes_packets;
+    use mpeg2_systems::ps::mux::Muxer;
     use mpeg2_systems::ps::psm::ElementaryStreamLoop;
-    use mpeg2_systems::ps::{MPEG_PROGRAM_END_CODE, PackHeader, ProgramStreamMap};
+    use mpeg2_systems::ps::{PackHeader, ProgramStreamMap};
     use mpeg2_systems::psi::VersionNumber;
     use mpeg2_systems::time::{ClockReference, Timestamp};
 
@@ -36,6 +36,22 @@ mod tests {
 
     fn described(event: &Event<'_>) -> String {
         format!("{event:?}")
+    }
+
+    /// A PES packet of `stream_id` carrying `payload`, with an optional header
+    /// holding the timestamps given
+    fn pes_packet(
+        stream_id: u8,
+        pts: Option<u64>,
+        dts: Option<u64>,
+        payload: &[u8],
+    ) -> PesPacket<'_> {
+        let mut header = OptionalHeader::new();
+        header.pts = pts.map(timestamp);
+        header.dts = dts.map(timestamp);
+        let mut packet = PesPacket::new(StreamId::from(stream_id), payload);
+        packet.optional_header = Some(header);
+        packet
     }
 
     /// The PES packets that `bytes`, which start with one, hold one after
@@ -62,39 +78,18 @@ mod tests {
         map.elementary_streams = ElementaryStreamLoop::from(&streams[..]);
         let video = vec![0xAA; 1000];
         let audio = vec![0xBB; 500];
+        let video_packet = pes_packet(0xE0, Some(93_600), Some(90_000), &video);
+        let audio_packet = pes_packet(0xC0, Some(91_800), None, &audio);
 
+        let muxer = Muxer::new();
         let mut stream = Vec::new();
-        pack_header.write(&mut stream).unwrap();
-        map.write(&mut stream).unwrap();
+        muxer.write_pack_header(&pack_header, &mut stream).unwrap();
+        muxer.write_program_stream_map(&map, &mut stream).unwrap();
         let pes_start = stream.len();
-        write_pes_packets(
-            StreamId::from(0xE0),
-            Some(timestamp(93_600)),
-            Some(timestamp(90_000)),
-            &video,
-            &mut stream,
-        )
-        .unwrap();
-        write_pes_packets(
-            StreamId::from(0xC0),
-            Some(timestamp(91_800)),
-            None,
-            &audio,
-            &mut stream,
-        )
-        .unwrap();
+        muxer.write_pes_packets(&video_packet, &mut stream).unwrap();
+        muxer.write_pes_packets(&audio_packet, &mut stream).unwrap();
         let pes_end = stream.len();
-        stream.extend_from_slice(&MPEG_PROGRAM_END_CODE);
-
-        let mut video_header = OptionalHeader::new();
-        video_header.pts = Some(timestamp(93_600));
-        video_header.dts = Some(timestamp(90_000));
-        let mut video_packet = PesPacket::new(StreamId::from(0xE0), &video);
-        video_packet.optional_header = Some(video_header);
-        let mut audio_header = OptionalHeader::new();
-        audio_header.pts = Some(timestamp(91_800));
-        let mut audio_packet = PesPacket::new(StreamId::from(0xC0), &audio);
-        audio_packet.optional_header = Some(audio_header);
+        muxer.finish(&mut stream);
 
         let hand_cut = cut_by_hand(&stream[pes_start..pes_end]);
         assert_eq!(
@@ -118,19 +113,18 @@ mod tests {
         let payload: Vec<u8> = (0..200_000_u32)
             .map(|index| index.to_be_bytes()[3])
             .collect();
+        let muxer = Muxer::new();
         let mut stream = Vec::new();
-        PackHeader::new(ClockReference::new(0, 0).unwrap(), 2_000)
-            .write(&mut stream)
+        muxer
+            .write_pack_header(
+                &PackHeader::new(ClockReference::new(0, 0).unwrap(), 2_000),
+                &mut stream,
+            )
             .unwrap();
         let pes_start = stream.len();
-        let written = write_pes_packets(
-            StreamId::from(0xE0),
-            Some(timestamp(90_000)),
-            None,
-            &payload,
-            &mut stream,
-        )
-        .unwrap();
+        let written = muxer
+            .write_pes_packets(&pes_packet(0xE0, Some(90_000), None, &payload), &mut stream)
+            .unwrap();
         let packets = cut_by_hand(&stream[pes_start..]);
         let joined: Vec<u8> = packets
             .iter()
@@ -163,7 +157,9 @@ mod tests {
             (1 << 22) - 1,
         );
         let mut stream = Vec::new();
-        pack_header.write(&mut stream).unwrap();
+        Muxer::new()
+            .write_pack_header(&pack_header, &mut stream)
+            .unwrap();
         assert_eq!(
             demuxed(&stream),
             [
@@ -176,11 +172,15 @@ mod tests {
     #[test]
     fn a_map_naming_no_streams_reads_back() {
         let map = ProgramStreamMap::new(VersionNumber::try_from(31).unwrap());
+        let muxer = Muxer::new();
         let mut stream = Vec::new();
-        PackHeader::new(ClockReference::new(0, 0).unwrap(), 2_000)
-            .write(&mut stream)
+        muxer
+            .write_pack_header(
+                &PackHeader::new(ClockReference::new(0, 0).unwrap(), 2_000),
+                &mut stream,
+            )
             .unwrap();
-        map.write(&mut stream).unwrap();
+        muxer.write_program_stream_map(&map, &mut stream).unwrap();
         assert_eq!(
             demuxed(&stream)[2..],
             [described(&Event::ProgramStreamMap(map))]
