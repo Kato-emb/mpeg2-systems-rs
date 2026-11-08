@@ -5,10 +5,6 @@
 #[cfg(feature = "alloc")]
 #[path = "support/demux.rs"]
 #[expect(
-    dead_code,
-    reason = "each test file takes a part of what the tests share"
-)]
-#[expect(
     clippy::arithmetic_side_effects,
     reason = "a packet is cut at constant offsets well inside the fixture"
 )]
