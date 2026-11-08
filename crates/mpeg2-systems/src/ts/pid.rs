@@ -39,6 +39,14 @@ impl Pid {
     pub const fn get(self) -> u16 {
         self.0
     }
+
+    /// Returns whether the PID is one Table 2-3 leaves free to assign, as a
+    /// `network_PID`, a `program_map_PID`, an `elementary_PID` or the PID of
+    /// PES packets: 0x0010 to 0x1FFE
+    #[must_use]
+    pub const fn is_assignable(self) -> bool {
+        matches!(self.0, 0x0010..=0x1ffe)
+    }
 }
 
 impl TryFrom<u16> for Pid {
@@ -89,6 +97,13 @@ mod tests {
         assert_eq!(
             [Pid::try_from(0x1fff), Pid::try_from(0x2000)],
             [Ok(Pid::NULL), Err(PidOutOfRange { value: 0x2000 })]
+        );
+    }
+    #[test]
+    fn a_program_may_be_assigned_the_pids_from_0x0010_to_0x1ffe() {
+        assert_eq!(
+            [0x0000, 0x000f, 0x0010, 0x1ffe, 0x1fff].map(|value| Pid(value).is_assignable()),
+            [false, false, true, true, false]
         );
     }
 }

@@ -133,7 +133,7 @@ pub(super) fn write_entries<'stream>(
         for stream in entries {
             let stream = stream?;
             let pid = stream.elementary_pid;
-            if !matches!(pid.get(), 0x0010..=0x1ffe) {
+            if !pid.is_assignable() {
                 return Err(Error::ElementaryPid { pid });
             }
             let es_info_length = stream.es_info.0.len();

@@ -199,10 +199,7 @@ impl Muxer {
         out: &mut Vec<u8>,
     ) -> Result<usize, Error> {
         let stream_id = packet.stream_id;
-        // Why compare with private_stream_1: it is the lowest stream_id of a
-        // PES packet, and those below it are the start codes of other
-        // elements (Table 2-22).
-        if stream_id.get() < StreamId::PRIVATE_STREAM_1.get() {
+        if !stream_id.is_pes_packet() {
             return Err(Error::StreamId { stream_id });
         }
         // Why not split a packet of an unspecified length into more of the

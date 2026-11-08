@@ -88,7 +88,7 @@ impl<'input> CaDescriptor<'input> {
     #[cfg(feature = "alloc")]
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
         let ca_pid = self.ca_pid.get();
-        if !matches!(ca_pid, 0x0003 | 0x0010..=0x1ffe) {
+        if !(self.ca_pid.is_assignable() || self.ca_pid == Pid::IPMP) {
             return Err(Error::Forbidden {
                 field: "CA_PID",
                 value: u32::from(ca_pid),
