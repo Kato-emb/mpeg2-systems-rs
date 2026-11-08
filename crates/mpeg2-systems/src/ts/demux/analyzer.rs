@@ -29,8 +29,11 @@ pub(super) struct PacketAnalyzer {
     continuity: ContinuityTracker,
     reassemblers: BTreeMap<Pid, SectionReassembler>,
     /// The PIDs PAT sections have named for a program map
-    // Why not read these from the map's keys: the map lends the PAT's
-    // reassembler while the PAT's section names them.
+    // Why not read these from the map's keys, which, but for the PAT and CAT,
+    // are always the same set: the map lends the PAT's reassembler while the
+    // PAT's section is read, so the PIDs it names are gathered here and the
+    // map takes them afterwards. The per-version routes that a later change
+    // adds replace this set.
     program_map_pids: BTreeSet<Pid>,
     /// The PID whose reassembler holds sections completed since the last
     /// [`PacketAnalyzer::release`], read or not
@@ -132,9 +135,6 @@ impl PacketAnalyzer {
         } else {
             self.reassemblers.get_mut(&pid)
         };
-        // Why gather the PIDs a PAT names in the set, and only then add their
-        // reassemblers: the map lends the PAT's reassembler while the section
-        // is read, so it cannot take a new entry until then.
         let mut program_map_pids = (pid == Pid::PAT).then_some(&mut self.program_map_pids);
         let mut named_new_pid = false;
         let Some(reassembler) = reassembler else {
