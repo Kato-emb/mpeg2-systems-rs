@@ -77,12 +77,14 @@ mod tests {
             .find(|packet| packet.pid == Pid::PAT && packet.payload_unit_start_indicator)
             .unwrap();
         let (&pointer_field, rest) = packet.payload.unwrap().split_first().unwrap();
-        let bytes = &rest[usize::from(pointer_field)..];
+        let bytes = rest.get(usize::from(pointer_field)..).unwrap();
 
         let length = section_length(bytes).unwrap();
 
         assert_eq!(
-            Section::read(&bytes[..length]).unwrap().encoded_len(),
+            Section::read(bytes.get(..length).unwrap())
+                .unwrap()
+                .encoded_len(),
             length
         );
     }
