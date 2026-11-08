@@ -37,7 +37,9 @@ fn framer(criterion: &mut Criterion) {
         for chunk_length in CHUNK_LENGTHS {
             let mut demuxer = Demuxer::new(DemuxerConfig::default());
             assert_eq!(
-                allocations_once_grown(&ALLOCATOR, &mut demuxer, input, chunk_length),
+                allocations_once_grown(&ALLOCATOR, || {
+                    demux_events(&mut demuxer, input, chunk_length);
+                }),
                 0,
                 "{name} in chunks of {chunk_length}"
             );

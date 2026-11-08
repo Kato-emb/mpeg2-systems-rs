@@ -7,6 +7,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use mpeg2_systems::ps;
 use mpeg2_systems::ts::Pid;
 use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig};
 
@@ -29,6 +30,9 @@ pub const STREAMS: [(&str, &[u8]); 3] = [
         include_bytes!("../../crates/mpeg2-systems/tests/fixtures/204.ts"),
     ),
 ];
+
+/// A Program Stream FFmpeg wrote
+pub const PROGRAM: &[u8] = include_bytes!("../../crates/mpeg2-systems/tests/fixtures/program.ps");
 
 /// Returns a demuxer that reassembles the PES packets of the video (PID
 /// 0x100) and the audio (PID 0x101) of [`STREAMS`]
@@ -54,21 +58,33 @@ pub fn demux_events(demuxer: &mut Demuxer, input: &[u8], chunk_length: usize) ->
     events
 }
 
-/// Returns the allocations `allocator` counts while `demuxer` takes `input`
-/// once more, after two passes over it have grown its buffers
-pub fn allocations_once_grown(
-    allocator: &CountingAllocator,
-    demuxer: &mut Demuxer,
+/// Hands `input` to the Program Stream demuxer in chunks of `chunk_length`
+/// and polls each chunk to the end, returning the number of events
+pub fn program_stream_events(
+    demuxer: &mut ps::demux::Demuxer,
     input: &[u8],
     chunk_length: usize,
 ) -> usize {
+    let mut events = 0;
+    for chunk in input.chunks(chunk_length) {
+        demuxer.handle_input(chunk);
+        while demuxer.poll_event().is_some() {
+            events += 1;
+        }
+    }
+    events
+}
+
+/// Returns the allocations `allocator` counts during one more `pass` over
+/// an input, after two passes have grown the buffers the pass fills
+pub fn allocations_once_grown(allocator: &CountingAllocator, mut pass: impl FnMut()) -> usize {
     // Why two passes before counting: bytes the framer has not yet cut stay
     // in the demuxer's buffer after the first, so the second input can
     // outgrow the capacity the first left once.
-    demux_events(demuxer, input, chunk_length);
-    demux_events(demuxer, input, chunk_length);
+    pass();
+    pass();
     allocator.reset();
-    demux_events(demuxer, input, chunk_length);
+    pass();
     allocator.allocations()
 }
 

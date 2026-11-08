@@ -1,16 +1,18 @@
-//! The demuxer allocates nothing once its buffers have grown
+//! The demuxers allocate nothing once their buffers have grown
 //!
 //! After passes over an input, one more pass over the same input allocates
 //! nothing: handing over input copies it into the buffer the passes before
 //! grew, and the packets, the PAT and PMT the stream resends, the sections in
-//! flight and the PES packets reassembled on a subscribed PID reuse what was
-//! allocated before.
+//! flight, the PES packets reassembled on a subscribed PID, and the elements
+//! of a Program Stream reuse what was allocated before.
 
 #[cfg(test)]
 mod tests {
+    use mpeg2_systems::ps;
     use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig};
     use mpeg2_systems_bench::{
-        CountingAllocator, STREAMS, allocations_once_grown, subscribed_demuxer,
+        CountingAllocator, PROGRAM, STREAMS, allocations_once_grown, demux_events,
+        program_stream_events, subscribed_demuxer,
     };
 
     #[global_allocator]
@@ -29,15 +31,27 @@ mod tests {
         let mut none = Vec::new();
         for (name, input) in &inputs {
             for chunk_length in [input.len(), 7 * 188] {
-                for (subscribed, mut demuxer) in [
-                    (false, Demuxer::new(DemuxerConfig::default())),
-                    (true, subscribed_demuxer()),
+                for (demuxer_name, mut demuxer) in [
+                    ("ts", Demuxer::new(DemuxerConfig::default())),
+                    ("ts subscribed", subscribed_demuxer()),
                 ] {
-                    let counted =
-                        allocations_once_grown(&ALLOCATOR, &mut demuxer, input, chunk_length);
-                    allocations.push((*name, chunk_length, subscribed, counted));
-                    none.push((*name, chunk_length, subscribed, 0));
+                    let counted = allocations_once_grown(&ALLOCATOR, || {
+                        demux_events(&mut demuxer, input, chunk_length);
+                    });
+                    allocations.push((*name, chunk_length, demuxer_name, counted));
+                    none.push((*name, chunk_length, demuxer_name, 0));
                 }
+            }
+        }
+        let program = PROGRAM.repeat(100);
+        for (name, input) in [("program.ps", &program), ("0xff", &inputs[3].1)] {
+            for chunk_length in [input.len(), 2048] {
+                let mut demuxer = ps::demux::Demuxer::new();
+                let counted = allocations_once_grown(&ALLOCATOR, || {
+                    program_stream_events(&mut demuxer, input, chunk_length);
+                });
+                allocations.push((name, chunk_length, "ps", counted));
+                none.push((name, chunk_length, "ps", 0));
             }
         }
         assert_eq!(allocations, none);
