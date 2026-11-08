@@ -3,6 +3,9 @@
 //! hands in the bytes it has read and writes out the bytes it is given, so the
 //! crate is `no_std` and runs wherever the caller's I/O does. The crate is
 //! under construction.
+//!
+//! With the `alloc` feature, `ts::demux` and `ps::demux` read a stream, and
+//! the doc of `ps::mux` shows the order to write a Program Stream in.
 
 #![no_std]
 
