@@ -66,11 +66,14 @@ what each holds.
 ### Benchmarks
 
 The per-packet paths have [criterion](https://github.com/bheisler/criterion.rs)
-benchmarks in `crates/mpeg2-systems/benches/`:
+benchmarks in `benches/`, a crate kept out of the workspace:
 
 ```sh
-cargo bench -p mpeg2-systems
+cargo bench --manifest-path benches/Cargo.toml
 ```
+
+The same crate holds a test, run in CI, that the demuxer allocates nothing
+once its buffers have grown.
 
 A `perf` pull request quotes the before-and-after numbers in its description.
 
