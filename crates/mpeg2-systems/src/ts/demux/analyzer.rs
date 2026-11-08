@@ -96,8 +96,8 @@ impl PacketAnalyzer {
         self.pes.subscribe(pid);
     }
 
-    pub(super) fn unsubscribe_pes(&mut self, pid: Pid) {
-        self.pes.unsubscribe(pid);
+    pub(super) fn unsubscribe_pes(&mut self, pid: Pid, pending: &mut VecDeque<Pending>) {
+        self.pes.unsubscribe(pid, pending);
     }
 
     /// Returns the bytes of a [`Lent::Reassembled`] range of a PES packet on
@@ -109,6 +109,8 @@ impl PacketAnalyzer {
     /// Queues the PES packets in flight, ended by the end of input, then
     /// resets as [`PacketAnalyzer::reset`] does
     pub(super) fn finish(&mut self, pending: &mut VecDeque<Pending>) {
+        // Why end the PES packets before the reset: the reset drops what is
+        // in flight, and ending them moves their bytes out of flight.
         self.pes.finish(pending);
         self.reset();
     }

@@ -393,7 +393,7 @@ fn a_pes_packet_that_ended_stays_lent_until_the_next_packet_of_its_pid() {
 fn unsubscribing_drops_the_pes_packet_in_flight_and_what_follows_it() {
     let mut reassembly = subscribed(BUFFER_LIMIT);
     push(&mut reassembly, &start(&pes(20, &[0x01; 8]), FIRST_PACKET));
-    reassembly.unsubscribe(PID);
+    reassembly.unsubscribe(PID, &mut VecDeque::new());
     assert_eq!(
         (
             push(&mut reassembly, &continuation(&[0x02; 12], SECOND_PACKET)),
@@ -408,7 +408,7 @@ fn unsubscribing_drops_the_pes_packet_in_flight_and_what_follows_it() {
 fn unsubscribing_a_pid_not_subscribed_changes_nothing() {
     let packet = pes(1, &[0x0A]);
     let mut reassembly = PesReassembly::new(BUFFER_LIMIT);
-    reassembly.unsubscribe(PID);
+    reassembly.unsubscribe(PID, &mut VecDeque::new());
     reassembly.subscribe(PID);
     assert_eq!(
         push(&mut reassembly, &start(&packet, FIRST_PACKET)),
@@ -440,7 +440,7 @@ fn subscribing_after_unsubscribing_reassembles_from_the_next_unit_start() {
     let next = pes(2, &[0x0A, 0x0B]);
     let mut reassembly = subscribed(BUFFER_LIMIT);
     push(&mut reassembly, &start(head, FIRST_PACKET));
-    reassembly.unsubscribe(PID);
+    reassembly.unsubscribe(PID, &mut VecDeque::new());
     reassembly.subscribe(PID);
     assert_eq!(
         push_all(

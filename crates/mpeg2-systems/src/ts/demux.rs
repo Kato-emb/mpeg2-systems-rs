@@ -229,17 +229,7 @@ impl Demuxer {
     /// again starts at the next `payload_unit_start_indicator`, as a first
     /// subscription does.
     pub fn unsubscribe_pes(&mut self, pid: Pid) {
-        self.analyzer.unsubscribe_pes(pid);
-        // Why drop the queued events of the PID: those of a PES packet lend
-        // the PID's reassembly buffer, which unsubscribing drops.
-        self.pending.retain(|pending| match pending {
-            Pending::PesPacket { pid: queued, .. }
-            | Pending::TruncatedPesPacket { pid: queued, .. }
-            | Pending::Ready(Event::Error(Error::PesBufferOverrun { pid: queued, .. })) => {
-                *queued != pid
-            }
-            Pending::Ready(_) | Pending::Unsynchronized(_) | Pending::Section { .. } => true,
-        });
+        self.analyzer.unsubscribe_pes(pid, &mut self.pending);
     }
 
     /// Hands over the next bytes of the stream, cut anywhere
