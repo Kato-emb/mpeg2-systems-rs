@@ -2,13 +2,16 @@
 //!
 //! After passes over an input, one more pass over the same input allocates
 //! nothing: handing over input copies it into the buffer the passes before
-//! grew, and the packets, the PAT and PMT the stream resends, and the
-//! sections in flight reuse what was allocated before.
+//! grew, and the packets, the PAT and PMT the stream resends, the sections in
+//! flight and the PES packets reassembled on a subscribed PID reuse what was
+//! allocated before.
 
 #[cfg(test)]
 mod tests {
     use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig};
-    use mpeg2_systems_bench::{CountingAllocator, STREAMS, allocations_once_grown};
+    use mpeg2_systems_bench::{
+        CountingAllocator, STREAMS, allocations_once_grown, subscribed_demuxer,
+    };
 
     #[global_allocator]
     static ALLOCATOR: CountingAllocator = CountingAllocator::new();
@@ -26,10 +29,15 @@ mod tests {
         let mut none = Vec::new();
         for (name, input) in &inputs {
             for chunk_length in [input.len(), 7 * 188] {
-                let mut demuxer = Demuxer::new(DemuxerConfig::default());
-                let counted = allocations_once_grown(&ALLOCATOR, &mut demuxer, input, chunk_length);
-                allocations.push((*name, chunk_length, counted));
-                none.push((*name, chunk_length, 0));
+                for (subscribed, mut demuxer) in [
+                    (false, Demuxer::new(DemuxerConfig::default())),
+                    (true, subscribed_demuxer()),
+                ] {
+                    let counted =
+                        allocations_once_grown(&ALLOCATOR, &mut demuxer, input, chunk_length);
+                    allocations.push((*name, chunk_length, subscribed, counted));
+                    none.push((*name, chunk_length, subscribed, 0));
+                }
             }
         }
         assert_eq!(allocations, none);
