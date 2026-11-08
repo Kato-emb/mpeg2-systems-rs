@@ -1,0 +1,16 @@
+---
+source: crates/mpeg2-systems/tests/golden.rs
+expression: "events_of(&PROGRAM[3000..])"
+---
+[
+    "Unsynchronized { 1096 bytes [65 49 33 b6 17 06 52 26 a0 b6 b8 83 bc 12 12 57 ..] }",
+    "SyncAcquired",
+    "PackHeader(PackHeader { system_clock_reference: ClockReference { base: 6, extension: 0 }, program_mux_rate: 1101198, pack_stuffing_length: 0 })",
+    "PesPacket { stream_id: StreamId(224), optional_header: Some(OptionalHeader { pes_scrambling_control: PesScramblingControl(0), pes_priority: false, data_alignment_indicator: false, copyright: false, original_or_copy: false, pts: Some(Timestamp(99000)), dts: Some(Timestamp(81000)), escr: None, es_rate: None, dsm_trick_mode: None, additional_copy_info: None, previous_pes_packet_crc: None, pes_extension: None, stuffing_bytes: 1 }), payload: 1576 bytes [d0 70 57 53 28 d5 1f fa c7 84 24 61 e5 97 08 eb ..] }",
+    "PesPacket { stream_id: StreamId(190), optional_header: None, payload: 432 bytes [ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ..] }",
+    "PackHeader(PackHeader { system_clock_reference: ClockReference { base: 45001, extension: 0 }, program_mux_rate: 1101198, pack_stuffing_length: 0 })",
+    "PesPacket { stream_id: StreamId(192), optional_header: Some(OptionalHeader { pes_scrambling_control: PesScramblingControl(0), pes_priority: false, data_alignment_indicator: false, copyright: false, original_or_copy: false, pts: Some(Timestamp(85529)), dts: None, escr: None, es_rate: None, dsm_trick_mode: None, additional_copy_info: None, previous_pes_packet_crc: None, pes_extension: None, stuffing_bytes: 1 }), payload: 2019 bytes [b1 6b c3 18 ca a4 72 f5 a6 c4 03 95 20 05 35 03 ..] }",
+    "PackHeader(PackHeader { system_clock_reference: ClockReference { base: 83179, extension: 0 }, program_mux_rate: 1101198, pack_stuffing_length: 0 })",
+    "PesPacket { stream_id: StreamId(192), optional_header: Some(OptionalHeader { pes_scrambling_control: PesScramblingControl(0), pes_priority: false, data_alignment_indicator: false, copyright: false, original_or_copy: false, pts: Some(Timestamp(109039)), dts: None, escr: None, es_rate: None, dsm_trick_mode: None, additional_copy_info: None, previous_pes_packet_crc: None, pes_extension: None, stuffing_bytes: 1 }), payload: 771 bytes [aa 95 ca 92 41 6e b9 16 34 5b 0b e6 12 e9 aa 9c ..] }",
+    "PesPacket { stream_id: StreamId(190), optional_header: None, payload: 1242 bytes [ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ..] }",
+]

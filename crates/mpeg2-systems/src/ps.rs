@@ -3,8 +3,11 @@
 //!
 //! Each type reads one syntax element from bytes that start with its start
 //! code and hold nothing else. Finding where an element starts and ends in a
-//! stream is the work of a framer, which this module does not do.
+//! stream is the work of the demuxer in `demux`, which takes the `alloc`
+//! feature.
 
+#[cfg(feature = "alloc")]
+pub mod demux;
 pub mod pack_header;
 pub mod psm;
 pub mod system_header;
