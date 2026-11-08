@@ -290,6 +290,13 @@ impl Demuxer {
     /// Panics if called after [`Demuxer::finish`] before
     /// [`Demuxer::poll_event`] has returned `None`.
     pub fn handle_input(&mut self, bytes: &[u8]) {
+        // Why not compact while events are queued: a queued section can be
+        // lent from the framer's buffer by its range, which compacting would
+        // shift. Why not compact when poll_event empties the queue instead:
+        // that moves the unread rest of a large chunk on every poll.
+        if self.pending.is_empty() {
+            self.framer.compact();
+        }
         self.framer.extend(bytes);
     }
 

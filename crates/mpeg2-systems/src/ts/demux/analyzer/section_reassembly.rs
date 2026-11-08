@@ -75,6 +75,11 @@ impl SectionReassembler {
         self.buffer.get(range).unwrap_or_default()
     }
 
+    #[cfg(test)]
+    pub(super) fn buffer_len(&self) -> usize {
+        self.buffer.len()
+    }
+
     /// Drops the completed sections, once none is lent; the section in
     /// flight stays
     pub(super) fn release(&mut self) {

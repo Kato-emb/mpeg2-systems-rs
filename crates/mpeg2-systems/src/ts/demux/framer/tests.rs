@@ -46,6 +46,7 @@ fn frame(stream: &[u8], chunk_length: usize, fixed: Option<PacketSize>) -> Vec<S
     let mut framer = PacketFramer::new(fixed);
     let mut seen = Vec::new();
     for chunk in stream.chunks(chunk_length) {
+        framer.compact();
         framer.extend(chunk);
         drain(&mut framer, &mut seen);
     }

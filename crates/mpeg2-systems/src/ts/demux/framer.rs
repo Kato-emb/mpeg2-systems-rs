@@ -147,7 +147,8 @@ impl PacketFramer {
         }
     }
 
-    /// Appends input
+    /// Appends input; the ranges outputs carry keep pointing at the same
+    /// bytes
     ///
     /// # Panics
     /// Panics if called after [`PacketFramer::finish`] before
@@ -157,18 +158,24 @@ impl PacketFramer {
             !self.ended,
             "input handed over after finish, before the events it left were polled"
         );
-        // Why not a VecDeque, which drops the front without moving the rest:
-        // a packet straddling its wrap has no single slice to lend, so every
-        // packet would be copied out. Why not drain as each packet is cut:
-        // that moves what is left on every packet; draining here moves it
-        // once per extend, less than a stride plus one unreported run.
-        self.buffer.drain(..self.consumed);
-        self.position = self.offset_of(self.consumed);
-        self.consumed = 0;
         // Why copy every chunk, not only the tail that crosses into the
         // next: an event borrows the demuxer rather than the caller's chunk,
         // so poll_event can lend a packet after handle_input has returned.
         self.buffer.extend_from_slice(bytes);
+    }
+
+    /// Drops the bytes reported or cut, once no output's range points at
+    /// them
+    pub(super) fn compact(&mut self) {
+        // Why not a VecDeque, which drops the front without moving the rest:
+        // a packet straddling its wrap has no single slice to lend, so every
+        // packet would be copied out. Why not compact as each packet is cut:
+        // that moves what is left on every packet; compacting before input
+        // is appended moves it once per chunk, less than a stride plus one
+        // unreported run.
+        self.buffer.drain(..self.consumed);
+        self.position = self.offset_of(self.consumed);
+        self.consumed = 0;
     }
 
     /// Ends the input at the bytes handed over so far

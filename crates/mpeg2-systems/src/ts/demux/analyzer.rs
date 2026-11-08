@@ -31,10 +31,11 @@ pub(super) struct PacketAnalyzer {
     // are added to the map while its bytes, in this reassembler, are read.
     program_association: SectionReassembler,
     reassemblers: BTreeMap<Pid, SectionReassembler>,
-    /// The PID whose reassembler lends a section the queue holds
+    /// The PID whose reassembler holds sections completed since the last
+    /// [`PacketAnalyzer::release`], read or not
     // Why not release every reassembler instead: that walks them all on
-    // every packet, while at most one lends at a time.
-    lending: Option<Pid>,
+    // every packet, while at most one holds completed sections at a time.
+    completed_on: Option<Pid>,
 }
 
 impl PacketAnalyzer {
@@ -43,7 +44,7 @@ impl PacketAnalyzer {
             continuity: ContinuityTracker::new(),
             program_association: SectionReassembler::new(),
             reassemblers: BTreeMap::new(),
-            lending: None,
+            completed_on: None,
         }
     }
 
@@ -58,7 +59,7 @@ impl PacketAnalyzer {
 
     /// Drops the sections the queued events lent, once none is queued
     pub(super) fn release(&mut self) {
-        let reassembler = match self.lending.take() {
+        let reassembler = match self.completed_on.take() {
             None => None,
             Some(Pid::PAT) => Some(&mut self.program_association),
             Some(pid) => self.reassemblers.get_mut(&pid),
@@ -165,11 +166,17 @@ impl PacketAnalyzer {
             return;
         };
         let payload_start = packet_start.saturating_add(bytes.len().saturating_sub(payload.len()));
-        let lending = &mut self.lending;
+        let completed_on = &mut self.completed_on;
         reassembler.push(
             packet.payload_unit_start_indicator,
             payload,
             &mut |completed, section_bytes| {
+                // Why before the section is read: a section that fails to read
+                // still fills the reassembler, which must be drained all the
+                // same.
+                if let Completed::Reassembled(_) = completed {
+                    *completed_on = Some(pid);
+                }
                 let section = match Section::read(section_bytes) {
                     Ok(section) => section,
                     Err(error) => {
@@ -212,10 +219,7 @@ impl PacketAnalyzer {
                         Completed::InPayload(start) => {
                             Lent::Packet(body(payload_start.saturating_add(start)))
                         }
-                        Completed::Reassembled(start) => {
-                            *lending = Some(pid);
-                            Lent::Reassembled(body(start))
-                        }
+                        Completed::Reassembled(start) => Lent::Reassembled(body(start)),
                     },
                     section: Section {
                         table_id: section.table_id,
@@ -229,3 +233,6 @@ impl PacketAnalyzer {
         );
     }
 }
+
+#[cfg(test)]
+mod tests;

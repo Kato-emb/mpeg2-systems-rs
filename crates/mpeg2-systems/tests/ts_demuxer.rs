@@ -49,20 +49,24 @@ mod tests {
 
     fn drain(demuxer: &mut Demuxer, seen: &mut Vec<Seen>) {
         while let Some(event) = demuxer.poll_event() {
-            seen.push(match event {
-                Event::SyncAcquired { packet_size } => Seen::SyncAcquired(packet_size),
-                Event::Unsynchronized { bytes } => Seen::Unsynchronized(bytes.to_vec()),
-                Event::ProgramClockReference {
-                    pid,
-                    program_clock_reference,
-                } => Seen::ProgramClockReference {
-                    pid: pid.get(),
-                    program_clock_reference,
-                },
-                Event::Section { pid, section } => seen_section(pid.get(), &section),
-                Event::Error(error) => Seen::Error(error),
-                other => Seen::Unexpected(format!("{other:?}")),
-            });
+            seen.push(seen_event(event));
+        }
+    }
+
+    fn seen_event(event: Event<'_>) -> Seen {
+        match event {
+            Event::SyncAcquired { packet_size } => Seen::SyncAcquired(packet_size),
+            Event::Unsynchronized { bytes } => Seen::Unsynchronized(bytes.to_vec()),
+            Event::ProgramClockReference {
+                pid,
+                program_clock_reference,
+            } => Seen::ProgramClockReference {
+                pid: pid.get(),
+                program_clock_reference,
+            },
+            Event::Section { pid, section } => seen_section(pid.get(), &section),
+            Event::Error(error) => Seen::Error(error),
+            other => Seen::Unexpected(format!("{other:?}")),
         }
     }
 
@@ -396,6 +400,40 @@ mod tests {
             demux(&stream, 1000),
             acquired_then(PacketSize::Standard188, Vec::new())
         );
+    }
+
+    #[test]
+    fn a_section_lent_from_a_packet_keeps_its_bytes_across_more_input() {
+        let first = short_section(0x80, &[0xAA; 7]);
+        let second = short_section(0x80, &[0xBB; 5]);
+        let stream = behind_null_packets(&[packet(
+            0x0001,
+            true,
+            0,
+            None,
+            Some(&[&[0x00][..], &first, &second].concat()),
+        )]);
+        let more = packet(0x1FFF, false, 0, None, Some(&[]));
+        for next_input in [&[][..], &more[..]] {
+            let mut demuxer = Demuxer::new(DemuxerConfig::default());
+            demuxer.handle_input(&stream);
+            let mut seen = vec![
+                seen_event(demuxer.poll_event().unwrap()),
+                seen_event(demuxer.poll_event().unwrap()),
+            ];
+            demuxer.handle_input(next_input);
+            seen.push(seen_event(demuxer.poll_event().unwrap()));
+            assert_eq!(
+                seen,
+                [
+                    Seen::SyncAcquired(PacketSize::Standard188),
+                    seen_section(0x0001, &Section::new(TableId::from(0x80), &[0xAA; 7])),
+                    seen_section(0x0001, &Section::new(TableId::from(0x80), &[0xBB; 5])),
+                ],
+                "after {} more bytes",
+                next_input.len()
+            );
+        }
     }
 
     #[test]
