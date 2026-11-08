@@ -3,8 +3,9 @@
 //! The events of one packet are queued in a fixed order: a packet that cannot
 //! be read, or one with `transport_error_indicator` set, gives one error and
 //! nothing else; any other gives a discontinuity, then its PCR, then the
-//! sections it completes, each read or failed. A PAT, PMT or CAT section is
-//! queued only at a version not reported before.
+//! sections it completes, each read or failed, then the PES packets it ends
+//! on a subscribed PID. A PAT, PMT or CAT section is queued only at a version
+//! not reported before.
 
 use alloc::collections::{BTreeMap, VecDeque};
 use core::mem;
@@ -20,11 +21,13 @@ use crate::ts::Pid;
 use crate::ts::packet::TransportPacket;
 
 mod continuity;
+mod pes_reassembly;
 mod program_map_routes;
 mod section_reassembly;
 mod version_gate;
 
 use continuity::{ContinuityTracker, Verdict};
+use pes_reassembly::PesReassembly;
 use program_map_routes::ProgramMapRoutes;
 use section_reassembly::{Completed, SectionReassembler};
 use version_gate::{Admission, TableSection, VersionGate};
@@ -33,12 +36,13 @@ use version_gate::{Admission, TableSection, VersionGate};
 /// demuxer follows
 ///
 /// Sections are reassembled on the PAT and CAT PIDs, and on every PID the
-/// PAT names for a program map.
+/// PAT names for a program map; PES packets on the PIDs subscribed to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct PacketAnalyzer {
     continuity: ContinuityTracker,
     reassemblers: BTreeMap<Pid, SectionReassembler>,
     tables: Tables,
+    pes: PesReassembly,
 }
 
 /// What the analyzer knows of the PAT, PMTs and CAT on air
@@ -76,7 +80,7 @@ impl Tables {
 }
 
 impl PacketAnalyzer {
-    pub(super) const fn new() -> Self {
+    pub(super) const fn new(pes_buffer_limit: usize) -> Self {
         Self {
             continuity: ContinuityTracker::new(),
             reassemblers: BTreeMap::new(),
@@ -84,12 +88,35 @@ impl PacketAnalyzer {
                 routes: ProgramMapRoutes::new(),
                 gate: VersionGate::new(),
             },
+            pes: PesReassembly::new(pes_buffer_limit),
         }
     }
 
-    /// Drops the continuity history and every section, once no event is
-    /// queued; the PIDs learned from a PAT, the PAT sections gathered and the
-    /// versions reported stay
+    pub(super) fn subscribe_pes(&mut self, pid: Pid) {
+        self.pes.subscribe(pid);
+    }
+
+    pub(super) fn unsubscribe_pes(&mut self, pid: Pid) {
+        self.pes.unsubscribe(pid);
+    }
+
+    /// Returns the bytes of a [`Lent::Reassembled`] range of a PES packet on
+    /// `pid`
+    pub(super) fn pes_bytes(&self, pid: Pid, range: Range<usize>) -> &[u8] {
+        self.pes.bytes(pid, range)
+    }
+
+    /// Queues the PES packets in flight, ended by the end of input, then
+    /// resets as [`PacketAnalyzer::reset`] does
+    pub(super) fn finish(&mut self, pending: &mut VecDeque<Pending>) {
+        self.pes.finish(pending);
+        self.reset();
+    }
+
+    /// Drops the continuity history, every section and every PES packet in
+    /// flight, once no event is queued; the PIDs learned from a PAT, the PAT
+    /// sections gathered, the versions reported and the PES subscriptions
+    /// stay
     pub(super) fn reset(&mut self) {
         // Why not forget the versions reported, nor the PAT sections
         // gathered: after a resynchronization or across an end of input, the
@@ -100,6 +127,7 @@ impl PacketAnalyzer {
         for reassembler in self.reassemblers.values_mut() {
             reassembler.clear();
         }
+        self.pes.discard_in_flight();
     }
 
     /// Returns the event of a section read whole on `pid`, typed as it was
@@ -117,11 +145,12 @@ impl PacketAnalyzer {
     }
 
     /// Analyzes one packet, which starts at `packet_start` in the framer's
-    /// buffer, and queues its events
+    /// buffer and whose unit starts at input `offset`, and queues its events
     pub(super) fn analyze(
         &mut self,
         bytes: &[u8],
         packet_start: usize,
+        offset: u64,
         pending: &mut VecDeque<Pending>,
     ) {
         let packet = match TransportPacket::read(bytes) {
@@ -211,6 +240,8 @@ impl PacketAnalyzer {
                 }
             }
         }
+        self.pes
+            .push(&packet, verdict, payload_start, offset, pending);
     }
 }
 

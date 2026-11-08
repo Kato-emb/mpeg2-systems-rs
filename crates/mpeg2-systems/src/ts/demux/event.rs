@@ -2,6 +2,7 @@
 
 use core::fmt;
 
+use crate::pes::{self, PesPacket};
 use crate::psi::cat::{self, CaSection};
 use crate::psi::pat::{self, ProgramAssociationSection};
 use crate::psi::pmt::{self, TsProgramMapSection};
@@ -91,6 +92,66 @@ pub enum Event<'a> {
         /// The section, borrowed from the demuxer
         section: Section<'a>,
     },
+    /// A PES packet reassembled on a PID
+    /// [`Demuxer::subscribe_pes`](super::Demuxer::subscribe_pes) named
+    ///
+    /// A packet whose `PES_packet_length` is set ends once that many bytes
+    /// are in; one whose `PES_packet_length` is 0 ends at the next packet of
+    /// its PID with `payload_unit_start_indicator` set, or at
+    /// [`Demuxer::finish`](super::Demuxer::finish). The bytes after a packet
+    /// that ends inside a Transport Packet are stuffing and are passed over.
+    /// The demuxer does not read the elementary stream the packet carries;
+    /// that is up to the caller.
+    #[doc(alias = "PES")]
+    PesPacket {
+        /// The PID the packet was carried on
+        pid: Pid,
+        /// The packet, borrowed from the demuxer
+        packet: PesPacket<'a>,
+        /// Input offset of the Transport Packet the PES packet started in,
+        /// counted from the first byte handed to
+        /// [`Demuxer::handle_input`](super::Demuxer::handle_input)
+        ///
+        /// Every byte handed over is counted, those reported as
+        /// [`Event::Unsynchronized`] and those after the end
+        /// [`Demuxer::finish`](super::Demuxer::finish) marks included, so the
+        /// offset matches a caller's own count across an end and a resume,
+        /// and tells which call handed over the packet's head. The offset is
+        /// that of the packet's unit: for a 192-byte packet, of the timestamp
+        /// before it.
+        start_offset: u64,
+    },
+    /// The bytes of a PES packet reassembled on a subscribed PID, which
+    /// could not be read as one
+    ///
+    /// Reported for a packet whose `packet_start_code_prefix` cannot be read,
+    /// as when the payload is scrambled, and for one that the next
+    /// `payload_unit_start_indicator` cut short of its `PES_packet_length`.
+    /// The bytes are kept as gathered, so a holder of the key can recover
+    /// the packet.
+    UnreadablePesPacket {
+        /// The PID the bytes were carried on
+        pid: Pid,
+        /// The bytes gathered, borrowed from the demuxer
+        bytes: &'a [u8],
+        /// How the bytes failed to read as a PES packet
+        error: pes::Error,
+    },
+    /// The bytes of a PES packet on a subscribed PID that did not reach its
+    /// end
+    ///
+    /// Reported when an [`Error::Discontinuity`], or a
+    /// `discontinuity_indicator`, ends the packet being reassembled on the
+    /// PID, and when [`Demuxer::finish`](super::Demuxer::finish) ends one
+    /// whose `PES_packet_length` is not yet in, or not yet read. Nothing is
+    /// joined across the gap: reassembly starts again at the next
+    /// `payload_unit_start_indicator`.
+    TruncatedPesPacket {
+        /// The PID the bytes were carried on
+        pid: Pid,
+        /// The bytes gathered, borrowed from the demuxer
+        bytes: &'a [u8],
+    },
     /// Input that was not cut into a Transport Packet
     ///
     /// Reported for the bytes before the grid is found, those the search
@@ -142,7 +203,8 @@ pub enum Error {
     },
     /// A Transport Packet's `continuity_counter` is not the one expected
     ///
-    /// A section being reassembled on the PID is dropped. One repeat of the
+    /// A section being reassembled on the PID is dropped, and a PES packet is
+    /// reported as an [`Event::TruncatedPesPacket`]. One repeat of the
     /// previous counter is a duplicate, which ISO/IEC 13818-1 §2.4.3.3
     /// allows; a second repeat is reported here.
     Discontinuity {
@@ -189,6 +251,18 @@ pub enum Error {
         /// How the section failed
         error: cat::Error,
     },
+    /// A PES packet reassembled on a subscribed PID grew past
+    /// [`DemuxerConfig::pes_buffer_limit`](super::DemuxerConfig::pes_buffer_limit)
+    /// before it ended
+    ///
+    /// The bytes gathered are dropped, and reassembly on the PID starts again
+    /// at the next `payload_unit_start_indicator`.
+    PesBufferOverrun {
+        /// The PID the packet was carried on
+        pid: Pid,
+        /// The bytes dropped
+        discarded_bytes: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -232,6 +306,15 @@ impl fmt::Display for Error {
                 pid.get()
             ),
             Self::CaSection { .. } => write!(formatter, "a CA section could not be read"),
+            Self::PesBufferOverrun {
+                pid,
+                discarded_bytes,
+            } => write!(
+                formatter,
+                "a PES packet on PID {:#06x} grew past pes_buffer_limit, and its \
+                 {discarded_bytes} bytes were dropped",
+                pid.get()
+            ),
         }
     }
 }
@@ -247,7 +330,8 @@ impl core::error::Error for Error {
             Self::SyncByteMissing { .. }
             | Self::SyncLost
             | Self::TransportErrorIndicator { .. }
-            | Self::Discontinuity { .. } => None,
+            | Self::Discontinuity { .. }
+            | Self::PesBufferOverrun { .. } => None,
         }
     }
 }

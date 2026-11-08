@@ -3,6 +3,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::pes::{self, PesPacket};
 use crate::psi::cat::CaSection;
 use crate::psi::pat::ProgramAssociationSection;
 use crate::psi::pmt::TsProgramMapSection;
@@ -562,4 +563,197 @@ fn a_section_a_whole_version_lacks_is_new_again_when_its_version_comes_back() {
         .filter(|event| event.starts_with("TsProgramMapSection"))
         .collect();
     assert_eq!(pmts, [pmt_event(0x0200, &pmt), pmt_event(0x0200, &pmt)]);
+}
+
+/// The PID the PES tests subscribe to
+const PES_PID: u16 = 0x0100;
+
+/// A PES packet of `private_stream_2`, which has no optional header, with
+/// `PES_packet_length` as given and `body` after it
+fn pes(pes_packet_length: u16, body: &[u8]) -> Vec<u8> {
+    let [high, low] = pes_packet_length.to_be_bytes();
+    [&[0x00, 0x00, 0x01, 0xBF, high, low][..], body].concat()
+}
+
+/// The payload of a [`packet`] that carries `head`: `head`, then 0xFF to
+/// the end of the packet
+fn stuffed(head: &[u8]) -> Vec<u8> {
+    let mut payload = head.to_vec();
+    payload.resize(184, 0xFF);
+    payload
+}
+
+/// A demuxer subscribed to [`PES_PID`], with the limit given
+fn subscribed(pes_buffer_limit: usize) -> Demuxer {
+    let mut demuxer = Demuxer::new(DemuxerConfig {
+        pes_buffer_limit,
+        ..DemuxerConfig::default()
+    });
+    demuxer.subscribe_pes(Pid::try_from(PES_PID).unwrap());
+    demuxer
+}
+
+/// The events of `packets`, behind null packets and before one more, then
+/// those of the end of input
+fn demux_to_the_end(demuxer: &mut Demuxer, packets: &[Vec<u8>]) -> Vec<String> {
+    let mut stream = behind_null_packets(packets);
+    stream.extend(packet(0x1FFF, false, 0, &[]));
+    let mut events = events_of(demuxer, &stream);
+    demuxer.finish();
+    events.extend(drained(demuxer));
+    events
+}
+
+/// Input offset of the first packet [`behind_null_packets`] puts after them
+const FIRST_PACKET_OFFSET: u64 = 5 * 188;
+
+#[test]
+fn a_subscribed_pid_reports_its_reassembled_pes_packet() {
+    let bytes = pes(3, &[0xAA, 0xBB, 0xCC]);
+    assert_eq!(
+        demux_to_the_end(&mut subscribed(4096), &[packet(PES_PID, true, 0, &bytes)]),
+        [
+            acquired(),
+            described(&Event::PesPacket {
+                pid: Pid::try_from(PES_PID).unwrap(),
+                packet: PesPacket::read(&bytes).unwrap(),
+                start_offset: FIRST_PACKET_OFFSET,
+            }),
+        ]
+    );
+}
+
+#[test]
+fn an_unsubscribed_pid_reports_no_pes_packet() {
+    assert_eq!(
+        demux_to_the_end(
+            &mut Demuxer::new(DemuxerConfig::default()),
+            &[packet(PES_PID, true, 0, &pes(3, &[0xAA, 0xBB, 0xCC]))]
+        ),
+        [acquired()]
+    );
+}
+
+#[test]
+fn unsubscribing_reports_nothing_for_the_pid_it_left() {
+    let mut demuxer = subscribed(4096);
+    let mut events = events_of(
+        &mut demuxer,
+        &behind_null_packets(&[packet(PES_PID, true, 0, &pes(400, &[0x01, 0x02]))]),
+    );
+    demuxer.unsubscribe_pes(Pid::try_from(PES_PID).unwrap());
+    events.extend(demux_to_the_end(
+        &mut demuxer,
+        &[
+            packet(PES_PID, false, 1, &[0x04, 0x05]),
+            packet(PES_PID, true, 2, &pes(3, &[0xAA, 0xBB, 0xCC])),
+        ],
+    ));
+    assert_eq!(events, [acquired()]);
+}
+
+#[test]
+fn the_end_of_input_reports_a_pes_packet_cut_short_as_truncated() {
+    let head = pes(400, &[0x01, 0x02, 0x03]);
+    assert_eq!(
+        demux_to_the_end(&mut subscribed(4096), &[packet(PES_PID, true, 0, &head)]),
+        [
+            acquired(),
+            described(&Event::TruncatedPesPacket {
+                pid: Pid::try_from(PES_PID).unwrap(),
+                bytes: &stuffed(&head),
+            }),
+        ]
+    );
+}
+
+#[test]
+fn a_continuity_break_reports_the_pes_packet_in_flight_as_truncated() {
+    let head = pes(400, &[0x01, 0x02, 0x03]);
+    let pid = Pid::try_from(PES_PID).unwrap();
+    assert_eq!(
+        demux_to_the_end(
+            &mut subscribed(4096),
+            &[
+                packet(PES_PID, true, 0, &head),
+                packet(PES_PID, false, 2, &[0x04, 0x05]),
+            ]
+        ),
+        [
+            acquired(),
+            described(&Event::Error(Error::Discontinuity {
+                pid,
+                expected: crate::ts::ContinuityCounter::try_from(1).unwrap(),
+                found: crate::ts::ContinuityCounter::try_from(2).unwrap(),
+            })),
+            described(&Event::TruncatedPesPacket {
+                pid,
+                bytes: &stuffed(&head),
+            }),
+        ]
+    );
+}
+
+#[test]
+fn losing_sync_drops_the_pes_packet_in_flight_without_a_word() {
+    let unsynchronized = [0x00; 188];
+    let mut stream = behind_null_packets(&[packet(PES_PID, true, 0, &pes(400, &[0x01]))]);
+    stream.extend_from_slice(&unsynchronized);
+    stream.extend_from_slice(&unsynchronized);
+    let mut demuxer = subscribed(4096);
+    let mut events = events_of(&mut demuxer, &stream);
+    demuxer.finish();
+    events.extend(drained(&mut demuxer));
+    assert_eq!(
+        events,
+        [
+            acquired(),
+            described(&Event::Error(Error::SyncByteMissing { found: 0x00 })),
+            described(&Event::Error(Error::SyncLost)),
+            described(&Event::Unsynchronized {
+                bytes: &unsynchronized
+            }),
+        ]
+    );
+}
+
+#[test]
+fn reassembled_bytes_that_do_not_read_as_a_pes_packet_are_reported_with_the_error() {
+    let scrambled = [0xAA, 0xBB, 0xCC, 0xDD, 0x00, 0x00, 0x99];
+    assert_eq!(
+        demux_to_the_end(
+            &mut subscribed(4096),
+            &[packet(PES_PID, true, 0, &scrambled)]
+        ),
+        [
+            acquired(),
+            described(&Event::UnreadablePesPacket {
+                pid: Pid::try_from(PES_PID).unwrap(),
+                bytes: &stuffed(&scrambled),
+                error: pes::Error::PacketStartCodePrefix {
+                    packet_start_code_prefix: 0xAA_BBCC,
+                },
+            }),
+        ]
+    );
+}
+
+#[test]
+fn a_subscribed_pid_whose_buffer_grows_past_the_limit_reports_an_overrun() {
+    assert_eq!(
+        demux_to_the_end(
+            &mut subscribed(300),
+            &[
+                packet(PES_PID, true, 0, &pes(0, &[0x01, 0x02, 0x03])),
+                packet(PES_PID, false, 1, &[]),
+            ]
+        ),
+        [
+            acquired(),
+            described(&Event::Error(Error::PesBufferOverrun {
+                pid: Pid::try_from(PES_PID).unwrap(),
+                discarded_bytes: 2 * 184,
+            })),
+        ]
+    );
 }

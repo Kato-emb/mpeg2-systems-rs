@@ -5,7 +5,6 @@
 //! [`PacketFramer::extend`]; every other byte is reported as unsynchronized.
 
 use alloc::vec::Vec;
-use core::hash::{Hash, Hasher};
 use core::ops::Range;
 
 use crate::ts::packet::{PACKET_LENGTH, SYNC_BYTE};
@@ -23,7 +22,7 @@ const SYNC_LOSS_COUNT: u8 = 2;
 /// that never synchronizes holds while still handing every byte back.
 const UNSYNCHRONIZED_REPORT_LIMIT: usize = 64 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Searching {
         /// Bytes after the consumed ones that the search walked past and has
@@ -102,10 +101,6 @@ struct Transition {
 }
 
 /// Grid synchronization state machine over the input buffer
-///
-/// Two framers are equal when they will report the same outputs for the
-/// same input: the bytes before `consumed`, which are reported but not yet
-/// dropped, take no part.
 #[derive(Debug, Clone)]
 pub(super) struct PacketFramer {
     fixed_packet_size: Option<PacketSize>,
@@ -119,20 +114,6 @@ pub(super) struct PacketFramer {
     /// [`PacketFramer::finish`] ended the input, and the framer has not yet
     /// reported every byte before the end
     ended: bool,
-}
-
-impl PartialEq for PacketFramer {
-    fn eq(&self, other: &Self) -> bool {
-        self.key() == other.key()
-    }
-}
-
-impl Eq for PacketFramer {}
-
-impl Hash for PacketFramer {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.key().hash(state);
-    }
 }
 
 impl PacketFramer {
@@ -199,18 +180,6 @@ impl PacketFramer {
     /// Returns the bytes of a range an [`Output`] carries
     pub(super) fn bytes(&self, range: Range<usize>) -> &[u8] {
         self.buffer.get(range).unwrap_or_default()
-    }
-
-    /// What equality and hashing compare: everything but the bytes already
-    /// reported or cut
-    fn key(&self) -> (Option<PacketSize>, State, bool, u64, &[u8]) {
-        (
-            self.fixed_packet_size,
-            self.state,
-            self.ended,
-            self.offset_of(self.consumed),
-            self.unconsumed(),
-        )
     }
 
     /// The bytes not yet reported or cut
