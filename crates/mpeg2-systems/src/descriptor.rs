@@ -19,7 +19,8 @@
 //! [`ca`] and [`iso_639_language`]; those of tags 0x0B to 0x12 too:
 //! [`system_clock`], [`multiplex_buffer_utilization`], [`copyright`],
 //! [`maximum_bitrate`], [`private_data_indicator`], [`smoothing_buffer`],
-//! [`system_target_decoder`] (the STD descriptor) and [`ibp`].
+//! [`system_target_decoder`] (the STD descriptor) and [`ibp`]; and the codec
+//! descriptors [`avc_video`], [`mpeg2_aac_audio`] and [`hevc_video`].
 //!
 //! # Examples
 //!
@@ -63,13 +64,16 @@ use core::fmt;
 use crate::field::{self, FieldReader};
 
 pub mod audio_stream;
+pub mod avc_video;
 pub mod ca;
 pub mod copyright;
 pub mod data_stream_alignment;
+pub mod hevc_video;
 pub mod hierarchy;
 pub mod ibp;
 pub mod iso_639_language;
 pub mod maximum_bitrate;
+pub mod mpeg2_aac_audio;
 pub mod multiplex_buffer_utilization;
 pub mod private_data_indicator;
 pub mod registration;
