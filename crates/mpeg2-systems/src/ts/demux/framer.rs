@@ -4,9 +4,9 @@
 //! bytes it takes on the wire, counted from the first byte ever handed to
 //! [`PacketFramer::extend`]; every other byte is reported as unsynchronized.
 
-use alloc::vec::Vec;
 use core::ops::Range;
 
+use crate::input_buffer::InputBuffer;
 use crate::ts::packet::{PACKET_LENGTH, SYNC_BYTE};
 
 pub(super) mod sync;
@@ -105,15 +105,10 @@ struct Transition {
 pub(super) struct PacketFramer {
     fixed_packet_size: Option<PacketSize>,
     state: State,
-    buffer: Vec<u8>,
-    /// Bytes at the front of `buffer` that were reported or cut; the ranges
-    /// an [`Output`] carries still point at them
-    consumed: usize,
-    /// Input offset of `buffer[0]`, counted from the first byte ever extended
+    input: InputBuffer,
+    /// Input offset of the first byte `input` holds, counted from the first
+    /// byte ever extended
     position: u64,
-    /// [`PacketFramer::finish`] ended the input, and the framer has not yet
-    /// reported every byte before the end
-    ended: bool,
 }
 
 impl PacketFramer {
@@ -121,10 +116,8 @@ impl PacketFramer {
         Self {
             fixed_packet_size,
             state: State::Searching { skipped: 0 },
-            buffer: Vec::new(),
-            consumed: 0,
+            input: InputBuffer::new(),
             position: 0,
-            ended: false,
         }
     }
 
@@ -135,36 +128,19 @@ impl PacketFramer {
     /// Panics if called after [`PacketFramer::finish`] before
     /// [`PacketFramer::step`] has returned [`Output::NeedMoreData`].
     pub(super) fn extend(&mut self, bytes: &[u8]) {
-        assert!(
-            !self.ended,
-            "input handed over after finish, before the events it left were polled"
-        );
-        // Why copy every chunk, not only the tail that crosses into the
-        // next: an event borrows the demuxer rather than the caller's chunk,
-        // so poll_event can lend a packet after handle_input has returned.
-        self.buffer.extend_from_slice(bytes);
+        self.input.extend(bytes);
     }
 
     #[cfg(test)]
     pub(super) fn buffer_len(&self) -> usize {
-        self.buffer.len()
+        self.input.len()
     }
 
     /// Drops the bytes reported or cut, once no output's range points at
     /// them, if they are no fewer than the bytes left
     pub(super) fn compact(&mut self) {
-        // Why not a VecDeque, which drops the front without moving the rest:
-        // a packet straddling its wrap has no single slice to lend, so every
-        // packet would be copied out. Why not compact whenever bytes were
-        // consumed: that moves the unread rest of a large chunk on every
-        // packet. Compacting only once the consumed bytes are no fewer than
-        // the rest moves each byte a bounded number of times in all.
-        if self.consumed < self.buffer.len().saturating_sub(self.consumed) {
-            return;
-        }
-        self.buffer.drain(..self.consumed);
-        self.position = self.offset_of(self.consumed);
-        self.consumed = 0;
+        let dropped = self.input.compact();
+        self.position = self.offset_of(dropped);
     }
 
     /// Ends the input at the bytes handed over so far
@@ -174,17 +150,17 @@ impl PacketFramer {
     /// [`Output::Unsynchronized`]. The state stays, so input extended once
     /// the end is reported goes on on the grid found.
     pub(super) fn finish(&mut self) {
-        self.ended = true;
+        self.input.finish();
     }
 
     /// Returns the bytes of a range an [`Output`] carries
     pub(super) fn bytes(&self, range: Range<usize>) -> &[u8] {
-        self.buffer.get(range).unwrap_or_default()
+        self.input.get(range)
     }
 
     /// The bytes not yet reported or cut
     fn unconsumed(&self) -> &[u8] {
-        self.buffer.get(self.consumed..).unwrap_or_default()
+        self.input.from(self.input.consumed())
     }
 
     /// Input offset of the buffer byte at `index`
@@ -199,13 +175,13 @@ impl PacketFramer {
     /// Steps the state machine until it has something to report
     pub(super) fn step(&mut self) -> Output {
         loop {
-            if self.ended && self.consumed == self.buffer.len() {
-                self.ended = false;
+            if self.input.is_ended() && self.input.consumed() == self.input.len() {
+                self.input.resume();
                 return Output::EndOfInput;
             }
             let transition = self.transition();
             self.state = transition.next_state;
-            self.consumed = self.consumed.saturating_add(transition.consume);
+            self.input.consume(transition.consume);
             if let Some(output) = transition.output {
                 return output;
             }
@@ -213,8 +189,8 @@ impl PacketFramer {
     }
 
     fn transition(&self) -> Transition {
-        let consumed = self.consumed;
-        let input = if self.ended {
+        let consumed = self.input.consumed();
+        let input = if self.input.is_ended() {
             Input::Ends
         } else {
             Input::Continues
@@ -228,7 +204,7 @@ impl PacketFramer {
             }
             State::Searching { skipped } => {
                 let cursor = consumed.saturating_add(skipped);
-                let bytes = self.buffer.get(cursor..).unwrap_or_default();
+                let bytes = self.input.from(cursor);
                 // Why cap the garbage counted at what the report has room
                 // for: one chunk can carry far more garbage than the limit,
                 // and taking it all would make one report exceed the bound;
@@ -321,7 +297,7 @@ impl PacketFramer {
                     FrameObservation::Leftover => Transition {
                         next_state: self.state,
                         consume: bytes.len(),
-                        output: Some(Output::Unsynchronized(consumed..self.buffer.len())),
+                        output: Some(Output::Unsynchronized(consumed..self.input.len())),
                     },
                     FrameObservation::NeedMoreData => Transition {
                         next_state: self.state,
@@ -335,11 +311,12 @@ impl PacketFramer {
 
     /// Reports the run the search walked past, which starts at `consumed`
     fn report_skipped(&self, skipped: usize) -> Transition {
+        let consumed = self.input.consumed();
         Transition {
             next_state: State::Searching { skipped: 0 },
             consume: skipped,
             output: Some(Output::Unsynchronized(
-                self.consumed..self.consumed.saturating_add(skipped),
+                consumed..consumed.saturating_add(skipped),
             )),
         }
     }
