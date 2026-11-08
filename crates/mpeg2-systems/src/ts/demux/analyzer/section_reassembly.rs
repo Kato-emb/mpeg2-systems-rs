@@ -53,8 +53,8 @@ pub(super) enum Completed {
 
 /// The sections of one PID that cross Transport Packets
 ///
-/// `buffer[..in_flight_start]` holds the sections completed since the last
-/// [`SectionReassembler::release`], which stay lent until then;
+/// `buffer[..in_flight_start]` holds the sections the latest packet
+/// completed, which stay lent until the next packet of the PID;
 /// `buffer[in_flight_start..]` is the section in flight.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct SectionReassembler {
@@ -80,10 +80,9 @@ impl SectionReassembler {
         self.buffer.len()
     }
 
-    /// Drops the completed sections, once none is lent; the section in
-    /// flight stays
-    pub(super) fn release(&mut self) {
-        self.buffer.drain(..self.in_flight_start);
+    /// Drops every byte, the completed sections and the section in flight
+    pub(super) fn clear(&mut self) {
+        self.buffer.clear();
         self.in_flight_start = 0;
     }
 
@@ -94,12 +93,16 @@ impl SectionReassembler {
 
     /// Takes the payload of a packet of the PID, and calls `completed` with
     /// each section it completes, in order, and where it lies
+    ///
+    /// The sections the previous push completed are dropped first.
     pub(super) fn push(
         &mut self,
         payload_unit_start_indicator: bool,
         payload: &[u8],
         completed: &mut impl FnMut(Completed, &[u8]),
     ) {
+        self.buffer.drain(..self.in_flight_start);
+        self.in_flight_start = 0;
         match unit_of(payload_unit_start_indicator, payload) {
             Unit::Continuation(bytes) => {
                 // Why not start a section from a continuation when none is in

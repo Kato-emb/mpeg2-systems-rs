@@ -187,7 +187,7 @@ fn a_section_inside_one_payload_is_not_copied() {
 }
 
 #[test]
-fn a_section_across_packets_is_lent_from_the_buffer_until_released() {
+fn a_section_across_packets_is_lent_from_the_buffer_until_the_next_push() {
     let bytes = section(0x02, &[0xAA; 30]);
     let after = section(0x02, &[0xBB; 5]);
     let (head, tail) = bytes.split_at(10);
@@ -208,6 +208,6 @@ fn a_section_across_packets_is_lent_from_the_buffer_until_released() {
             (Completed::InPayload(1 + tail.len()), after.clone()),
         ]
     );
-    reassembler.release();
-    assert_eq!(reassembler.buffer, Vec::<u8>::new());
+    reassembler.push(false, &[], &mut |_, _| {});
+    assert_eq!(reassembler, SectionReassembler::new());
 }

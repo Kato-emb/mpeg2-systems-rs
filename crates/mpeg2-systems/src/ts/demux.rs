@@ -306,9 +306,9 @@ impl Demuxer {
         // Why queue ranges and lend only at the end: returning a borrow from
         // inside this loop, which steps the framer again on the next turn, is
         // refused by the borrow checker. A packet is analyzed only once the
-        // queue is empty, so the bytes the queued ranges point at stay put.
+        // queue is empty, so the bytes the queued ranges point at stay put,
+        // in the framer or in a reassembler.
         while self.pending.is_empty() {
-            self.analyzer.release();
             let pending = match self.framer.step() {
                 Output::NeedMoreData => return None,
                 Output::Packet { range, .. } => {
@@ -317,11 +317,10 @@ impl Demuxer {
                         .analyze(self.framer.bytes(range), start, &mut self.pending);
                     continue;
                 }
-                // Why not keep the continuity history and the sections in
-                // flight: after a resynchronization, or across an end of
-                // input, the bytes that follow are from an unrelated place in
-                // the stream, so the history would report false
-                // discontinuities.
+                // Why not keep the continuity history and the sections held:
+                // after a resynchronization, or across an end of input, the
+                // bytes that follow are from an unrelated place in the stream,
+                // so the history would report false discontinuities.
                 Output::SyncLost => {
                     self.analyzer.reset();
                     Pending::Ready(Event::Error(Error::SyncLost))

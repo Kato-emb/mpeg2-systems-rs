@@ -29,11 +29,6 @@ use section_reassembly::{Completed, SectionReassembler};
 pub(super) struct PacketAnalyzer {
     continuity: ContinuityTracker,
     reassemblers: BTreeMap<Pid, SectionReassembler>,
-    /// The PID whose reassembler holds sections completed since the last
-    /// [`PacketAnalyzer::release`], read or not
-    // Why not release every reassembler instead: that walks them all on
-    // every packet, while at most one holds completed sections at a time.
-    completed_on: Option<Pid>,
 }
 
 impl PacketAnalyzer {
@@ -41,27 +36,15 @@ impl PacketAnalyzer {
         Self {
             continuity: ContinuityTracker::new(),
             reassemblers: BTreeMap::new(),
-            completed_on: None,
         }
     }
 
-    /// Drops the continuity history and every section in flight; the PIDs
-    /// learned from a PAT stay
+    /// Drops the continuity history and every section, once no event is
+    /// queued; the PIDs learned from a PAT stay
     pub(super) fn reset(&mut self) {
         self.continuity.reset();
         for reassembler in self.reassemblers.values_mut() {
-            reassembler.discard_in_flight();
-        }
-    }
-
-    /// Drops the sections the queued events lent, once none is queued
-    pub(super) fn release(&mut self) {
-        if let Some(reassembler) = self
-            .completed_on
-            .take()
-            .and_then(|pid| self.reassemblers.get_mut(&pid))
-        {
-            reassembler.release();
+            reassembler.clear();
         }
     }
 
@@ -137,7 +120,6 @@ impl PacketAnalyzer {
                 reassemble(
                     &mut reassembler,
                     Some(&mut self.reassemblers),
-                    &mut self.completed_on,
                     verdict,
                     &packet,
                     payload_start,
@@ -156,15 +138,7 @@ impl PacketAnalyzer {
                     self.reassemblers.get_mut(&pid)
                 };
                 if let Some(reassembler) = reassembler {
-                    reassemble(
-                        reassembler,
-                        None,
-                        &mut self.completed_on,
-                        verdict,
-                        &packet,
-                        payload_start,
-                        pending,
-                    );
+                    reassemble(reassembler, None, verdict, &packet, payload_start, pending);
                 }
             }
         }
@@ -180,7 +154,6 @@ impl PacketAnalyzer {
 fn reassemble(
     reassembler: &mut SectionReassembler,
     mut program_maps: Option<&mut BTreeMap<Pid, SectionReassembler>>,
-    completed_on: &mut Option<Pid>,
     verdict: Verdict,
     packet: &TransportPacket<'_>,
     payload_start: usize,
@@ -204,12 +177,6 @@ fn reassemble(
         packet.payload_unit_start_indicator,
         payload,
         &mut |completed, section_bytes| {
-            // Why before the section is read: a section that fails to read
-            // still fills the reassembler, which must be drained all the
-            // same.
-            if let Completed::Reassembled(_) = completed {
-                *completed_on = Some(pid);
-            }
             let section = match Section::read(section_bytes) {
                 Ok(section) => section,
                 Err(error) => {
