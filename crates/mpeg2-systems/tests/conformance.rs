@@ -176,7 +176,7 @@ mod tests {
             .into_iter()
             .map(|pat| {
                 let mut programs: Vec<_> = pat
-                    .get("network_PID")
+                    .get("network_pid")
                     .and_then(Json::as_u64)
                     .map(|pid| (0, pid))
                     .into_iter()
@@ -184,7 +184,7 @@ mod tests {
                 programs.extend(pat.named("service").into_iter().map(|service| {
                     (
                         integer(service, "service_id"),
-                        integer(service, "program_map_PID"),
+                        integer(service, "program_map_pid"),
                     )
                 }));
                 ProgramAssociation {
@@ -200,7 +200,7 @@ mod tests {
                 program_number: integer(pmt, "service_id"),
                 // Why not take PCR_PID as it is: TSDuck prints the null PID for
                 // a program without a PCR, which the crate reads as none.
-                pcr_pid: Some(integer(pmt, "PCR_PID"))
+                pcr_pid: Some(integer(pmt, "pcr_pid"))
                     .filter(|&pid| pid != u64::from(Pid::NULL.get())),
                 elementary_streams: pmt
                     .named("component")
@@ -208,7 +208,7 @@ mod tests {
                     .map(|component| {
                         (
                             integer(component, "stream_type"),
-                            integer(component, "elementary_PID"),
+                            integer(component, "elementary_pid"),
                         )
                     })
                     .collect(),

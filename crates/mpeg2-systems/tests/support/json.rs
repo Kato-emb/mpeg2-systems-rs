@@ -101,9 +101,9 @@ fn value(chars: &mut Peekable<Chars<'_>>) -> Json {
         })),
         '[' => Json::Array(sequence(chars, ']', value)),
         '"' => Json::String(string(chars)),
-        't' => literal(chars, "rue", Json::Bool(true)),
-        'f' => literal(chars, "alse", Json::Bool(false)),
-        'n' => literal(chars, "ull", Json::Null),
+        't' => literal(chars, "true", Json::Bool(true)),
+        'f' => literal(chars, "false", Json::Bool(false)),
+        'n' => literal(chars, "null", Json::Null),
         first => {
             let mut number = String::from(first);
             while let Some(char) =
@@ -166,8 +166,12 @@ fn string(chars: &mut Peekable<Chars<'_>>) -> String {
     }
 }
 
-fn literal(chars: &mut Peekable<Chars<'_>>, rest: &str, value: Json) -> Json {
-    let read: String = chars.by_ref().take(rest.len()).collect();
-    assert_eq!(read, rest, "an unknown literal");
+/// `value`, which `word` spells, the first letter of `word` read
+fn literal(chars: &mut Peekable<Chars<'_>>, word: &str, value: Json) -> Json {
+    let spelled = word
+        .chars()
+        .skip(1)
+        .all(|letter| chars.next() == Some(letter));
+    assert!(spelled, "a literal other than {word}");
     value
 }
