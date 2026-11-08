@@ -7,9 +7,9 @@ use core::fmt;
 
 use super::adaptation_field::{self, AdaptationField, MAX_ADAPTATION_FIELD_LENGTH};
 use super::{ContinuityCounter, Pid};
-#[cfg(feature = "alloc")]
-use crate::field::FieldWriter;
 use crate::field::{self, FieldReader, TwoBitFieldOutOfRange};
+#[cfg(feature = "alloc")]
+use crate::field::{FieldWriter, write_or_truncate};
 
 /// Bytes in a Transport Packet
 const PACKET_LENGTH: usize = 188;
@@ -149,11 +149,7 @@ impl TryFrom<u8> for TransportScramblingControl {
     ///
     /// [`TwoBitFieldOutOfRange`]: `value` is 4 or more.
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        if value < 4 {
-            Ok(Self(value))
-        } else {
-            Err(TwoBitFieldOutOfRange { value })
-        }
+        TwoBitFieldOutOfRange::check(value).map(Self)
     }
 }
 
@@ -193,11 +189,7 @@ impl TryFrom<u8> for AdaptationFieldControl {
     ///
     /// [`TwoBitFieldOutOfRange`]: `value` is 4 or more.
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        if value < 4 {
-            Ok(Self(value))
-        } else {
-            Err(TwoBitFieldOutOfRange { value })
-        }
+        TwoBitFieldOutOfRange::check(value).map(Self)
     }
 }
 
@@ -433,13 +425,7 @@ impl<'input> TransportPacket<'input> {
             });
         }
 
-        let start = out.len();
-        let written = self.write_fields(out, adaptation_field_control);
-        if written.is_err() {
-            out.truncate(start);
-        }
-
-        written
+        write_or_truncate(out, |out| self.write_fields(out, adaptation_field_control))
     }
 
     /// Appends the header, the adaptation field and the payload, leaving

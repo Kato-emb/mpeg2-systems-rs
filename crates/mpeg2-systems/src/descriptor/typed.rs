@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use super::{DescriptorTag, Error, RawDescriptor};
 use crate::field;
 #[cfg(feature = "alloc")]
-use crate::field::FieldWriter;
+use crate::field::{FieldWriter, write_or_truncate};
 
 /// Returns the body of `raw`, refusing a descriptor of another tag than
 /// `expected`
@@ -69,15 +69,11 @@ pub(crate) fn write_descriptor(
     let descriptor_length = u8::try_from(body_length).map_err(|_| Error::DescriptorLength {
         length: body_length,
     })?;
-    let start = out.len();
-    out.push(descriptor_tag.get());
-    out.push(descriptor_length);
-    let mut writer = FieldWriter::new(out);
-    let written = write_body(&mut writer)
-        .and_then(|()| writer.finish().map_err(field_error("descriptor body")));
-    if written.is_err() {
-        out.truncate(start);
-    }
-
-    written
+    write_or_truncate(out, |out| {
+        out.push(descriptor_tag.get());
+        out.push(descriptor_length);
+        let mut writer = FieldWriter::new(out);
+        write_body(&mut writer)?;
+        writer.finish().map_err(field_error("descriptor body"))
+    })
 }

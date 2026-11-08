@@ -48,11 +48,7 @@ impl TryFrom<u8> for AspectRatioInformation {
     ///
     /// [`FourBitFieldOutOfRange`]: `value` is 16 or more.
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        if value < 16 {
-            Ok(Self(value))
-        } else {
-            Err(FourBitFieldOutOfRange { value })
-        }
+        FourBitFieldOutOfRange::check(value).map(Self)
     }
 }
 

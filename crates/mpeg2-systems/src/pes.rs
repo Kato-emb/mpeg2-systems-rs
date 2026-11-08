@@ -11,9 +11,9 @@ pub mod stream_id;
 use alloc::vec::Vec;
 use core::fmt;
 
-#[cfg(feature = "alloc")]
-use crate::field::FieldWriter;
 use crate::field::{self, FieldReader};
+#[cfg(feature = "alloc")]
+use crate::field::{FieldWriter, write_or_truncate};
 pub use optional_header::OptionalHeader;
 pub use stream_id::StreamId;
 
@@ -419,29 +419,23 @@ impl<'input> PesPacket<'input> {
             });
         }
 
-        let start = out.len();
-        let mut writer = FieldWriter::new(out);
-        // Why not an error per field: each value fits its field's width.
-        let prefix = (|| {
-            writer.write_bits::<24>(PACKET_START_CODE_PREFIX)?;
-            writer.write_bits::<8>(self.stream_id.get())?;
-            writer.write_bits::<16>(pes_packet_length)?;
-            writer.finish()
-        })();
-        let written = prefix
-            .map_err(field_error("PES_packet_length"))
-            .and_then(|()| {
-                self.optional_header
-                    .as_ref()
-                    .map_or(Ok(()), |header| header.write(out))
-            });
-        if written.is_err() {
-            out.truncate(start);
-            return written;
-        }
-        out.extend_from_slice(self.payload);
+        write_or_truncate(out, |out| {
+            let mut writer = FieldWriter::new(out);
+            // Why not an error per field: each value fits its field's width.
+            (|| {
+                writer.write_bits::<24>(PACKET_START_CODE_PREFIX)?;
+                writer.write_bits::<8>(self.stream_id.get())?;
+                writer.write_bits::<16>(pes_packet_length)?;
+                writer.finish()
+            })()
+            .map_err(field_error("PES_packet_length"))?;
+            if let Some(header) = &self.optional_header {
+                header.write(out)?;
+            }
+            out.extend_from_slice(self.payload);
 
-        Ok(())
+            Ok(())
+        })
     }
 }
 

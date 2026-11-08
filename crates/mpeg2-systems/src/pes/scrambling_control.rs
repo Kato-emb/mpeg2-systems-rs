@@ -33,10 +33,6 @@ impl TryFrom<u8> for PesScramblingControl {
     ///
     /// [`TwoBitFieldOutOfRange`]: `value` is 4 or more.
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        if value < 4 {
-            Ok(Self(value))
-        } else {
-            Err(TwoBitFieldOutOfRange { value })
-        }
+        TwoBitFieldOutOfRange::check(value).map(Self)
     }
 }

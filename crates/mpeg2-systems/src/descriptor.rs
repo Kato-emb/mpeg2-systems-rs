@@ -61,6 +61,8 @@
 use alloc::vec::Vec;
 use core::fmt;
 
+#[cfg(feature = "alloc")]
+use crate::field::write_or_truncate;
 use crate::field::{self, FieldReader};
 
 pub mod audio_stream;
@@ -387,15 +389,13 @@ impl<'input> DescriptorLoop<'input> {
         entries: impl IntoIterator<Item = Result<RawDescriptor<'descriptor>, Error>>,
         out: &mut Vec<u8>,
     ) -> Result<(), Error> {
-        let start = out.len();
-        for descriptor in entries {
-            if let Err(error) = descriptor.and_then(|descriptor| descriptor.write(out)) {
-                out.truncate(start);
-                return Err(error);
+        write_or_truncate(out, |out| {
+            for descriptor in entries {
+                descriptor?.write(out)?;
             }
-        }
 
-        Ok(())
+            Ok(())
+        })
     }
 }
 

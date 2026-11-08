@@ -8,7 +8,7 @@ use super::Error;
 use crate::descriptor::DescriptorLoop;
 use crate::field::FieldReader;
 #[cfg(feature = "alloc")]
-use crate::field::FieldWriter;
+use crate::field::{FieldWriter, write_or_truncate};
 use crate::stream_type::StreamType;
 use crate::ts::Pid;
 
@@ -129,9 +129,9 @@ pub(super) fn write_entries<'stream>(
     entries: impl IntoIterator<Item = Result<ElementaryStream<'stream>, Error>>,
     out: &mut Vec<u8>,
 ) -> Result<(), Error> {
-    let start = out.len();
-    for stream in entries {
-        let entry = stream.and_then(|stream| {
+    write_or_truncate(out, |out| {
+        for stream in entries {
+            let stream = stream?;
             let pid = stream.elementary_pid;
             if !matches!(pid.get(), 0x0010..=0x1ffe) {
                 return Err(Error::ElementaryPid { pid });
@@ -156,15 +156,11 @@ pub(super) fn write_entries<'stream>(
                 field: "elementary stream loop",
                 error,
             })?;
-            Ok(DescriptorLoop::write_entries(stream.es_info, out)?)
-        });
-        if let Err(error) = entry {
-            out.truncate(start);
-            return Err(error);
+            DescriptorLoop::write_entries(stream.es_info, out)?;
         }
-    }
 
-    Ok(())
+        Ok(())
+    })
 }
 
 impl<'input> From<&'input [u8]> for ElementaryStreamLoop<'input> {
@@ -198,23 +194,42 @@ impl<'input> Iterator for ElementaryStreamIter<'input> {
         }
 
         let mut reader = FieldReader::new(self.0);
-        let mut entry = || {
-            let stream_type = StreamType::from(reader.read_u8::<8>()?);
-            reader.read_bits::<3>()?;
-            let elementary_pid = Pid(reader.read_u16::<13>()?);
-            reader.read_bits::<4>()?;
-            let es_info_length = reader.read_u16::<12>()?;
-            let es_info = DescriptorLoop(reader.read_bytes(usize::from(es_info_length))?);
+        let entry = (|| {
+            let stream_type = reader
+                .read_u8::<8>()
+                .map(StreamType::from)
+                .map_err(|error| Error::Field {
+                    field: "stream_type",
+                    error,
+                })?;
+            let elementary_pid = reader
+                .read_bits::<3>()
+                .and_then(|_| reader.read_u16::<13>())
+                .map(Pid)
+                .map_err(|error| Error::Field {
+                    field: "elementary_PID",
+                    error,
+                })?;
+            let es_info_length = reader
+                .read_bits::<4>()
+                .and_then(|_| reader.read_u16::<12>())
+                .map_err(|error| Error::Field {
+                    field: "ES_info_length",
+                    error,
+                })?;
+            let es_info = reader
+                .read_bytes(usize::from(es_info_length))
+                .map(DescriptorLoop)
+                .map_err(|error| Error::Field {
+                    field: "ES_info",
+                    error,
+                })?;
             Ok(ElementaryStream {
                 stream_type,
                 elementary_pid,
                 es_info,
             })
-        };
-        let entry = entry().map_err(|error| Error::Field {
-            field: "ES_info_length",
-            error,
-        });
+        })();
         // Why not an error: the entry ends on a byte boundary, or the
         // entry failed and nothing after it is read.
         self.0 = reader

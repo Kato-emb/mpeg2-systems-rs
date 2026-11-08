@@ -75,7 +75,7 @@ impl core::error::Error for Error {}
 /// and `PES_scrambling_control`, share it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TwoBitFieldOutOfRange {
-    pub(crate) value: u8,
+    value: u8,
 }
 
 impl TwoBitFieldOutOfRange {
@@ -83,6 +83,15 @@ impl TwoBitFieldOutOfRange {
     #[must_use]
     pub const fn value(self) -> u8 {
         self.value
+    }
+
+    /// Returns `value` if 2 bits carry it
+    pub(crate) const fn check(value: u8) -> Result<u8, Self> {
+        if value < 4 {
+            Ok(value)
+        } else {
+            Err(Self { value })
+        }
     }
 }
 
@@ -100,7 +109,7 @@ impl core::error::Error for TwoBitFieldOutOfRange {}
 /// `hierarchy_type`, share it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FourBitFieldOutOfRange {
-    pub(crate) value: u8,
+    value: u8,
 }
 
 impl FourBitFieldOutOfRange {
@@ -108,6 +117,15 @@ impl FourBitFieldOutOfRange {
     #[must_use]
     pub const fn value(self) -> u8 {
         self.value
+    }
+
+    /// Returns `value` if 4 bits carry it
+    pub(crate) const fn check(value: u8) -> Result<u8, Self> {
+        if value < 16 {
+            Ok(value)
+        } else {
+            Err(Self { value })
+        }
     }
 }
 
@@ -334,6 +352,21 @@ impl<'input> FieldReader<'input> {
 
         Ok(field)
     }
+}
+
+/// Runs `write` on `out`, leaving `out` as it was if `write` fails
+#[cfg(feature = "alloc")]
+pub(crate) fn write_or_truncate<E>(
+    out: &mut Vec<u8>,
+    write: impl FnOnce(&mut Vec<u8>) -> Result<(), E>,
+) -> Result<(), E> {
+    let start = out.len();
+    let written = write(out);
+    if written.is_err() {
+        out.truncate(start);
+    }
+
+    written
 }
 
 /// Cursor appending the fields of a syntax element to a caller's buffer
