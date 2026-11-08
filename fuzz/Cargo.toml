@@ -26,6 +26,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "ps_demux"
+path = "fuzz_targets/ps_demux.rs"
+test = false
+doc = false
+bench = false
+
 # The workspace's table, which this package cannot inherit, as it stands
 [lints.rust]
 unsafe_code = "forbid"

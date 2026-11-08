@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [ts_demux]
+        target: [ts_demux, ps_demux]
     runs-on: ubuntu-latest
     env:
       TARGET: ${{ matrix.target }}
