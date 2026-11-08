@@ -7,11 +7,6 @@
 
 #[cfg(test)]
 #[cfg(feature = "alloc")]
-#[path = "support/json.rs"]
-mod json;
-
-#[cfg(test)]
-#[cfg(feature = "alloc")]
 #[expect(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
@@ -32,8 +27,7 @@ mod tests {
     use mpeg2_systems::ts::Pid;
     use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event, PacketSize};
     use mpeg2_systems::ts::packet::TransportPacket;
-
-    use super::json::Json;
+    use serde_json::Value;
 
     /// A Transport Stream fixture: its name, the offset of its first
     /// `sync_byte` and the bytes from one `sync_byte` to the next
@@ -73,7 +67,7 @@ mod tests {
     }
 
     /// What `tool` prints on its standard output for `arguments`, read as JSON
-    fn run(tool: &str, arguments: &[&str]) -> Json {
+    fn run(tool: &str, arguments: &[&str]) -> Value {
         let output = Command::new(tool)
             .args(arguments)
             .output()
@@ -85,14 +79,42 @@ mod tests {
             output.status,
             String::from_utf8_lossy(&output.stderr)
         );
-        Json::parse(&String::from_utf8(output.stdout).unwrap())
+        serde_json::from_slice(&output.stdout).unwrap()
     }
 
-    fn integer(json: &Json, key: &str) -> u64 {
-        json.get(key)
-            .and_then(Json::as_u64)
-            .ok_or_else(|| format!("no integer {key} in {json:?}"))
+    /// An integer a tool printed as a number, or as a string in decimal or in
+    /// hexadecimal after `0x`
+    fn as_integer(json: &Value) -> Option<u64> {
+        let Some(text) = json.as_str() else {
+            return json.as_u64();
+        };
+        match text.strip_prefix("0x") {
+            Some(hexadecimal) => u64::from_str_radix(hexadecimal, 16).ok(),
+            None => text.parse().ok(),
+        }
+    }
+
+    fn integer(json: &Value, key: &str) -> u64 {
+        as_integer(&json[key])
+            .ok_or_else(|| format!("no integer {key} in {json}"))
             .unwrap()
+    }
+
+    /// Every object in `json`, at any depth, whose `#name` is `name`, in the
+    /// order the tool printed them
+    ///
+    /// TSDuck prints an XML element as an object holding its name as `#name`.
+    fn named<'json>(json: &'json Value, name: &str) -> Vec<&'json Value> {
+        let children: Vec<&Value> = match json {
+            Value::Array(elements) => elements.iter().collect(),
+            Value::Object(members) => members.values().collect(),
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => Vec::new(),
+        };
+        (json["#name"] == name)
+            .then_some(json)
+            .into_iter()
+            .chain(children.into_iter().flat_map(|child| named(child, name)))
+            .collect()
     }
 
     /// Hands `stream` whole to a demuxer subscribed to `pids` and returns
@@ -171,17 +193,16 @@ mod tests {
 
     fn tables_tstables(path: &str) -> (Vec<ProgramAssociation>, Vec<ProgramMap>) {
         let tables = run("tstables", &["--json-output", "-", path]);
-        let mut associations: Vec<_> = tables
-            .named("PAT")
+        let mut associations: Vec<_> = named(&tables, "PAT")
             .into_iter()
             .map(|pat| {
                 let mut programs: Vec<_> = pat
                     .get("network_pid")
-                    .and_then(Json::as_u64)
+                    .and_then(as_integer)
                     .map(|pid| (0, pid))
                     .into_iter()
                     .collect();
-                programs.extend(pat.named("service").into_iter().map(|service| {
+                programs.extend(named(pat, "service").into_iter().map(|service| {
                     (
                         integer(service, "service_id"),
                         integer(service, "program_map_pid"),
@@ -193,8 +214,7 @@ mod tests {
                 }
             })
             .collect();
-        let mut maps: Vec<_> = tables
-            .named("PMT")
+        let mut maps: Vec<_> = named(&tables, "PMT")
             .into_iter()
             .map(|pmt| ProgramMap {
                 program_number: integer(pmt, "service_id"),
@@ -202,8 +222,7 @@ mod tests {
                 // a program without a PCR, which the crate reads as none.
                 pcr_pid: Some(integer(pmt, "pcr_pid"))
                     .filter(|&pid| pid != u64::from(Pid::NULL.get())),
-                elementary_streams: pmt
-                    .named("component")
+                elementary_streams: named(pmt, "component")
                     .into_iter()
                     .map(|component| {
                         (
@@ -236,18 +255,17 @@ mod tests {
         }
         arguments.extend(["-of", "json", "-show_streams", "-show_packets", path]);
         let probed = run("ffprobe", &arguments);
-        let streams: Vec<_> = probed
-            .get("streams")
+        let streams: Vec<_> = probed["streams"]
+            .as_array()
             .unwrap()
-            .elements()
             .iter()
             .map(|stream| {
-                let codec_type = stream.get("codec_type").and_then(Json::as_str).unwrap();
+                let codec_type = stream["codec_type"].as_str().unwrap();
                 (integer(stream, "id"), codec_type.to_owned())
             })
             .collect();
         let mut packets: BTreeMap<u64, Vec<Timing>> = BTreeMap::new();
-        for packet in probed.get("packets").unwrap().elements() {
+        for packet in probed["packets"].as_array().unwrap() {
             // Why not count every packet as a PES packet: ffprobe's parser
             // cuts a PES packet into the frames it holds, and only the first
             // frame to start in a PES packet takes its position and its
@@ -257,8 +275,8 @@ mod tests {
             }
             let index = usize::try_from(integer(packet, "stream_index")).unwrap();
             let timing = (
-                packet.get("pts").and_then(Json::as_u64),
-                packet.get("dts").and_then(Json::as_u64),
+                packet.get("pts").and_then(Value::as_u64),
+                packet.get("dts").and_then(Value::as_u64),
             );
             packets.entry(streams[index].0).or_default().push(timing);
         }
@@ -313,15 +331,11 @@ mod tests {
                 let packet = TransportPacket::read(&unit[..188]).unwrap();
                 *counted.entry(u64::from(packet.pid.get())).or_default() += 1;
             }
-            let analyzed: BTreeMap<_, _> = run("tsanalyze", &["--json", &path])
-                .get("pids")
+            let analyzed: BTreeMap<_, _> = run("tsanalyze", &["--json", &path])["pids"]
+                .as_array()
                 .unwrap()
-                .elements()
                 .iter()
-                .map(|pid| {
-                    let packets = pid.get("packets").unwrap();
-                    (integer(pid, "id"), integer(packets, "total"))
-                })
+                .map(|pid| (integer(pid, "id"), integer(&pid["packets"], "total")))
                 .collect();
             assert_eq!(counted, analyzed, "{name}");
         }
