@@ -209,3 +209,51 @@ fn input_after_the_end_is_framed_on_the_grid_kept() {
         expected
     });
 }
+
+#[test]
+fn every_end_of_input_is_kept_until_the_bytes_before_it_are_reported() {
+    let mut framer = PacketFramer::new(None);
+    let mut seen = Vec::new();
+    framer.extend(&STANDARD_188[..188 * 5]);
+    drain(&mut framer, &mut seen);
+    framer.extend(&STANDARD_188[188 * 5..188 * 5 + 100]);
+    framer.finish();
+    framer.extend(&STANDARD_188[188 * 5 + 100..188 * 6]);
+    framer.finish();
+    drain(&mut framer, &mut seen);
+    let mut expected = vec![Seen::SyncAcquired(PacketSize::Standard188)];
+    expected.extend(packets_of(
+        &STANDARD_188[..188 * 5],
+        PacketSize::Standard188,
+        0,
+    ));
+    expected.extend([
+        Seen::Unsynchronized(STANDARD_188[188 * 5..188 * 5 + 100].to_vec()),
+        Seen::Unsynchronized(STANDARD_188[188 * 5 + 100..188 * 6].to_vec()),
+    ]);
+    assert_eq!(seen, expected);
+}
+
+#[test]
+fn a_candidate_the_end_leaves_unconfirmed_does_not_hide_a_grid_after_it() {
+    let mut stream = vec![0x00; 754];
+    for packet in 0..4 {
+        stream[204 * packet] = SYNC_BYTE;
+    }
+    for packet in 0..SYNC_LOCK_COUNT {
+        stream[1 + 188 * packet] = SYNC_BYTE;
+    }
+    let mut expected = vec![
+        Seen::Unsynchronized(stream[..1].to_vec()),
+        Seen::SyncAcquired(PacketSize::Standard188),
+    ];
+    expected.extend(packets_of(&stream[..753], PacketSize::Standard188, 1));
+    expected.push(Seen::Unsynchronized(stream[753..].to_vec()));
+    for chunk_length in CHUNK_LENGTHS {
+        assert_eq!(
+            frame(&stream, chunk_length, None),
+            expected,
+            "in chunks of {chunk_length}"
+        );
+    }
+}

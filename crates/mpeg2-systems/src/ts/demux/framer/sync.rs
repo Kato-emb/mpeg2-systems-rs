@@ -57,8 +57,8 @@ pub(super) enum SearchObservation {
     GridConfirmed(PacketSize),
     /// Too few bytes to confirm or rule out every candidate period
     Undecided,
-    /// Too few bytes to decide, and no more will follow
-    UndecidedAtEnd,
+    /// The input ended with no bytes left to search
+    InputExhausted,
     /// A unit could start at the front, but no candidate period repeats it
     NoGridAtFront,
 }
@@ -138,8 +138,11 @@ pub(super) fn observe(
     }
     match (undecided, input) {
         (true, Input::Continues) => SearchObservation::Undecided,
-        (true, Input::Ends) => SearchObservation::UndecidedAtEnd,
-        (false, _) => SearchObservation::NoGridAtFront,
+        (true, Input::Ends) if bytes.is_empty() => SearchObservation::InputExhausted,
+        // Why rule an undecided candidate out at the end, rather than give up
+        // the search: no bytes will arrive to confirm it, and a grid can still
+        // start at a later place in the bytes left.
+        (true, Input::Ends) | (false, _) => SearchObservation::NoGridAtFront,
     }
 }
 

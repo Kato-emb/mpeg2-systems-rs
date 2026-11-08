@@ -123,7 +123,7 @@ impl core::error::Error for Error {}
 /// let acquired = Event::SyncAcquired { packet_size: PacketSize::Standard188 };
 /// assert_eq!(events, [format!("{acquired:?}")]);
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Demuxer {
     framer: PacketFramer,
 }

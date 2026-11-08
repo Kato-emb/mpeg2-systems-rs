@@ -4,6 +4,7 @@
 //! bytes it takes on the wire, counted from the first byte ever handed to
 //! [`PacketFramer::extend`]; every other byte is reported as unsynchronized.
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::ops::Range;
 
@@ -22,7 +23,7 @@ const SYNC_LOSS_COUNT: u8 = 2;
 /// that never synchronizes holds while still handing every byte back.
 const UNSYNCHRONIZED_REPORT_LIMIT: usize = 64 * 1024;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum State {
     Searching {
         /// Bytes after the consumed ones that the search walked past and has
@@ -99,16 +100,16 @@ struct Transition {
 /// `position` is the input offset of `buffer[0]`. Bytes before `consumed`
 /// were reported or cut and are dropped at the next [`PacketFramer::extend`];
 /// until then the ranges an [`Output`] carries still point at them.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct PacketFramer {
     fixed_packet_size: Option<PacketSize>,
     state: State,
     buffer: Vec<u8>,
     consumed: usize,
     position: u64,
-    /// Buffer index where [`PacketFramer::finish`] ended the input, until the
-    /// framer has reported every byte before it
-    end: Option<usize>,
+    /// Buffer indices where [`PacketFramer::finish`] ended the input, in
+    /// order, each kept until the framer has reported every byte before it
+    ends: VecDeque<usize>,
 }
 
 impl PacketFramer {
@@ -119,7 +120,7 @@ impl PacketFramer {
             buffer: Vec::new(),
             consumed: 0,
             position: 0,
-            end: None,
+            ends: VecDeque::new(),
         }
     }
 
@@ -130,7 +131,9 @@ impl PacketFramer {
         // less than a stride plus one unreported run.
         self.buffer.drain(..self.consumed);
         self.position = self.offset_of(self.consumed);
-        self.end = self.end.map(|end| end.saturating_sub(self.consumed));
+        for end in &mut self.ends {
+            *end = end.saturating_sub(self.consumed);
+        }
         self.consumed = 0;
         // Why copy every chunk, not only the tail that crosses into the
         // next: an event borrows the demuxer rather than the caller's chunk,
@@ -145,7 +148,7 @@ impl PacketFramer {
     /// [`Output::Unsynchronized`]. Bytes extended after the end are framed
     /// once the end is reported.
     pub(super) fn finish(&mut self) {
-        self.end = Some(self.buffer.len());
+        self.ends.push_back(self.buffer.len());
     }
 
     /// Returns the bytes of a range an [`Output`] carries
@@ -165,8 +168,8 @@ impl PacketFramer {
     /// Steps the state machine until it has something to report
     pub(super) fn step(&mut self) -> Output {
         loop {
-            if self.end == Some(self.consumed) {
-                self.end = None;
+            while self.ends.front() == Some(&self.consumed) {
+                self.ends.pop_front();
             }
             let transition = self.transition();
             self.state = transition.next_state;
@@ -179,11 +182,11 @@ impl PacketFramer {
 
     fn transition(&self) -> Transition {
         let consumed = self.consumed;
-        let limit = self.end.unwrap_or(self.buffer.len());
-        let input = if self.end.is_some() {
-            Input::Ends
-        } else {
+        let limit = self.ends.front().copied().unwrap_or(self.buffer.len());
+        let input = if self.ends.is_empty() {
             Input::Continues
+        } else {
+            Input::Ends
         };
         match self.state {
             // Why report before observing again: the report is capped, so a
@@ -230,15 +233,7 @@ impl PacketFramer {
                         consume: 0,
                         output: Some(Output::SyncAcquired(packet_size)),
                     },
-                    // Why not hold an undecided tail at the end, unlike
-                    // mid-stream: no bytes will arrive to decide it, and a
-                    // leading sync byte no grid confirmed is unproven cadence,
-                    // not a packet.
-                    SearchObservation::UndecidedAtEnd => Transition {
-                        next_state: State::Searching { skipped: 0 },
-                        consume: limit.saturating_sub(consumed),
-                        output: Some(Output::Unsynchronized(consumed..limit)),
-                    },
+                    SearchObservation::InputExhausted => self.report_skipped(skipped),
                     SearchObservation::Undecided => Transition {
                         next_state: self.state,
                         consume: 0,
