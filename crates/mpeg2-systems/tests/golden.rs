@@ -70,6 +70,13 @@ mod tests {
     }
 
     #[test]
+    fn standard_188_byte_stream_with_a_pat_whose_crc_32_fails() {
+        let mut stream = STANDARD_188.to_vec();
+        stream[188 + 20] ^= 0x01;
+        insta::assert_debug_snapshot!(events_of(&stream));
+    }
+
+    #[test]
     fn standard_188_byte_stream_with_two_sync_bytes_missing_in_a_row() {
         let mut stream = STANDARD_188.to_vec();
         stream[188 * 10] = 0x00;
