@@ -31,6 +31,7 @@ jobs:
           toolchain: stable
           components: rustfmt
       - run: cargo fmt --all --check
+      - run: cargo fmt --manifest-path benches/Cargo.toml --check
       - uses: crate-ci/typos@4c8b7f51ca60df14e3c5ca82770dfbbe6c3dae85 # v1.52.0
       # A TODO/FIXME must carry an issue link or owner: `TODO(#12):`, `TODO(name):`, or a URL.
       - name: Forbid bare TODO/FIXME markers
@@ -63,6 +64,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo hack clippy --workspace --feature-powerset --all-targets -- -D warnings
+      - run: cargo clippy --manifest-path benches/Cargo.toml --all-targets -- -D warnings
 
   # The tests run instrumented, so one run both gates and measures. Coverage is
   # reported, never gated on: a threshold rewards tests that execute lines
@@ -87,6 +89,9 @@ jobs:
       # The libraries without their default features, so the alloc-free paths
       # are tested as well.
       - run: cargo llvm-cov nextest --no-report --workspace --no-default-features --no-tests=pass
+      # Here as well as in the test job, so the allocation test runs on every
+      # pull request; uninstrumented, since it counts allocations, not lines.
+      - run: cargo test --manifest-path benches/Cargo.toml
       # The report informs and never gates, so it cannot fail the job either; it
       # has nothing to report while no code is covered, as in a crate with no
       # items.
@@ -123,6 +128,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo nextest run --workspace --all-features --no-tests=pass
+      - run: cargo test --manifest-path benches/Cargo.toml
 
   # The MSRV is read from Cargo.toml, so it is stated once and this job cannot
   # drift from it.
@@ -195,6 +201,7 @@ jobs:
         with:
           tool: cargo-deny
       - run: cargo deny check
+      - run: cargo deny --manifest-path benches/Cargo.toml check
 
   # The one check the main ruleset requires besides the PR title, so a job can
   # be added or renamed here without editing the ruleset. A skipped job passes:

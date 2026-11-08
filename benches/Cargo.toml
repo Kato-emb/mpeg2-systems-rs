@@ -1,0 +1,85 @@
+[package]
+name = "mpeg2-systems-bench"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Kept out of the workspace above: counting allocations takes a global
+# allocator, which needs unsafe code, and the workspace forbids unsafe code in
+# a way no attribute lifts. Without this table cargo walks up to the workspace
+# manifest and refuses a package it does not list.
+[workspace]
+
+[dependencies]
+mpeg2-systems = { path = "../crates/mpeg2-systems" }
+
+[dev-dependencies]
+criterion = { version = "=0.8.2", default-features = false }
+
+[[bench]]
+name = "packet"
+harness = false
+
+[[bench]]
+name = "framer"
+harness = false
+
+[[bench]]
+name = "demux"
+harness = false
+
+# The workspace's table, which this package cannot inherit, less the lints of
+# panic freedom: a benchmark or a test stops on unwrap, indexing or overflow,
+# which is what it should do. unsafe_code is deny rather than forbid, so the
+# one GlobalAlloc impl can lift it with #[expect].
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unnameable_types = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+unused_lifetimes = "warn"
+redundant_lifetimes = "warn"
+unused_qualifications = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+non_ascii_idents = "forbid"
+
+[lints.clippy]
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_precision_loss = "deny"
+cast_sign_loss = "deny"
+cast_lossless = "deny"
+checked_conversions = "deny"
+float_arithmetic = "deny"
+host_endian_bytes = "deny"
+little_endian_bytes = "deny"
+iter_over_hash_type = "deny"
+dbg_macro = "deny"
+inline_always = "deny"
+mod_module_files = "deny"
+min_ident_chars = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+exhaustive_structs = "deny"
+exhaustive_enums = "deny"
+wildcard_enum_match_arm = "deny"
+must_use_candidate = "warn"
+return_self_not_must_use = "warn"
+needless_pass_by_value = "warn"
+trivially_copy_pass_by_ref = "warn"
+large_types_passed_by_value = "warn"
+alloc_instead_of_core = "warn"
+tests_outside_test_module = "warn"
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+too_long_first_doc_paragraph = "warn"
+doc_markdown = "warn"
+doc_link_with_quotes = "warn"
+
+[lints.rustdoc]
+missing_crate_level_docs = "warn"
+unescaped_backticks = "warn"

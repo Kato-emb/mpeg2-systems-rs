@@ -7,13 +7,14 @@ use std::hint::black_box;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use mpeg2_systems::ts::packet::TransportPacket;
+use mpeg2_systems_bench::STREAMS;
 
 /// Measures `TransportPacket::read` over every packet of `188.ts`
 fn packet(criterion: &mut Criterion) {
-    let stream: &[u8] = include_bytes!("../tests/fixtures/188.ts");
+    let (_, stream) = STREAMS[0];
     let mut group = criterion.benchmark_group("packet");
     group.throughput(Throughput::Bytes(
-        u64::try_from(stream.len()).unwrap_or(u64::MAX),
+        u64::try_from(stream.len()).expect("a length fits u64"),
     ));
     group.bench_function("read", |bencher| {
         bencher.iter(|| {
