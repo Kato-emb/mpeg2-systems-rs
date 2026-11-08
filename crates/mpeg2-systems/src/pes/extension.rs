@@ -110,26 +110,22 @@ impl<'input> PesExtension<'input> {
         1_usize
             .saturating_add(self.pes_private_data.map_or(0, |data| data.len()))
             .saturating_add(runs)
-            .saturating_add(if self.program_packet_sequence_counter.is_some() {
-                2
-            } else {
-                0
-            })
-            .saturating_add(if self.p_std_buffer.is_some() { 2 } else { 0 })
+            .saturating_add(self.program_packet_sequence_counter.map_or(0, |_| 2))
+            .saturating_add(self.p_std_buffer.map_or(0, |_| 2))
     }
 
     /// Reads the fields `PES_extension_flag` announces
     pub(super) fn read(reader: &mut FieldReader<'input>) -> Result<Self, Error> {
         let flags = reader
             .read_u8::<8>()
-            .map_err(|error| field_error("PES extension flags", error))?;
+            .map_err(field_error("PES extension flags"))?;
         let is_set = |bit: u8| flags & bit != 0;
         let mut extension = Self::new();
 
         if is_set(0b1000_0000) {
             let data = reader
                 .read_bytes(16)
-                .map_err(|error| field_error("PES_private_data", error))?;
+                .map_err(field_error("PES_private_data"))?;
             extension.pes_private_data = data.first_chunk::<16>();
         }
         if is_set(0b0100_0000) {
@@ -137,8 +133,7 @@ impl<'input> PesExtension<'input> {
                 let length = reader.read_u8::<8>()?;
                 reader.read_bytes(usize::from(length))
             };
-            extension.pack_header_field =
-                Some(read().map_err(|error| field_error("pack_header", error))?);
+            extension.pack_header_field = Some(read().map_err(field_error("pack_header"))?);
         }
         if is_set(0b0010_0000) {
             let mut read = || {
@@ -151,9 +146,8 @@ impl<'input> PesExtension<'input> {
                     counter, identifier, stuff,
                 ))
             };
-            extension.program_packet_sequence_counter = Some(
-                read().map_err(|error| field_error("program_packet_sequence_counter", error))?,
-            );
+            extension.program_packet_sequence_counter =
+                Some(read().map_err(field_error("program_packet_sequence_counter"))?);
         }
         if is_set(0b0001_0000) {
             let mut read = || {
@@ -162,8 +156,7 @@ impl<'input> PesExtension<'input> {
                 let size = reader.read_u16::<13>()?;
                 Ok(PStdBuffer::new(scale, size))
             };
-            extension.p_std_buffer =
-                Some(read().map_err(|error| field_error("P-STD_buffer", error))?);
+            extension.p_std_buffer = Some(read().map_err(field_error("P-STD_buffer"))?);
         }
         if is_set(0b0000_0001) {
             let mut read = || {
@@ -172,7 +165,7 @@ impl<'input> PesExtension<'input> {
                 reader.read_bytes(usize::from(length))
             };
             extension.pes_extension_field =
-                Some(read().map_err(|error| field_error("PES_extension_field", error))?);
+                Some(read().map_err(field_error("PES_extension_field"))?);
         }
 
         Ok(extension)
@@ -191,13 +184,13 @@ impl<'input> PesExtension<'input> {
                     limit: usize::from(limit),
                 })
         };
-        let pack_field_length = self
+        let pack_header_field = self
             .pack_header_field
-            .map(|run| length("pack_field_length", run, u8::MAX))
+            .map(|run| length("pack_field_length", run, u8::MAX).map(|length| (run, length)))
             .transpose()?;
-        let pes_extension_field_length = self
+        let pes_extension_field = self
             .pes_extension_field
-            .map(|run| length("PES_extension_field_length", run, 0x7f))
+            .map(|run| length("PES_extension_field_length", run, 0x7f).map(|length| (run, length)))
             .transpose()?;
 
         let flags = [
@@ -213,19 +206,19 @@ impl<'input> PesExtension<'input> {
         for flag in flags {
             writer
                 .write_bool(flag)
-                .map_err(|error| field_error("PES extension flags", error))?;
+                .map_err(field_error("PES extension flags"))?;
         }
         if let Some(data) = self.pes_private_data {
             writer
                 .write_bytes(data)
-                .map_err(|error| field_error("PES_private_data", error))?;
+                .map_err(field_error("PES_private_data"))?;
         }
-        if let (Some(run), Some(length)) = (self.pack_header_field, pack_field_length) {
+        if let Some((run, length)) = pack_header_field {
             let mut write = || {
                 writer.write_bits::<8>(length)?;
                 writer.write_bytes(run)
             };
-            write().map_err(|error| field_error("pack_header", error))?;
+            write().map_err(field_error("pack_header"))?;
         }
         if let Some(counter) = self.program_packet_sequence_counter {
             let mut write = || {
@@ -235,7 +228,7 @@ impl<'input> PesExtension<'input> {
                 writer.write_bool(counter.mpeg1_mpeg2_identifier)?;
                 writer.write_bits::<6>(counter.original_stuff_length)
             };
-            write().map_err(|error| field_error("program_packet_sequence_counter", error))?;
+            write().map_err(field_error("program_packet_sequence_counter"))?;
         }
         if let Some(buffer) = self.p_std_buffer {
             let mut write = || {
@@ -243,15 +236,15 @@ impl<'input> PesExtension<'input> {
                 writer.write_bool(buffer.p_std_buffer_scale)?;
                 writer.write_bits::<13>(buffer.p_std_buffer_size)
             };
-            write().map_err(|error| field_error("P-STD_buffer", error))?;
+            write().map_err(field_error("P-STD_buffer"))?;
         }
-        if let (Some(run), Some(length)) = (self.pes_extension_field, pes_extension_field_length) {
+        if let Some((run, length)) = pes_extension_field {
             let mut write = || {
                 writer.write_bool(true)?;
                 writer.write_bits::<7>(length)?;
                 writer.write_bytes(run)
             };
-            write().map_err(|error| field_error("PES_extension_field", error))?;
+            write().map_err(field_error("PES_extension_field"))?;
         }
 
         Ok(())

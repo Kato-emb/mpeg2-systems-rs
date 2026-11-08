@@ -181,8 +181,8 @@ impl core::error::Error for Error {
 }
 
 /// Names the field a [`field::Error`] arose in
-pub(crate) const fn field_error(field: &'static str, error: field::Error) -> Error {
-    Error::Field { field, error }
+const fn field_error(field: &'static str) -> impl Fn(field::Error) -> Error {
+    move |error| Error::Field { field, error }
 }
 
 /// How long a PES packet is, as far as its first bytes tell
@@ -331,7 +331,7 @@ impl<'input> PesPacket<'input> {
             ))
         })();
         let (packet_start_code_prefix, stream_id, pes_packet_length) =
-            prefix.map_err(|error| field_error("PES_packet_length", error))?;
+            prefix.map_err(field_error("PES_packet_length"))?;
         if packet_start_code_prefix != PACKET_START_CODE_PREFIX {
             return Err(Error::PacketStartCodePrefix {
                 packet_start_code_prefix,
@@ -346,12 +346,18 @@ impl<'input> PesPacket<'input> {
         }
 
         let (optional_header, payload) = if stream_id.carries_optional_header() {
-            let pes_header_data_length = body.get(2).copied().unwrap_or(0);
+            let pes_header_data_length = body
+                .get(optional_header::FIXED_LENGTH.wrapping_sub(1))
+                .copied()
+                .unwrap_or(0);
             let (header, payload) = body
-                .split_at_checked(usize::from(pes_header_data_length).saturating_add(3))
+                .split_at_checked(
+                    usize::from(pes_header_data_length)
+                        .saturating_add(optional_header::FIXED_LENGTH),
+                )
                 .ok_or(Error::PesHeaderDataLength {
                     pes_header_data_length,
-                    available_bytes: body.len().saturating_sub(3),
+                    available_bytes: body.len().saturating_sub(optional_header::FIXED_LENGTH),
                 })?;
             (Some(OptionalHeader::read(header)?), payload)
         } else {
@@ -423,7 +429,7 @@ impl<'input> PesPacket<'input> {
             writer.finish()
         })();
         let written = prefix
-            .map_err(|error| field_error("PES_packet_length", error))
+            .map_err(field_error("PES_packet_length"))
             .and_then(|()| {
                 self.optional_header
                     .as_ref()

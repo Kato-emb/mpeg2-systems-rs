@@ -11,18 +11,21 @@ pub mod pat;
 pub mod pmt;
 pub mod section;
 
+use core::fmt;
+
 /// Bytes of a section with the fields `section_syntax_indicator` `'1'`
-/// announces, besides its body: 3 to `section_length`, 5 to
-/// `last_section_number` and 4 of `CRC_32`
-const LONG_SECTION_OVERHEAD: usize = 12;
+/// announces, besides its body: up to `section_length`, up to
+/// `last_section_number` and `CRC_32`
+const LONG_SECTION_OVERHEAD: usize = section::PREFIX_LENGTH
+    .saturating_add(section::SYNTAX_LENGTH)
+    .saturating_add(section::CRC_32_LENGTH);
 
 /// Refuses a section of `encoded_len` bytes whose `section_length` would be
 /// larger than `table_id` allows, before its loops are walked or a buffer is
 /// sized after them
 #[cfg(feature = "alloc")]
 const fn check_section_length(table_id: TableId, encoded_len: usize) -> Result<(), section::Error> {
-    // `table_id` to `section_length`
-    let section_length = encoded_len.saturating_sub(3);
+    let section_length = encoded_len.saturating_sub(section::PREFIX_LENGTH);
     let limit = table_id.max_section_length();
     if section_length > limit as usize {
         return Err(section::Error::SectionLength {
@@ -33,8 +36,6 @@ const fn check_section_length(table_id: TableId, encoded_len: usize) -> Result<(
 
     Ok(())
 }
-
-use core::fmt;
 
 /// Kind of table a section belongs to
 ///

@@ -21,11 +21,11 @@ pub enum Error {
         /// The bytes given, the `adaptation_field_length` byte included
         available_bytes: usize,
     },
-    /// A field a flag announces runs past the end of the adaptation field
+    /// A field could not be read or written
     Field {
         /// The name of the field in the syntax table
         field: &'static str,
-        /// How the field ran past the end
+        /// How the field failed
         error: field::Error,
     },
     /// A clock reference to write has an extension of 300 or more, which the
@@ -256,7 +256,7 @@ impl<'input> AdaptationField<'input> {
         let mut flag = || {
             reader
                 .read_bool()
-                .map_err(|error| field_error("adaptation_field flags", error))
+                .map_err(field_error("adaptation_field flags"))
         };
         adaptation_field.discontinuity_indicator = flag()?;
         adaptation_field.random_access_indicator = flag()?;
@@ -268,19 +268,24 @@ impl<'input> AdaptationField<'input> {
         let adaptation_field_extension_flag = flag()?;
 
         if pcr_flag {
-            adaptation_field.program_clock_reference =
-                read_clock_reference(&mut reader, "program_clock_reference")?;
+            adaptation_field.program_clock_reference = Some(read_clock_reference(
+                &mut reader,
+                "program_clock_reference",
+            )?);
         }
         if opcr_flag {
-            adaptation_field.original_program_clock_reference =
-                read_clock_reference(&mut reader, "original_program_clock_reference")?;
+            adaptation_field.original_program_clock_reference = Some(read_clock_reference(
+                &mut reader,
+                "original_program_clock_reference",
+            )?);
         }
         if splicing_point_flag {
-            let [countdown] = reader
-                .read_u8::<8>()
-                .map_err(|error| field_error("splice_countdown", error))?
-                .to_be_bytes();
-            adaptation_field.splice_countdown = Some(i8::from_be_bytes([countdown]));
+            adaptation_field.splice_countdown = Some(
+                reader
+                    .read_u8::<8>()
+                    .map_err(field_error("splice_countdown"))?
+                    .cast_signed(),
+            );
         }
         if transport_private_data_flag {
             adaptation_field.transport_private_data = Some(read_run(
@@ -339,19 +344,17 @@ impl<'input> AdaptationField<'input> {
             length: adaptation_field_length,
             limit: MAX_ADAPTATION_FIELD_LENGTH,
         };
-        if adaptation_field_length > MAX_ADAPTATION_FIELD_LENGTH {
-            return Err(too_long);
-        }
-        let length_byte = u8::try_from(adaptation_field_length).map_err(|_| too_long)?;
+        let length_byte = u8::try_from(adaptation_field_length)
+            .ok()
+            .filter(|length| usize::from(*length) <= MAX_ADAPTATION_FIELD_LENGTH)
+            .ok_or(too_long)?;
 
         let mut writer = FieldWriter::new(out);
         write_field(&mut writer, "adaptation_field_length", |writer| {
             writer.write_bits::<8>(length_byte)
         })?;
         if !self.has_flags() {
-            writer
-                .finish()
-                .map_err(|error| field_error("adaptation_field", error))?;
+            writer.finish().map_err(field_error("adaptation_field"))?;
             if let Some(stuffing) = self.stuffing_bytes.checked_sub(1) {
                 out.push(0);
                 out.resize(out.len().saturating_add(stuffing), 0xff);
@@ -382,7 +385,7 @@ impl<'input> AdaptationField<'input> {
         }
         if let Some(countdown) = self.splice_countdown {
             write_field(&mut writer, "splice_countdown", |writer| {
-                writer.write_bits::<8>(u8::from_be_bytes(countdown.to_be_bytes()))
+                writer.write_bits::<8>(countdown.cast_unsigned())
             })?;
         }
         if let Some(run) = self.transport_private_data {
@@ -391,9 +394,7 @@ impl<'input> AdaptationField<'input> {
         if let Some(run) = self.adaptation_field_extension {
             write_run(&mut writer, run, "adaptation_field_extension_length")?;
         }
-        writer
-            .finish()
-            .map_err(|error| field_error("adaptation_field", error))?;
+        writer.finish().map_err(field_error("adaptation_field"))?;
         out.resize(out.len().saturating_add(self.stuffing_bytes), 0xff);
 
         Ok(())
@@ -401,28 +402,20 @@ impl<'input> AdaptationField<'input> {
 }
 
 /// Names the field a [`field::Error`] arose in
-fn field_error(field: &'static str, error: field::Error) -> Error {
-    Error::Field { field, error }
+const fn field_error(field: &'static str) -> impl Fn(field::Error) -> Error {
+    move |error| Error::Field { field, error }
 }
 
 /// Reads a clock reference laid out as 33 bits of base, 6 reserved bits and 9 of extension
 fn read_clock_reference(
     reader: &mut FieldReader<'_>,
     field: &'static str,
-) -> Result<Option<ClockReference>, Error> {
-    let base = reader
-        .read_bits::<33>()
-        .map_err(|error| field_error(field, error))?;
-    reader
-        .read_bits::<6>()
-        .map_err(|error| field_error(field, error))?;
-    let extension = reader
-        .read_u16::<9>()
-        .map_err(|error| field_error(field, error))?;
+) -> Result<ClockReference, Error> {
+    let base = reader.read_bits::<33>().map_err(field_error(field))?;
+    reader.read_bits::<6>().map_err(field_error(field))?;
+    let extension = reader.read_u16::<9>().map_err(field_error(field))?;
 
-    // Why not `?`: 33 bits of base and 9 of extension are always in range,
-    // so `new` cannot fail and its error needs no variant here.
-    Ok(ClockReference::new(base, extension).ok())
+    Ok(ClockReference::from_fields(base, extension))
 }
 
 /// Reads a length byte and the run of bytes it counts
@@ -431,13 +424,11 @@ fn read_run<'input>(
     length_field: &'static str,
     run_field: &'static str,
 ) -> Result<&'input [u8], Error> {
-    let length = reader
-        .read_u8::<8>()
-        .map_err(|error| field_error(length_field, error))?;
+    let length = reader.read_u8::<8>().map_err(field_error(length_field))?;
 
     reader
         .read_bytes(usize::from(length))
-        .map_err(|error| field_error(run_field, error))
+        .map_err(field_error(run_field))
 }
 
 /// Writes one field, naming it in the error
@@ -447,7 +438,7 @@ fn write_field(
     field: &'static str,
     write: impl FnOnce(&mut FieldWriter<'_>) -> Result<(), field::Error>,
 ) -> Result<(), Error> {
-    write(writer).map_err(|error| field_error(field, error))
+    write(writer).map_err(field_error(field))
 }
 
 /// Writes a clock reference as 33 bits of base, 6 reserved bits set and 9 of extension
@@ -457,7 +448,7 @@ fn write_clock_reference(
     reference: ClockReference,
     field: &'static str,
 ) -> Result<(), Error> {
-    if reference.extension() >= 300 {
+    if reference.extension() >= ClockReference::EXTENSION_MODULUS {
         return Err(Error::ClockReferenceExtension {
             field,
             extension: reference.extension(),

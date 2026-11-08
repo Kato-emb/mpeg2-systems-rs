@@ -34,7 +34,7 @@ pub enum Error {
     Field {
         /// The name of the field in the syntax table
         field: &'static str,
-        /// How the field ran past the end
+        /// How the field failed
         error: field::Error,
     },
     /// A PID to write is outside `0x0010` to `0x1FFE`, the values Table 2-3
