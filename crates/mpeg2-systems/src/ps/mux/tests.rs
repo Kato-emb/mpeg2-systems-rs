@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 
 use super::*;
 use crate::pes::{OptionalHeader, PesPacketLength, pes_packet_length};
+use crate::ps::system_header::{self, StreamBound, StreamBoundLoop, SystemHeader};
 use crate::time::{ClockReference, Timestamp};
 
 /// `stream_id` of the first video stream
@@ -265,4 +266,43 @@ fn a_packet_the_pes_layer_refuses_leaves_the_output_as_it_was() {
             vec![0x47]
         )
     );
+}
+
+#[test]
+fn a_system_header_is_written_as_it_reads_back() {
+    let mut stream_bounds = Vec::new();
+    StreamBoundLoop::write_from(
+        [
+            StreamBound::new(StreamId::from(VIDEO), true, 230),
+            StreamBound::new(StreamId::from(0xC0), false, 32),
+        ],
+        &mut stream_bounds,
+    )
+    .unwrap();
+    let mut header = SystemHeader::new(1_101_198, 1, 1);
+    header.stream_bounds = StreamBoundLoop::from(&stream_bounds[..]);
+    let mut out = Vec::new();
+
+    Muxer::new().write_system_header(&header, &mut out).unwrap();
+
+    assert_eq!(SystemHeader::read(&out), Ok(header));
+}
+
+#[test]
+fn a_system_header_the_system_header_writer_refuses_is_refused_leaving_out_as_it_was() {
+    let header = SystemHeader::new(0, 1, 1);
+    let mut out = vec![0x00];
+
+    let error = Muxer::new().write_system_header(&header, &mut out);
+
+    assert_eq!(
+        error,
+        Err(Error::SystemHeader {
+            error: system_header::Error::Forbidden {
+                field: "rate_bound",
+                value: 0,
+            }
+        })
+    );
+    assert_eq!(out, [0x00]);
 }

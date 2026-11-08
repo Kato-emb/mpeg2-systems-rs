@@ -29,6 +29,16 @@ impl ContinuityCounter {
     pub const fn next(self) -> Self {
         Self(self.0.wrapping_add(1).rem_euclid(Self::MODULUS))
     }
+
+    /// Returns the counter of the packet of the PID before, 0 wrapping to 15
+    #[cfg(feature = "alloc")]
+    pub(crate) const fn previous(self) -> Self {
+        Self(
+            self.0
+                .wrapping_add(Self::MODULUS.wrapping_sub(1))
+                .rem_euclid(Self::MODULUS),
+        )
+    }
 }
 
 impl TryFrom<u8> for ContinuityCounter {

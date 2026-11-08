@@ -575,6 +575,16 @@ mod tests {
                     .unwrap();
                 expected.entry(AUDIO_PID.into()).or_default().push(*timing);
             }
+            // Why a PCR on its own as well as on each PES packet: tsanalyze
+            // then checks that a packet without a payload keeps the
+            // continuity counter of the packet before it (§2.4.3.3).
+            muxer
+                .write_program_clock_reference(
+                    pid(VIDEO_PID),
+                    ClockReference::new(pcr.base() + 4_500, 0).unwrap(),
+                    &mut written,
+                )
+                .unwrap();
         }
         let path = format!("{}/muxed.ts", env!("CARGO_TARGET_TMPDIR"));
         std::fs::write(&path, &written).unwrap();
@@ -620,7 +630,7 @@ mod tests {
                 VIDEO_PID.into(),
                 (
                     u64::try_from(video.len()).unwrap(),
-                    u64::try_from(video.len()).unwrap(),
+                    u64::try_from(2 * video.len()).unwrap(),
                 ),
             ),
             (AUDIO_PID.into(), (u64::try_from(audio.len()).unwrap(), 0)),

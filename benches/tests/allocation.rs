@@ -6,12 +6,14 @@
 //! grew, and the packets, the PAT and PMT the stream resends, the sections in
 //! flight, the PES packets reassembled on a subscribed PID, and the elements
 //! of a Program Stream reuse what was allocated before. Writing the same PES
-//! packets again reuses the output buffer and the continuity counters of the
-//! PIDs written before.
+//! packets, or PCRs on their own, again reuses the output buffer and the
+//! continuity counters of the PIDs written before.
 
 #[cfg(test)]
 mod tests {
     use mpeg2_systems::ps;
+    use mpeg2_systems::time::ClockReference;
+    use mpeg2_systems::ts::Pid;
     use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig};
     use mpeg2_systems::ts::mux::Muxer;
     use mpeg2_systems_bench::{
@@ -66,6 +68,18 @@ mod tests {
         });
         allocations.push(("pes packets", ACCESS_UNIT_LENGTH, "ts mux", counted));
         none.push(("pes packets", ACCESS_UNIT_LENGTH, "ts mux", 0));
+        let pid = Pid::try_from(0x0100).unwrap();
+        let counted = allocations_once_grown(&ALLOCATOR, || {
+            out.clear();
+            for base in 0..1_000 {
+                let pcr = ClockReference::new(base, 0).unwrap();
+                muxer
+                    .write_program_clock_reference(pid, pcr, &mut out)
+                    .unwrap();
+            }
+        });
+        allocations.push(("pcrs on their own", 1_000, "ts mux", counted));
+        none.push(("pcrs on their own", 1_000, "ts mux", 0));
         assert_eq!(allocations, none);
     }
 }

@@ -558,3 +558,108 @@ fn a_table_its_writer_refuses_is_refused_leaving_out_and_the_counter_as_they_wer
         [packet(Pid::PAT, 0, true, None, &payload)]
     );
 }
+
+/// The Transport Packet of a PCR on its own: an adaptation field filling the
+/// packet, with no payload
+fn pcr_packet(pid: Pid, continuity_counter: u8, pcr: ClockReference) -> TransportPacket<'static> {
+    let mut adaptation_field = AdaptationField::new();
+    adaptation_field.program_clock_reference = Some(pcr);
+    adaptation_field.stuffing_bytes = 176;
+    let mut packet = TransportPacket::new(pid, counter(continuity_counter));
+    packet.adaptation_field = Some(adaptation_field);
+    packet
+}
+
+#[test]
+fn a_pcr_on_its_own_fills_a_packet_with_its_adaptation_field() {
+    let pcr = ClockReference::new(27_000_000 / 300, 123).unwrap();
+    let mut out = Vec::new();
+
+    Muxer::new()
+        .write_program_clock_reference(pid(0x100), pcr, &mut out)
+        .unwrap();
+
+    assert_eq!(packets(&out), [pcr_packet(pid(0x100), 15, pcr)]);
+}
+
+#[test]
+fn a_pcr_on_its_own_repeats_the_continuity_counter_of_the_packet_before_it() {
+    let pcr = ClockReference::new(0, 0).unwrap();
+    let payload = counting(10);
+    let bytes = pes_bytes(&pes_packet(VIDEO, &payload));
+    let mut muxer = Muxer::new();
+    let mut out = Vec::new();
+
+    muxer
+        .write_program_clock_reference(pid(0x100), pcr, &mut out)
+        .unwrap();
+    muxer
+        .write_pes_packet(pid(0x100), &pes_packet(VIDEO, &payload), None, &mut out)
+        .unwrap();
+    muxer
+        .write_program_clock_reference(pid(0x100), pcr, &mut out)
+        .unwrap();
+    muxer
+        .write_program_clock_reference(Pid::PAT, pcr, &mut out)
+        .unwrap();
+    muxer
+        .write_pes_packet(pid(0x100), &pes_packet(VIDEO, &payload), None, &mut out)
+        .unwrap();
+
+    assert_eq!(
+        packets(&out),
+        [
+            pcr_packet(pid(0x100), 15, pcr),
+            packet(
+                pid(0x100),
+                0,
+                true,
+                Some(stuffing(bytes.len().abs_diff(183))),
+                &bytes
+            ),
+            pcr_packet(pid(0x100), 0, pcr),
+            pcr_packet(Pid::PAT, 15, pcr),
+            packet(
+                pid(0x100),
+                1,
+                true,
+                Some(stuffing(bytes.len().abs_diff(183))),
+                &bytes
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_pcr_on_a_pid_that_cannot_carry_one_or_beyond_its_fields_is_refused_leaving_out_as_it_was() {
+    let pcr = ClockReference::new(0, 0).unwrap();
+    let mut muxer = Muxer::new();
+    let mut out = vec![0x47];
+
+    let errors = [
+        muxer.write_program_clock_reference(Pid::TSDT, pcr, &mut out),
+        muxer.write_program_clock_reference(Pid::NULL, pcr, &mut out),
+        muxer.write_program_clock_reference(
+            pid(0x100),
+            ClockReference::new(0, 300).unwrap(),
+            &mut out,
+        ),
+    ];
+
+    assert_eq!(
+        errors,
+        [
+            Err(Error::Pid { pid: Pid::TSDT }),
+            Err(Error::Pid { pid: Pid::NULL }),
+            Err(Error::Packet {
+                error: packet::Error::AdaptationField(
+                    adaptation_field::Error::ClockReferenceExtension {
+                        field: "program_clock_reference",
+                        extension: 300,
+                    }
+                )
+            }),
+        ]
+    );
+    assert_eq!(out, [0x47]);
+}

@@ -11,32 +11,23 @@
 //!
 //! The demuxer reports a table once for each version, so the output carries
 //! the PAT and each PMT once; how often to send them again is the caller's
-//! choice. A PCR is not kept at its byte: the latest one on the `PCR_PID`
-//! of the PMT read last goes in the next PES packet of that PID, and the ones
-//! before it are dropped, which suits a stream of one program. The muxer
-//! writes no null packets, so the bit rate is not kept either.
+//! choice. Each PCR is written as soon as it is read, in a Transport Packet
+//! of its own on its PID, so the output carries the input's PCRs in their
+//! order; as the demuxer reports a PES packet once it ends, a PCR the input
+//! carried inside a PES packet goes out ahead of that packet. The muxer
+//! writes no null packets, so the bit rate is not kept.
 
 use std::env;
 use std::error::Error;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 
-use mpeg2_systems::time::ClockReference;
 use mpeg2_systems::ts::Pid;
 use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event};
 use mpeg2_systems::ts::mux::Muxer;
 
 /// Bytes handed over per read, the Transport Packets of one UDP datagram
 const CHUNK_LENGTH: usize = 7 * 188;
-
-/// What the remux carries from one event to the next
-#[derive(Debug, Default)]
-struct Remux {
-    /// The `PCR_PID` the PMT read last names
-    pcr_pid: Option<Pid>,
-    /// The latest PCR on the `PCR_PID`, waiting for a PES packet to carry it
-    pcr: Option<ClockReference>,
-}
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args().skip(1);
@@ -47,7 +38,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut writer = BufWriter::new(File::create(output)?);
     let mut demuxer = Demuxer::new(DemuxerConfig::default());
     let mut muxer = Muxer::new();
-    let mut remux = Remux::default();
     let mut out = Vec::new();
 
     loop {
@@ -58,7 +48,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let length = chunk.len();
         demuxer.handle_input(chunk);
         reader.consume(length);
-        remux_events(&mut demuxer, &mut muxer, &mut remux, &mut out)?;
+        remux_events(&mut demuxer, &mut muxer, &mut out)?;
         // Why clear rather than collect the whole output: the buffer keeps
         // its capacity, so the muxer writes each chunk without allocating.
         writer.write_all(&out)?;
@@ -66,7 +56,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     demuxer.finish();
-    remux_events(&mut demuxer, &mut muxer, &mut remux, &mut out)?;
+    remux_events(&mut demuxer, &mut muxer, &mut out)?;
     writer.write_all(&out)?;
     writer.flush()?;
     Ok(())
@@ -76,7 +66,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn remux_events(
     demuxer: &mut Demuxer,
     muxer: &mut Muxer,
-    remux: &mut Remux,
     out: &mut Vec<u8>,
 ) -> Result<(), Box<dyn Error>> {
     while let Some(event) = demuxer.poll_event() {
@@ -90,27 +79,15 @@ fn remux_events(
             pid,
             program_clock_reference,
         } = &event
-            && remux.pcr_pid == Some(*pid)
         {
-            remux.pcr = Some(*program_clock_reference);
+            muxer.write_program_clock_reference(*pid, *program_clock_reference, out)?;
         } else if let Event::PesPacket { pid, packet, .. } = &event {
-            let pcr = if remux.pcr_pid == Some(*pid) {
-                remux.pcr.take()
-            } else {
-                None
-            };
-            muxer.write_pes_packet(*pid, packet, pcr, out)?;
+            muxer.write_pes_packet(*pid, packet, None, out)?;
         }
         let Event::TsProgramMapSection { pid, section } = event else {
             continue;
         };
         muxer.write_ts_program_map_section(pid, &section, out)?;
-        // Why drop the PCR waiting when the PCR_PID moves: it is a time on
-        // the old PID's clock, which the new PID's packets do not carry.
-        if remux.pcr_pid != section.pcr_pid {
-            remux.pcr = None;
-        }
-        remux.pcr_pid = section.pcr_pid;
         let pids: Vec<Pid> = section
             .elementary_streams
             .iter()

@@ -14,7 +14,9 @@ mod tests {
     use mpeg2_systems::ps::demux::{Demuxer, Event};
     use mpeg2_systems::ps::mux::Muxer;
     use mpeg2_systems::ps::psm::ElementaryStreamLoop;
-    use mpeg2_systems::ps::{PackHeader, ProgramStreamMap};
+    use mpeg2_systems::ps::{
+        PackHeader, ProgramStreamMap, StreamBound, StreamBoundLoop, SystemHeader,
+    };
     use mpeg2_systems::psi::VersionNumber;
     use mpeg2_systems::time::{ClockReference, Timestamp};
 
@@ -184,6 +186,44 @@ mod tests {
         assert_eq!(
             demuxed(&stream)[2..],
             [described(&Event::ProgramStreamMap(map))]
+        );
+    }
+
+    #[test]
+    fn a_written_system_header_reads_back_in_its_pack() {
+        let pack_header = PackHeader::new(ClockReference::new(0, 0).unwrap(), 2_000);
+        let mut stream_bounds = Vec::new();
+        StreamBoundLoop::write_from(
+            [
+                StreamBound::new(StreamId::from(0xE0), true, 230),
+                StreamBound::new(StreamId::from(0xC0), false, 32),
+            ],
+            &mut stream_bounds,
+        )
+        .unwrap();
+        let mut system_header = SystemHeader::new(2_000, 1, 1);
+        system_header.stream_bounds = StreamBoundLoop::from(&stream_bounds[..]);
+        let video = vec![0xAA; 100];
+        let video_packet = pes_packet(0xE0, Some(3_600), None, &video);
+
+        let muxer = Muxer::new();
+        let mut stream = Vec::new();
+        muxer.write_pack_header(&pack_header, &mut stream).unwrap();
+        muxer
+            .write_system_header(&system_header, &mut stream)
+            .unwrap();
+        muxer.write_pes_packets(&video_packet, &mut stream).unwrap();
+        muxer.write_program_end_code(&mut stream);
+
+        assert_eq!(
+            demuxed(&stream),
+            vec![
+                described(&Event::SyncAcquired),
+                described(&Event::PackHeader(pack_header)),
+                described(&Event::SystemHeader(system_header)),
+                described(&Event::PesPacket(video_packet)),
+                described(&Event::ProgramEnd),
+            ]
         );
     }
 }
