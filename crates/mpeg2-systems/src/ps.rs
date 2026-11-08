@@ -8,6 +8,8 @@
 
 #[cfg(feature = "alloc")]
 pub mod demux;
+#[cfg(feature = "alloc")]
+pub mod mux;
 pub mod pack_header;
 pub mod psm;
 pub mod system_header;
