@@ -105,6 +105,11 @@ fn remux_events(
             continue;
         };
         muxer.write_ts_program_map_section(pid, &section, out)?;
+        // Why drop the PCR waiting when the PCR_PID moves: it is a time on
+        // the old PID's clock, which the new PID's packets do not carry.
+        if remux.pcr_pid != section.pcr_pid {
+            remux.pcr = None;
+        }
         remux.pcr_pid = section.pcr_pid;
         let pids: Vec<Pid> = section
             .elementary_streams
