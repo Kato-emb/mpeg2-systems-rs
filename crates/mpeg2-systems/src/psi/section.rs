@@ -6,9 +6,9 @@ use core::fmt;
 
 use super::{TableId, VersionNumber};
 use crate::crc::crc_32;
-#[cfg(feature = "alloc")]
-use crate::field::FieldWriter;
 use crate::field::{self, FieldReader};
+#[cfg(feature = "alloc")]
+use crate::field::{FieldWriter, write_or_truncate};
 
 /// Bytes from `table_id` to `section_length`
 pub(super) const PREFIX_LENGTH: usize = 3;
@@ -461,39 +461,38 @@ impl<'input> Section<'input> {
             .map(SectionSyntax::check_section_number)
             .transpose()?;
 
-        let start = out.len();
-        let mut writer = FieldWriter::new(out);
-        // Why not an error per field: every value fits its field's width.
-        let header = (|| {
-            writer.write_bits::<8>(table_id.get())?;
-            writer.write_bool(syntax.is_some())?;
-            writer.write_bool(self.private_indicator)?;
-            writer.write_bits::<2>(self.reserved_before_section_length)?;
-            writer.write_bits::<12>(length)?;
-            if let Some(syntax) = syntax {
-                writer.write_bits::<16>(syntax.table_id_extension)?;
-                writer.write_bits::<2>(syntax.reserved_before_version_number)?;
-                writer.write_bits::<5>(syntax.version_number.get())?;
-                writer.write_bool(syntax.current_next_indicator)?;
-                writer.write_bits::<8>(syntax.section_number)?;
-                writer.write_bits::<8>(syntax.last_section_number)?;
-            }
-            writer.write_bytes(self.body)?;
-            writer.finish()
-        })();
-        if let Err(error) = header {
-            out.truncate(start);
-            return Err(Error::Field {
+        write_or_truncate(out, |out| {
+            let start = out.len();
+            let mut writer = FieldWriter::new(out);
+            // Why not an error per field: every value fits its field's width.
+            (|| {
+                writer.write_bits::<8>(table_id.get())?;
+                writer.write_bool(syntax.is_some())?;
+                writer.write_bool(self.private_indicator)?;
+                writer.write_bits::<2>(self.reserved_before_section_length)?;
+                writer.write_bits::<12>(length)?;
+                if let Some(syntax) = syntax {
+                    writer.write_bits::<16>(syntax.table_id_extension)?;
+                    writer.write_bits::<2>(syntax.reserved_before_version_number)?;
+                    writer.write_bits::<5>(syntax.version_number.get())?;
+                    writer.write_bool(syntax.current_next_indicator)?;
+                    writer.write_bits::<8>(syntax.section_number)?;
+                    writer.write_bits::<8>(syntax.last_section_number)?;
+                }
+                writer.write_bytes(self.body)?;
+                writer.finish()
+            })()
+            .map_err(|error| Error::Field {
                 field: "section header",
                 error,
-            });
-        }
-        if syntax.is_some() {
-            let crc = crc_32(out.get(start..).unwrap_or_default());
-            out.extend_from_slice(&crc.to_be_bytes());
-        }
+            })?;
+            if syntax.is_some() {
+                let crc = crc_32(out.get(start..).unwrap_or_default());
+                out.extend_from_slice(&crc.to_be_bytes());
+            }
 
-        Ok(())
+            Ok(())
+        })
     }
 }
 

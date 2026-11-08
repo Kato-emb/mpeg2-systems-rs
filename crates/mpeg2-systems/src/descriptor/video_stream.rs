@@ -69,11 +69,7 @@ impl TryFrom<u8> for FrameRateCode {
     ///
     /// [`FourBitFieldOutOfRange`]: `value` is 16 or more.
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        if value < 16 {
-            Ok(Self(value))
-        } else {
-            Err(FourBitFieldOutOfRange { value })
-        }
+        FourBitFieldOutOfRange::check(value).map(Self)
     }
 }
 
@@ -111,11 +107,7 @@ impl TryFrom<u8> for ChromaFormat {
     ///
     /// [`TwoBitFieldOutOfRange`]: `value` is 4 or more.
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        if value < 4 {
-            Ok(Self(value))
-        } else {
-            Err(TwoBitFieldOutOfRange { value })
-        }
+        TwoBitFieldOutOfRange::check(value).map(Self)
     }
 }
 

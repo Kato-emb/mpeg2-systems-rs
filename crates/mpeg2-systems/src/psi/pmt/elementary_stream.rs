@@ -8,7 +8,7 @@ use super::Error;
 use crate::descriptor::DescriptorLoop;
 use crate::field::FieldReader;
 #[cfg(feature = "alloc")]
-use crate::field::FieldWriter;
+use crate::field::{FieldWriter, write_or_truncate};
 use crate::stream_type::StreamType;
 use crate::ts::Pid;
 
@@ -129,9 +129,9 @@ pub(super) fn write_entries<'stream>(
     entries: impl IntoIterator<Item = Result<ElementaryStream<'stream>, Error>>,
     out: &mut Vec<u8>,
 ) -> Result<(), Error> {
-    let start = out.len();
-    for stream in entries {
-        let entry = stream.and_then(|stream| {
+    write_or_truncate(out, |out| {
+        for stream in entries {
+            let stream = stream?;
             let pid = stream.elementary_pid;
             if !matches!(pid.get(), 0x0010..=0x1ffe) {
                 return Err(Error::ElementaryPid { pid });
@@ -156,15 +156,11 @@ pub(super) fn write_entries<'stream>(
                 field: "elementary stream loop",
                 error,
             })?;
-            Ok(DescriptorLoop::write_entries(stream.es_info, out)?)
-        });
-        if let Err(error) = entry {
-            out.truncate(start);
-            return Err(error);
+            DescriptorLoop::write_entries(stream.es_info, out)?;
         }
-    }
 
-    Ok(())
+        Ok(())
+    })
 }
 
 impl<'input> From<&'input [u8]> for ElementaryStreamLoop<'input> {

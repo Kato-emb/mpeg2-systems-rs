@@ -10,7 +10,7 @@ use super::scrambling_control::PesScramblingControl;
 use super::{Error, field_error};
 use crate::field::FieldReader;
 #[cfg(feature = "alloc")]
-use crate::field::FieldWriter;
+use crate::field::{FieldWriter, write_or_truncate};
 use crate::time::{ClockReference, Timestamp};
 
 /// Bytes from the `'10'` bits to `PES_header_data_length`
@@ -280,13 +280,7 @@ impl<'input> OptionalHeader<'input> {
     ///   field of the extension is wider than its field.
     #[cfg(feature = "alloc")]
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
-        let start = out.len();
-        let written = self.write_fields(out);
-        if written.is_err() {
-            out.truncate(start);
-        }
-
-        written
+        write_or_truncate(out, |out| self.write_fields(out))
     }
 
     /// Appends the fields, leaving whatever it appended on failure

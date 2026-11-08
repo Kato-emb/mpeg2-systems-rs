@@ -7,6 +7,8 @@ use alloc::vec::Vec;
 use super::{DescriptorTag, Error, RawDescriptor, body_of};
 #[cfg(feature = "alloc")]
 use super::{field_error, write_descriptor};
+#[cfg(feature = "alloc")]
+use crate::field::write_or_truncate;
 
 /// Bytes of an entry: `ISO_639_language_code` and `audio_type`
 const ENTRY_LENGTH: usize = 4;
@@ -161,18 +163,13 @@ impl<'input> LanguageLoop<'input> {
         languages: impl IntoIterator<Item = Language>,
         out: &mut Vec<u8>,
     ) -> Result<(), Error> {
-        let start = out.len();
-        for language in languages {
-            match language.to_bytes() {
-                Ok(bytes) => out.extend_from_slice(&bytes),
-                Err(error) => {
-                    out.truncate(start);
-                    return Err(error);
-                }
+        write_or_truncate(out, |out| {
+            for language in languages {
+                out.extend_from_slice(&language.to_bytes()?);
             }
-        }
 
-        Ok(())
+            Ok(())
+        })
     }
 }
 

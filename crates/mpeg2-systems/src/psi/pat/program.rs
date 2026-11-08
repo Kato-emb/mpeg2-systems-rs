@@ -8,7 +8,7 @@ use core::num::NonZeroU16;
 use super::Error;
 use crate::field::FieldReader;
 #[cfg(feature = "alloc")]
-use crate::field::FieldWriter;
+use crate::field::{FieldWriter, write_or_truncate};
 use crate::ts::Pid;
 
 /// Entry of the program loop of a
@@ -163,33 +163,25 @@ pub(super) fn write_entries(
     entries: impl IntoIterator<Item = Result<Program, Error>>,
     out: &mut Vec<u8>,
 ) -> Result<(), Error> {
-    let start = out.len();
-    for program in entries {
-        let program = match program.and_then(Program::check) {
-            Ok(program) => program,
-            Err(error) => {
-                out.truncate(start);
-                return Err(error);
-            }
-        };
-        let mut writer = FieldWriter::new(out);
-        // Why not an error per field: every value fits its field's width.
-        let entry = (|| {
-            writer.write_bits::<16>(program.program_number())?;
-            writer.write_bits::<3>(0b111_u8)?;
-            writer.write_bits::<13>(program.pid().get())?;
-            writer.finish()
-        })();
-        if let Err(error) = entry {
-            out.truncate(start);
-            return Err(Error::Field {
+    write_or_truncate(out, |out| {
+        for program in entries {
+            let program = program.and_then(Program::check)?;
+            let mut writer = FieldWriter::new(out);
+            // Why not an error per field: every value fits its field's width.
+            (|| {
+                writer.write_bits::<16>(program.program_number())?;
+                writer.write_bits::<3>(0b111_u8)?;
+                writer.write_bits::<13>(program.pid().get())?;
+                writer.finish()
+            })()
+            .map_err(|error| Error::Field {
                 field: "program loop",
                 error,
-            });
+            })?;
         }
-    }
 
-    Ok(())
+        Ok(())
+    })
 }
 
 impl<'input> From<&'input [u8]> for ProgramLoop<'input> {

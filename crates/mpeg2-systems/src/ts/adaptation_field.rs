@@ -5,9 +5,9 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-#[cfg(feature = "alloc")]
-use crate::field::FieldWriter;
 use crate::field::{self, FieldReader};
+#[cfg(feature = "alloc")]
+use crate::field::{FieldWriter, write_or_truncate};
 use crate::time::ClockReference;
 
 /// Failure to read or write an adaptation field
@@ -326,13 +326,7 @@ impl<'input> AdaptationField<'input> {
     ///   adaptation field longer than a Transport Packet can hold.
     #[cfg(feature = "alloc")]
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
-        let start = out.len();
-        let written = self.write_fields(out);
-        if written.is_err() {
-            out.truncate(start);
-        }
-
-        written
+        write_or_truncate(out, |out| self.write_fields(out))
     }
 
     /// Appends the fields, leaving whatever it appended on failure
