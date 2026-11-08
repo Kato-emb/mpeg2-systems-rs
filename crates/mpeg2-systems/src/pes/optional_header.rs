@@ -11,7 +11,9 @@ use super::{Error, field_error};
 use crate::field::FieldReader;
 #[cfg(feature = "alloc")]
 use crate::field::{FieldWriter, write_or_truncate};
-use crate::time::{ClockReference, Timestamp};
+use crate::time::{ClockReference, Timestamp, read_marked_33_bits, read_marked_clock_reference};
+#[cfg(feature = "alloc")]
+use crate::time::{write_marked_33_bits, write_marked_clock_reference};
 
 /// Bytes from the `'10'` bits to `PES_header_data_length`
 pub(super) const FIXED_LENGTH: usize = 3;
@@ -214,13 +216,9 @@ impl<'input> OptionalHeader<'input> {
         if escr_flag {
             let mut read = || {
                 reader.read_bits::<2>()?;
-                let base = read_marked_33_bits(&mut reader)?;
-                let extension = reader.read_u16::<9>()?;
-                reader.read_bits::<1>()?;
-                Ok((base, extension))
+                read_marked_clock_reference(&mut reader)
             };
-            let (base, extension) = read().map_err(field_error("ESCR"))?;
-            header.escr = Some(ClockReference::from_fields(base, extension));
+            header.escr = Some(read().map_err(field_error("ESCR"))?);
         }
         if es_rate_flag {
             let mut es_rate = || {
@@ -364,9 +362,7 @@ impl<'input> OptionalHeader<'input> {
         if let Some(escr) = self.escr {
             let mut write_escr = || {
                 writer.write_bits::<2>(0b11_u8)?;
-                write_marked_33_bits(&mut writer, escr.base())?;
-                writer.write_bits::<9>(escr.extension())?;
-                writer.write_bool(true)
+                write_marked_clock_reference(&mut writer, escr)
             };
             write_escr().map_err(field_error("ESCR"))?;
         }
@@ -403,33 +399,6 @@ impl<'input> OptionalHeader<'input> {
 
         Ok(())
     }
-}
-
-/// Reads 33 bits laid out as 3, a `marker_bit`, 15, a `marker_bit`, 15 and a
-/// `marker_bit`, ignoring the markers
-fn read_marked_33_bits(reader: &mut FieldReader<'_>) -> Result<u64, crate::field::Error> {
-    let high = reader.read_bits::<3>()?;
-    reader.read_bits::<1>()?;
-    let middle = reader.read_bits::<15>()?;
-    reader.read_bits::<1>()?;
-    let low = reader.read_bits::<15>()?;
-    reader.read_bits::<1>()?;
-
-    Ok(high.wrapping_shl(30) | middle.wrapping_shl(15) | low)
-}
-
-/// Writes 33 bits as 3, a `marker_bit`, 15, a `marker_bit`, 15 and a `marker_bit`
-#[cfg(feature = "alloc")]
-fn write_marked_33_bits(
-    writer: &mut FieldWriter<'_>,
-    value: u64,
-) -> Result<(), crate::field::Error> {
-    writer.write_bits::<3>(value.wrapping_shr(30) & 0b111)?;
-    writer.write_bool(true)?;
-    writer.write_bits::<15>(value.wrapping_shr(15) & 0x7fff)?;
-    writer.write_bool(true)?;
-    writer.write_bits::<15>(value & 0x7fff)?;
-    writer.write_bool(true)
 }
 
 /// Reads a PTS or a DTS: 4 bits of prefix and 33 marked bits, 5 bytes
