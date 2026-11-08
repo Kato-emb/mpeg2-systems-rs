@@ -7,9 +7,12 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
 use mpeg2_systems::ps;
+use mpeg2_systems::time::{ClockReference, Timestamp};
 use mpeg2_systems::ts::Pid;
 use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig};
+use mpeg2_systems::ts::mux::Muxer;
 
 /// Length of the inputs the demuxer is measured on
 pub const INPUT_LENGTH: usize = 10 << 20;
@@ -73,6 +76,36 @@ pub fn program_stream_events(
         }
     }
     events
+}
+
+/// PES packets the Transport Stream muxer writes in one pass
+pub const PES_PACKETS: usize = 1_000;
+
+/// Length of the payload of each PES packet the muxer writes, which leaves
+/// the last Transport Packet of each short, so its stuffing is written too
+pub const ACCESS_UNIT_LENGTH: usize = 4_000;
+
+/// Clears `out` and writes into it [`PES_PACKETS`] video PES packets of
+/// `access_unit`, each with a PTS and a PCR, returning the bytes written
+///
+/// # Panics
+///
+/// Panics if the muxer refuses a packet, which a benchmark must not measure.
+pub fn mux_pes_packets(muxer: &mut Muxer, access_unit: &[u8], out: &mut Vec<u8>) -> usize {
+    out.clear();
+    let pid = Pid::try_from(0x0100).expect("0x0100 is a PID");
+    for index in 0..PES_PACKETS {
+        let ticks = u64::try_from(index).expect("an index fits u64") * 3_600;
+        let mut header = OptionalHeader::new();
+        header.pts = Some(Timestamp::try_from(ticks + 3_600).expect("a PTS fits 33 bits"));
+        let mut packet = PesPacket::new(StreamId::from(0xE0), access_unit);
+        packet.optional_header = Some(header);
+        let pcr = ClockReference::new(ticks, 0).expect("a PCR fits its fields");
+        muxer
+            .write_pes_packet(pid, &packet, Some(pcr), out)
+            .expect("the muxer writes the packet");
+    }
+    out.len()
 }
 
 /// Returns the allocations `allocator` counts during one more `pass` over

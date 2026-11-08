@@ -16,7 +16,7 @@ pub(crate) const PACKET_LENGTH: usize = 188;
 
 /// Bytes in the header of a Transport Packet, `sync_byte` to `continuity_counter`
 #[cfg(feature = "alloc")]
-const HEADER_LENGTH: usize = 4;
+pub(crate) const HEADER_LENGTH: usize = 4;
 
 /// Value of `sync_byte`
 pub(crate) const SYNC_BYTE: u8 = 0x47;
