@@ -29,7 +29,8 @@ PIDs of a PMT to `subscribe_pes` to, before it polls again.
 ## Reading a Transport Stream
 
 This one subscribes to the elementary streams each PMT names and counts the
-PES packets.
+PES packets. The examples run as the doctests of the crate, from
+`crates/mpeg2-systems`, where the fixtures they read are.
 
 ```rust
 use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event};

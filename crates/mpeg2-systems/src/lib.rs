@@ -13,9 +13,9 @@
 //!   PSI tables ([`psi`]), the descriptors ([`descriptor`]), and the pack
 //!   header, system header and program stream map ([`ps`]). Reading needs no
 //!   allocation.
-//! - With the `alloc` feature, [`ts::demux`] and `ps::demux` read a stream
-//!   handed over in pieces of any length, and [`ts::mux`] and `ps::mux` write
-//!   one.
+//! - With the `alloc` feature, [`ts::demux`] and [`ps::demux`] read a stream
+//!   handed over in pieces of any length, and [`ts::mux`] and [`ps::mux`]
+//!   write one.
 //!
 //! Each layer is usable alone: a reader of its own is made of the syntax
 //! layer, as the demuxers are.

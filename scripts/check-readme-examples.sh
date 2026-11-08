@@ -5,6 +5,7 @@
 #
 #   scripts/check-readme-examples.sh
 set -euo pipefail
+cd "$(dirname "$0")/.."
 
 readme=README.md
 crate_doc=crates/mpeg2-systems/src/lib.rs
@@ -12,18 +13,18 @@ crate_doc=crates/mpeg2-systems/src/lib.rs
 # The lines of each ```rust block, each block after a line of its own.
 readme_blocks() {
   awk '
-    !inside && /^```rust$/ { inside = 1; print "--- example"; next }
+    !inside && /^```rust(,.*)?$/ { inside = 1; print "--- example"; next }
     inside && /^```$/      { inside = 0; next }
     inside                 { print }
   ' "$readme"
 }
 
 # The lines of each Rust code block of the `//!` doc, its hidden lines left
-# out. A fence with no language is Rust, as rustdoc reads it; a block in
-# another language is not compared.
+# out. A fence with no language, or with only rustdoc's attributes, is Rust
+# as rustdoc reads it; a block in another language is not compared.
 doc_blocks() {
   sed -n 's|^//! \{0,1\}||p' "$crate_doc" | awk '
-    !inside && /^```(rust)?$/ { inside = 1; print "--- example"; next }
+    !inside && /^```(rust)?(,?(ignore|no_run|should_panic|compile_fail|edition[0-9]+))*$/ { inside = 1; print "--- example"; next }
     !inside && /^```/         { inside = 2; next }
     inside && /^```$/         { inside = 0; next }
     inside == 1 && !/^#( |$)/ { print }
