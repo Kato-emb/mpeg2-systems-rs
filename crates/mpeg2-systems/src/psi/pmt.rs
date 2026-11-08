@@ -326,8 +326,9 @@ impl<'input> TryFrom<&Section<'input>> for TsProgramMapSection<'input> {
     /// * [`TableId`](Error::TableId): `table_id` is not 0x02.
     /// * [`SectionSyntaxIndicator`](Error::SectionSyntaxIndicator): the
     ///   section lacks `program_number` to `last_section_number`.
-    /// * [`Field`](Error::Field): the section ends before
-    ///   `program_info_length`, or inside the descriptors it announces.
+    /// * [`Field`](Error::Field): the section ends inside a field from
+    ///   `PCR_PID` to `program_info_length`, or inside the descriptors it
+    ///   announces (`program_info`).
     fn try_from(section: &Section<'input>) -> Result<Self, Self::Error> {
         if section.table_id != TableId::TS_PROGRAM_MAP {
             return Err(Error::TableId {
@@ -344,12 +345,17 @@ impl<'input> TryFrom<&Section<'input>> for TsProgramMapSection<'input> {
                 field: "PCR_PID",
                 error,
             })?;
-        let program_info = reader
+        let program_info_length = reader
             .read_bits::<4>()
             .and_then(|_| reader.read_u16::<12>())
-            .and_then(|length| reader.read_bytes(usize::from(length)))
             .map_err(|error| Error::Field {
                 field: "program_info_length",
+                error,
+            })?;
+        let program_info = reader
+            .read_bytes(usize::from(program_info_length))
+            .map_err(|error| Error::Field {
+                field: "program_info",
                 error,
             })?;
 
@@ -543,10 +549,18 @@ mod tests {
         cat.table_id = TableId::CONDITIONAL_ACCESS;
         let short = Section::new(TableId::TS_PROGRAM_MAP, &[]);
         let no_pcr_pid = section_of(&[0xe1]);
+        let no_program_info_length = section_of(&[0xe1, 0x00, 0xf0]);
         let past_program_info = section_of(&[0xe1, 0x00, 0xf0, 0x05, 0x0a]);
 
         assert_eq!(
-            [&cat, &short, &no_pcr_pid, &past_program_info].map(TsProgramMapSection::try_from),
+            [
+                &cat,
+                &short,
+                &no_pcr_pid,
+                &no_program_info_length,
+                &past_program_info
+            ]
+            .map(TsProgramMapSection::try_from),
             [
                 Err(Error::TableId {
                     table_id: TableId::CONDITIONAL_ACCESS
@@ -561,6 +575,13 @@ mod tests {
                 }),
                 Err(Error::Field {
                     field: "program_info_length",
+                    error: field::Error::Truncated {
+                        required_bits: 12,
+                        remaining_bits: 4
+                    }
+                }),
+                Err(Error::Field {
+                    field: "program_info",
                     error: field::Error::Truncated {
                         required_bits: 40,
                         remaining_bits: 8
