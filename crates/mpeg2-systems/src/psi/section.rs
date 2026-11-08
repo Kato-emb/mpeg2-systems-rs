@@ -361,11 +361,10 @@ impl<'input> Section<'input> {
     /// `section_length`, ISO/IEC 13818-1 §2.4.4.11
     ///
     /// The value is what [`encoded_len`](Self::encoded_len) gives for the
-    /// section [`read`](Self::read) reads from those bytes. Only the first 3
-    /// bytes are looked at, or `None` returned when fewer are given. Neither
-    /// `table_id` nor the largest `section_length` its table allows
-    /// ([`TableId::max_section_length`]) is checked; [`read`](Self::read)
-    /// checks both.
+    /// section [`read`](Self::read) reads from those bytes, or `None` when
+    /// fewer than 3 are given. Neither `table_id` nor the largest
+    /// `section_length` its table allows ([`TableId::max_section_length`]) is
+    /// checked; [`read`](Self::read) checks both.
     ///
     /// # Examples
     ///
