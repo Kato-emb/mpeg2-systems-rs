@@ -1,6 +1,5 @@
-//! This crate's reading of the fixtures, and what its Program Stream muxer
-//! writes, checked against TSDuck and ffprobe, which read the same bytes
-//! independently
+//! This crate's reading of the fixtures, and what its muxers write, checked
+//! against TSDuck and ffprobe, which read the same bytes independently
 //!
 //! The tests run `tstables`, `tsanalyze` and `ffprobe` from `PATH`, so they
 //! are ignored unless asked for; once asked for, a tool missing is a failure.
@@ -21,11 +20,14 @@ mod tests {
     use mpeg2_systems::ps::psm::{ElementaryStream, ElementaryStreamLoop};
     use mpeg2_systems::ps::{PackHeader, ProgramStreamMap, demux as ps_demux};
     use mpeg2_systems::psi::VersionNumber;
-    use mpeg2_systems::psi::pat::Program;
+    use mpeg2_systems::psi::pat::{Program, ProgramAssociationSection, ProgramLoop};
+    use mpeg2_systems::psi::pmt::{self, TsProgramMapSection};
+    use mpeg2_systems::psi::section::Section;
     use mpeg2_systems::stream_type::StreamType;
     use mpeg2_systems::time::{ClockReference, Timestamp};
     use mpeg2_systems::ts::Pid;
     use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event, PacketSize};
+    use mpeg2_systems::ts::mux as ts_mux;
     use mpeg2_systems::ts::packet::TransportPacket;
     use serde_json::Value;
 
@@ -44,6 +46,9 @@ mod tests {
     /// What ffprobe reads: the `id` and `codec_type` of each stream, and the
     /// timing of the packets of each stream by `id`
     type Probed = (BTreeMap<u64, String>, BTreeMap<u64, Vec<Timing>>);
+
+    /// The timing and the payload of a PES packet
+    type PesPayload = (Timing, Vec<u8>);
 
     /// The PAT: `transport_stream_id`, and the `program_number` and PID of
     /// each entry, `program_number` 0 for the network PID
@@ -310,6 +315,34 @@ mod tests {
         (length, duration.try_into().unwrap())
     }
 
+    /// The timing and the payload of each PES packet of the video (PID
+    /// 0x100) and of the audio (PID 0x101) FFmpeg wrote into `188.ts`:
+    /// MPEG-2 video pictures and MPEG-1 Layer II audio frames, elementary
+    /// streams ffprobe can parse
+    fn pes_packets_of_188() -> (Vec<PesPayload>, Vec<PesPayload>) {
+        let source = std::fs::read(fixture_path("188.ts")).unwrap();
+        let mut video = Vec::new();
+        let mut audio = Vec::new();
+        for (pid, packet) in ts_events(&source, &[0x100, 0x101], |event| {
+            let Event::PesPacket { pid, packet, .. } = event else {
+                return None;
+            };
+            Some((pid.get(), (timing(&packet), packet.payload.to_vec())))
+        }) {
+            if pid == 0x100 { &mut video } else { &mut audio }.push(packet);
+        }
+        (video, audio)
+    }
+
+    fn pes_packet(stream_id: u8, (pts, dts): Timing, payload: &[u8]) -> PesPacket<'_> {
+        let mut header = OptionalHeader::new();
+        header.pts = pts.map(|pts| Timestamp::try_from(pts).unwrap());
+        header.dts = dts.map(|dts| Timestamp::try_from(dts).unwrap());
+        let mut packet = PesPacket::new(StreamId::from(stream_id), payload);
+        packet.optional_header = Some(header);
+        packet
+    }
+
     #[test]
     #[ignore = "runs tstables from TSDuck"]
     fn each_transport_stream_has_the_tables_tstables_reads() {
@@ -407,21 +440,9 @@ mod tests {
     #[test]
     #[ignore = "runs ffprobe from FFmpeg"]
     fn a_program_stream_the_muxer_writes_reads_in_ffprobe_as_written() {
-        // Elementary streams ffprobe can parse: the MPEG-2 video pictures and
-        // the MPEG-1 Layer II audio frames FFmpeg wrote into 188.ts.
         const VIDEO: u8 = 0xE0;
         const AUDIO: u8 = 0xC0;
-        let source = std::fs::read(fixture_path("188.ts")).unwrap();
-        let mut video = Vec::new();
-        let mut audio = Vec::new();
-        for (pid, packet) in ts_events(&source, &[0x100, 0x101], |event| {
-            let Event::PesPacket { pid, packet, .. } = event else {
-                return None;
-            };
-            Some((pid.get(), (timing(&packet), packet.payload.to_vec())))
-        }) {
-            if pid == 0x100 { &mut video } else { &mut audio }.push(packet);
-        }
+        let (mut video, audio) = pes_packets_of_188();
         // Why zero bytes, to make the first picture too long for one PES
         // packet: any number of them may stand before a start code
         // (`next_start_code` in ISO/IEC 13818-2), so the picture stays
@@ -466,11 +487,7 @@ mod tests {
         let mut expected: BTreeMap<u64, Vec<Timing>> = BTreeMap::new();
         let mut pes_packets = Vec::new();
         for (stream_id, (pts, dts), payload) in access_units {
-            let mut header = OptionalHeader::new();
-            header.pts = pts.map(|pts| Timestamp::try_from(pts).unwrap());
-            header.dts = dts.map(|dts| Timestamp::try_from(dts).unwrap());
-            let mut packet = PesPacket::new(StreamId::from(stream_id), payload);
-            packet.optional_header = Some(header);
+            let packet = pes_packet(stream_id, (pts, dts), payload);
             pes_packets.push(muxer.write_pes_packets(&packet, &mut written).unwrap());
             expected
                 .entry(program_stream_id(stream_id))
@@ -494,5 +511,125 @@ mod tests {
             (program_stream_id(VIDEO), "video".to_owned()),
         ]);
         assert_eq!((expected_streams, expected), (streams, probed));
+    }
+
+    #[test]
+    #[ignore = "runs ffprobe from FFmpeg and tsanalyze from TSDuck"]
+    fn a_transport_stream_the_muxer_writes_reads_in_ffprobe_and_tsanalyze_as_written() {
+        const VIDEO_PID: u16 = 0x100;
+        const AUDIO_PID: u16 = 0x101;
+        let pid = |value: u16| Pid::try_from(value).unwrap();
+        let (mut video, audio) = pes_packets_of_188();
+        // Why zero bytes, to make the first picture longer than
+        // PES_packet_length can state: any number of them may stand before a
+        // start code (`next_start_code` in ISO/IEC 13818-2).
+        video[0].1.resize(100_000, 0);
+
+        let mut muxer = ts_mux::Muxer::new();
+        let mut written = Vec::new();
+        let mut programs = Vec::new();
+        ProgramLoop::write_from(
+            [Program::ProgramMap {
+                program_number: 1.try_into().unwrap(),
+                program_map_pid: pid(0x1000),
+            }],
+            &mut programs,
+        )
+        .unwrap();
+        let mut pat = ProgramAssociationSection::new(1, VersionNumber::try_from(0).unwrap());
+        pat.programs = ProgramLoop::from(&programs[..]);
+        let mut section = Vec::new();
+        pat.write(&mut section).unwrap();
+        muxer
+            .write_section(Pid::PAT, &Section::read(&section).unwrap(), &mut written)
+            .unwrap();
+        let mut streams = Vec::new();
+        pmt::ElementaryStreamLoop::write_from(
+            [
+                pmt::ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, pid(VIDEO_PID)),
+                pmt::ElementaryStream::new(StreamType::ISO_IEC_11172_3_AUDIO, pid(AUDIO_PID)),
+            ],
+            &mut streams,
+        )
+        .unwrap();
+        let mut pmt = TsProgramMapSection::new(1, VersionNumber::try_from(0).unwrap());
+        pmt.pcr_pid = Some(pid(VIDEO_PID));
+        pmt.elementary_streams = pmt::ElementaryStreamLoop::from(&streams[..]);
+        let mut section = Vec::new();
+        pmt.write(&mut section).unwrap();
+        muxer
+            .write_section(pid(0x1000), &Section::read(&section).unwrap(), &mut written)
+            .unwrap();
+        let mut expected: BTreeMap<u64, Vec<Timing>> = BTreeMap::new();
+        for (index, (timing, payload)) in video.iter().enumerate() {
+            let mut packet = pes_packet(0xE0, *timing, payload);
+            packet.length_unspecified = true;
+            let pcr = ClockReference::new(timing.1.unwrap() - 9_000, 0).unwrap();
+            muxer
+                .write_pes_packet(pid(VIDEO_PID), &packet, Some(pcr), &mut written)
+                .unwrap();
+            expected.entry(VIDEO_PID.into()).or_default().push(*timing);
+            if let Some((timing, payload)) = audio.get(index) {
+                muxer
+                    .write_pes_packet(
+                        pid(AUDIO_PID),
+                        &pes_packet(0xC0, *timing, payload),
+                        None,
+                        &mut written,
+                    )
+                    .unwrap();
+                expected.entry(AUDIO_PID.into()).or_default().push(*timing);
+            }
+        }
+        let path = format!("{}/muxed.ts", env!("CARGO_TARGET_TMPDIR"));
+        std::fs::write(&path, &written).unwrap();
+
+        let (streams, probed) = ffprobe(&path, None, false);
+        let expected_streams = BTreeMap::from([
+            (VIDEO_PID.into(), "video".to_owned()),
+            (AUDIO_PID.into(), "audio".to_owned()),
+        ]);
+        assert_eq!((expected_streams, expected), (streams, probed));
+
+        let analyzed = run("tsanalyze", &["--json", &path]);
+        let mut errors = BTreeMap::new();
+        for key in ["invalid-syncs", "transport-errors", "suspect-ignored"] {
+            errors.insert(
+                format!("ts {key}"),
+                integer(&analyzed["ts"]["packets"], key),
+            );
+        }
+        errors.insert(
+            "unreferenced PIDs".to_owned(),
+            integer(&analyzed["ts"]["pids"], "unreferenced"),
+        );
+        let mut starts = BTreeMap::new();
+        for analyzed_pid in analyzed["pids"].as_array().unwrap() {
+            let id = integer(analyzed_pid, "id");
+            let packets = &analyzed_pid["packets"];
+            for key in [
+                "discontinuities",
+                "duplicated",
+                "invalid-scrambling",
+                "pcr-leap",
+            ] {
+                errors.insert(format!("PID {id:#06x} {key}"), integer(packets, key));
+            }
+            if [VIDEO_PID, AUDIO_PID].map(u64::from).contains(&id) {
+                starts.insert(id, (integer(analyzed_pid, "pes"), integer(packets, "pcr")));
+            }
+        }
+        let no_errors: BTreeMap<_, _> = errors.keys().map(|key| (key.clone(), 0)).collect();
+        let written_starts = BTreeMap::from([
+            (
+                VIDEO_PID.into(),
+                (
+                    u64::try_from(video.len()).unwrap(),
+                    u64::try_from(video.len()).unwrap(),
+                ),
+            ),
+            (AUDIO_PID.into(), (u64::try_from(audio.len()).unwrap(), 0)),
+        ]);
+        assert_eq!((errors, starts), (no_errors, written_starts));
     }
 }

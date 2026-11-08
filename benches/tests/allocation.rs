@@ -1,18 +1,22 @@
-//! The demuxers allocate nothing once their buffers have grown
+//! The demuxers and the Transport Stream muxer allocate nothing once their
+//! buffers have grown
 //!
 //! After passes over an input, one more pass over the same input allocates
 //! nothing: handing over input copies it into the buffer the passes before
 //! grew, and the packets, the PAT and PMT the stream resends, the sections in
 //! flight, the PES packets reassembled on a subscribed PID, and the elements
-//! of a Program Stream reuse what was allocated before.
+//! of a Program Stream reuse what was allocated before. Writing the same PES
+//! packets again reuses the output buffer and the continuity counters of the
+//! PIDs written before.
 
 #[cfg(test)]
 mod tests {
     use mpeg2_systems::ps;
     use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig};
+    use mpeg2_systems::ts::mux::Muxer;
     use mpeg2_systems_bench::{
-        CountingAllocator, PROGRAM, STREAMS, allocations_once_grown, demux_events,
-        program_stream_events, subscribed_demuxer,
+        ACCESS_UNIT_LENGTH, CountingAllocator, PROGRAM, STREAMS, allocations_once_grown,
+        demux_events, mux_pes_packets, program_stream_events, subscribed_demuxer,
     };
 
     #[global_allocator]
@@ -54,6 +58,14 @@ mod tests {
                 none.push((name, chunk_length, "ps", 0));
             }
         }
+        let access_unit = vec![0xAA; ACCESS_UNIT_LENGTH];
+        let mut muxer = Muxer::new();
+        let mut out = Vec::new();
+        let counted = allocations_once_grown(&ALLOCATOR, || {
+            mux_pes_packets(&mut muxer, &access_unit, &mut out);
+        });
+        allocations.push(("pes packets", ACCESS_UNIT_LENGTH, "ts mux", counted));
+        none.push(("pes packets", ACCESS_UNIT_LENGTH, "ts mux", 0));
         assert_eq!(allocations, none);
     }
 }

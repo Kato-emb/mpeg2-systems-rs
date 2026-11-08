@@ -29,6 +29,10 @@ harness = false
 name = "demux"
 harness = false
 
+[[bench]]
+name = "mux"
+harness = false
+
 # The workspace's table, which this package cannot inherit, less the lints of
 # panic freedom: a benchmark or a test stops on unwrap, indexing or overflow,
 # which is what it should do. unsafe_code is deny rather than forbid, so the
