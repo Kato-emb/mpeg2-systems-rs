@@ -4,10 +4,10 @@
 //! cargo run -p examples --example ps_dump -- crates/mpeg2-systems/tests/fixtures/program.ps
 //! ```
 //!
-//! Each event is a numbered heading with its main fields, the entries of a
-//! system header or a program stream map under it, and a blank line after. A
-//! run of bytes shows its length and first bytes, so an event stays short
-//! however long its PES packet.
+//! Each event is a numbered heading with its main fields in aligned columns,
+//! the entries of a system header or a program stream map as a table under
+//! it, and a blank line before the next. A run of bytes shows its length and
+//! first bytes, so an event stays short however long its PES packet.
 
 #[path = "support.rs"]
 mod support;
@@ -18,7 +18,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 
 use mpeg2_systems::ps::demux::{Demuxer, Event};
-use support::{byte_run, descriptor_lines, pes_times, print_event};
+use support::{Align, byte_run, descriptor_table, pes_times, print_event, table};
 
 /// Bytes handed over per read, a common size of a pack
 const CHUNK_LENGTH: usize = 2048;
@@ -55,83 +55,123 @@ fn print_events(demuxer: &mut Demuxer, printed: &mut usize) {
     // Stream has no PIDs to choose among, and its PES packets are cut whole
     // from the pack.
     while let Some(event) = demuxer.poll_event() {
-        let (heading, lines) = layout(&event);
-        print_event(*printed, &heading, &lines);
+        let (kind, fields, lines) = layout(&event);
+        print_event(*printed, kind, KIND_WIDTH, &fields, &lines);
         *printed = printed.saturating_add(1);
     }
 }
 
-/// The heading of `event` and the lines under it
-fn layout(event: &Event<'_>) -> (String, Vec<String>) {
+/// Columns the kind of an event takes, that of the longest kind
+const KIND_WIDTH: usize = "PROGRAM STREAM MAP".len();
+
+/// The kind of `event`, the fields of its heading and the lines under it
+fn layout(event: &Event<'_>) -> (&'static str, String, Vec<String>) {
     match event {
-        Event::SyncAcquired => ("SYNC".to_owned(), Vec::new()),
+        Event::SyncAcquired => ("SYNC", String::new(), Vec::new()),
         Event::PackHeader(header) => (
-            "PACK HEADER".to_owned(),
-            vec![
-                format!(
-                    "system_clock_reference_base={}  system_clock_reference_extension={}",
-                    header.system_clock_reference.base(),
-                    header.system_clock_reference.extension()
-                ),
-                format!("program_mux_rate={}", header.program_mux_rate),
-            ],
-        ),
-        Event::SystemHeader(header) => (
+            "PACK HEADER",
             format!(
-                "SYSTEM HEADER  rate_bound={}  audio_bound={}  video_bound={}",
-                header.rate_bound, header.audio_bound, header.video_bound
+                "system_clock_reference_base {:>10}  extension {:>3}  program_mux_rate {:>8}",
+                header.system_clock_reference.base(),
+                header.system_clock_reference.extension(),
+                header.program_mux_rate
             ),
-            header
+            Vec::new(),
+        ),
+        Event::SystemHeader(header) => {
+            let mut unread = Vec::new();
+            let rows: Vec<Vec<String>> = header
                 .stream_bounds
                 .iter()
-                .map(|bound| match bound {
-                    Ok(bound) => format!(
-                        "stream_id=0x{:02X}  P-STD_buffer_bound_scale={}  P-STD_buffer_size_bound={}",
-                        bound.stream_id.get(),
-                        u8::from(bound.p_std_buffer_bound_scale),
-                        bound.p_std_buffer_size_bound
-                    ),
-                    Err(error) => format!("an entry that does not read: {error}"),
+                .filter_map(|bound| {
+                    bound
+                        .map_err(|error| {
+                            unread.push(format!("an entry that does not read: {error}"))
+                        })
+                        .ok()
                 })
-                .collect(),
-        ),
-        Event::ProgramStreamMap(map) => {
-            let mut lines = descriptor_lines(map.program_stream_info);
-            lines.extend(map.elementary_streams.iter().map(|stream| match stream {
-                Ok(stream) => format!(
-                    "stream_type=0x{:02X}  elementary_stream_id=0x{:02X}  elementary_stream_info_length={}",
-                    stream.stream_type.get(),
-                    stream.elementary_stream_id.get(),
-                    stream.elementary_stream_info.as_bytes().len()
-                ),
-                Err(error) => format!("an entry that does not read: {error}"),
-            }));
+                .map(|bound| {
+                    vec![
+                        format!("{:#04x}", bound.stream_id.get()),
+                        u8::from(bound.p_std_buffer_bound_scale).to_string(),
+                        bound.p_std_buffer_size_bound.to_string(),
+                    ]
+                })
+                .collect();
+            let mut lines = table(
+                &[
+                    ("stream_id", Align::Left),
+                    ("P-STD_buffer_bound_scale", Align::Right),
+                    ("P-STD_buffer_size_bound", Align::Right),
+                ],
+                &rows,
+            );
+            lines.extend(unread);
             (
+                "SYSTEM HEADER",
                 format!(
-                    "PROGRAM STREAM MAP  program_stream_map_version={}",
-                    map.program_stream_map_version.get()
+                    "rate_bound {:>8}  audio_bound {:>2}  video_bound {:>2}",
+                    header.rate_bound, header.audio_bound, header.video_bound
                 ),
                 lines,
             )
         }
+        Event::ProgramStreamMap(map) => {
+            let mut lines = descriptor_table(map.program_stream_info);
+            let mut unread = Vec::new();
+            let rows: Vec<Vec<String>> = map
+                .elementary_streams
+                .iter()
+                .filter_map(|stream| {
+                    stream
+                        .map_err(|error| {
+                            unread.push(format!("an entry that does not read: {error}"))
+                        })
+                        .ok()
+                })
+                .map(|stream| {
+                    vec![
+                        format!("{:#04x}", stream.stream_type.get()),
+                        format!("{:#04x}", stream.elementary_stream_id.get()),
+                        stream.elementary_stream_info.as_bytes().len().to_string(),
+                    ]
+                })
+                .collect();
+            lines.extend(table(
+                &[
+                    ("stream_type", Align::Left),
+                    ("elementary_stream_id", Align::Left),
+                    ("elementary_stream_info_length", Align::Right),
+                ],
+                &rows,
+            ));
+            lines.extend(unread);
+            (
+                "PROGRAM STREAM MAP",
+                format!("version {:>2}", map.program_stream_map_version.get()),
+                lines,
+            )
+        }
         Event::PesPacket(packet) => (
+            "PES",
             format!(
-                "PES  stream_id=0x{:02X}{}",
+                "stream_id {:#04x}  {}",
                 packet.stream_id.get(),
                 pes_times(packet)
             ),
             vec![byte_run("payload", packet.payload)],
         ),
-        Event::ProgramEnd => ("PROGRAM END".to_owned(), Vec::new()),
-        Event::Unsynchronized { bytes } => {
-            ("UNSYNCHRONIZED".to_owned(), vec![byte_run("bytes", bytes)])
-        }
-        Event::Unframable { bytes } => ("UNFRAMABLE".to_owned(), vec![byte_run("bytes", bytes)]),
-        Event::Truncated { bytes } => ("TRUNCATED".to_owned(), vec![byte_run("bytes", bytes)]),
-        Event::Error(error) => (format!("ERROR  {error}"), Vec::new()),
-        _ => (
-            "an event of a kind this example does not know".to_owned(),
-            Vec::new(),
+        Event::ProgramEnd => ("PROGRAM END", String::new(), Vec::new()),
+        Event::Unsynchronized { bytes } => (
+            "UNSYNCHRONIZED",
+            String::new(),
+            vec![byte_run("bytes", bytes)],
         ),
+        Event::Unframable { bytes } => {
+            ("UNFRAMABLE", String::new(), vec![byte_run("bytes", bytes)])
+        }
+        Event::Truncated { bytes } => ("TRUNCATED", String::new(), vec![byte_run("bytes", bytes)]),
+        Event::Error(error) => ("ERROR", error.to_string(), Vec::new()),
+        _ => ("UNKNOWN", String::new(), Vec::new()),
     }
 }

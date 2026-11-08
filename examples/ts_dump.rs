@@ -8,9 +8,10 @@
 //! carries: each `TsProgramMapSection` event names them, and the demuxer is
 //! subscribed to them once that event is dropped, as the event borrows it.
 //!
-//! Each event is a numbered heading with its main fields, the table entries
-//! under it, and a blank line after. A run of bytes shows its length and
-//! first bytes, so an event stays short however long its PES packet.
+//! Each event is a numbered heading with its main fields in aligned columns,
+//! the entries it lists as a table under it, and a blank line before the
+//! next. A run of bytes shows its length and first bytes, so an event stays
+//! short however long its PES packet.
 
 #[path = "support.rs"]
 mod support;
@@ -23,7 +24,7 @@ use std::io::{BufRead, BufReader};
 use mpeg2_systems::psi::pat::Program;
 use mpeg2_systems::ts::Pid;
 use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event};
-use support::{byte_run, descriptor_lines, pes_times, print_event};
+use support::{Align, byte_run, descriptor_table, pes_times, print_event, table};
 
 /// Bytes handed over per read, the Transport Packets of one UDP datagram
 const CHUNK_LENGTH: usize = 7 * 188;
@@ -57,8 +58,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// Prints each event the demuxer has, numbering them on from `printed`
 fn print_events(demuxer: &mut Demuxer, printed: &mut usize) {
     while let Some(event) = demuxer.poll_event() {
-        let (heading, lines) = layout(&event);
-        print_event(*printed, &heading, &lines);
+        let (kind, on, fields, lines) = layout(&event);
+        let pid_column = on.map_or_else(|| " ".repeat(10), |on| format!("pid {:#06x}", on.get()));
+        print_event(
+            *printed,
+            kind,
+            KIND_WIDTH,
+            &format!("{pid_column}  {fields}"),
+            &lines,
+        );
         *printed = printed.saturating_add(1);
         let Event::TsProgramMapSection { section, .. } = event else {
             continue;
@@ -75,164 +83,205 @@ fn print_events(demuxer: &mut Demuxer, printed: &mut usize) {
     }
 }
 
-/// `pid` as four hexadecimal digits: `0x0100`
-fn pid(pid: Pid) -> String {
-    format!("0x{:04X}", pid.get())
-}
+/// Columns the kind of an event takes, that of the longest kind
+const KIND_WIDTH: usize = "UNSYNCHRONIZED".len();
 
-/// The heading of `event` and the lines under it
-fn layout(event: &Event<'_>) -> (String, Vec<String>) {
+/// The kind of `event`, the PID it is on, the fields of its heading and the
+/// lines under it
+fn layout(event: &Event<'_>) -> (&'static str, Option<Pid>, String, Vec<String>) {
     match event {
         Event::SyncAcquired { packet_size } => (
-            format!("SYNC  packet_size={}", packet_size.stride()),
+            "SYNC",
+            None,
+            format!("packet_size {}", packet_size.stride()),
             Vec::new(),
         ),
         Event::ProgramClockReference {
-            pid: on,
+            pid,
             program_clock_reference,
         } => (
+            "PCR",
+            Some(*pid),
             format!(
-                "PCR  PID={}  program_clock_reference_base={}  program_clock_reference_extension={}",
-                pid(*on),
+                "program_clock_reference_base {:>10}  extension {:>3}",
                 program_clock_reference.base(),
                 program_clock_reference.extension()
             ),
             Vec::new(),
         ),
-        Event::ProgramAssociationSection(section) => (
-            format!(
-                "PAT  transport_stream_id=0x{:04X}  version_number={}  section_number={}/{}",
-                section.transport_stream_id,
-                section.version_number.get(),
-                section.section_number,
-                section.last_section_number
-            ),
-            section
+        Event::ProgramAssociationSection(section) => {
+            let mut unread = Vec::new();
+            let rows: Vec<Vec<String>> = section
                 .programs
                 .iter()
+                .filter_map(|program| {
+                    program
+                        .map_err(|error| {
+                            unread.push(format!("an entry that does not read: {error}"))
+                        })
+                        .ok()
+                })
                 .map(|program| match program {
-                    Ok(Program::Network { network_pid }) => {
-                        format!("program 0 -> network_PID {}", pid(network_pid))
+                    Program::Network { network_pid } => {
+                        vec!["0".to_owned(), format!("{:#06x}", network_pid.get())]
                     }
-                    Ok(Program::ProgramMap {
+                    Program::ProgramMap {
                         program_number,
                         program_map_pid,
-                    }) => format!(
-                        "program {program_number} -> program_map_PID {}",
-                        pid(program_map_pid)
-                    ),
-                    Ok(other) => format!("{other:?}"),
-                    Err(error) => format!("an entry that does not read: {error}"),
+                    } => vec![
+                        program_number.to_string(),
+                        format!("{:#06x}", program_map_pid.get()),
+                    ],
+                    other => vec![format!("{other:?}")],
                 })
-                .collect(),
-        ),
-        Event::TsProgramMapSection { pid: on, section } => {
-            let mut lines = descriptor_lines(section.program_info);
-            lines.extend(
-                section
-                    .elementary_streams
-                    .iter()
-                    .map(|stream| match stream {
-                        Ok(stream) => format!(
-                            "stream_type=0x{:02X}  elementary_PID={}  ES_info_length={}",
-                            stream.stream_type.get(),
-                            pid(stream.elementary_pid),
-                            stream.es_info.as_bytes().len()
-                        ),
-                        Err(error) => format!("an entry that does not read: {error}"),
-                    }),
+                .collect();
+            let mut lines = table(
+                &[("program", Align::Right), ("program_map_PID", Align::Left)],
+                &rows,
             );
+            lines.extend(unread);
             (
+                "PAT",
+                Some(Pid::PAT),
                 format!(
-                    "PMT  PID={}  program_number={}  version_number={}  PCR_PID={}",
-                    pid(*on),
+                    "transport_stream_id {:>5}  version {:>2}  section {}/{}",
+                    section.transport_stream_id,
+                    section.version_number.get(),
+                    section.section_number,
+                    section.last_section_number
+                ),
+                lines,
+            )
+        }
+        Event::TsProgramMapSection { pid, section } => {
+            let mut lines = descriptor_table(section.program_info);
+            let mut unread = Vec::new();
+            let rows: Vec<Vec<String>> = section
+                .elementary_streams
+                .iter()
+                .filter_map(|stream| {
+                    stream
+                        .map_err(|error| {
+                            unread.push(format!("an entry that does not read: {error}"))
+                        })
+                        .ok()
+                })
+                .map(|stream| {
+                    vec![
+                        format!("{:#04x}", stream.stream_type.get()),
+                        format!("{:#06x}", stream.elementary_pid.get()),
+                        stream.es_info.as_bytes().len().to_string(),
+                    ]
+                })
+                .collect();
+            lines.extend(table(
+                &[
+                    ("stream_type", Align::Left),
+                    ("elementary_PID", Align::Left),
+                    ("ES_info_length", Align::Right),
+                ],
+                &rows,
+            ));
+            lines.extend(unread);
+            (
+                "PMT",
+                Some(*pid),
+                format!(
+                    "program_number {:>5}  version {:>2}  section {}/{}  PCR_PID {}",
                     section.program_number,
                     section.version_number.get(),
-                    section.pcr_pid.map_or_else(|| "none".to_owned(), pid)
+                    section.section_number,
+                    section.last_section_number,
+                    section
+                        .pcr_pid
+                        .map_or_else(|| "none".to_owned(), |pid| format!("{:#06x}", pid.get()))
                 ),
                 lines,
             )
         }
         Event::CaSection(section) => (
+            "CAT",
+            Some(Pid::CAT),
             format!(
-                "CAT  version_number={}  section_number={}/{}",
+                "version {:>2}  section {}/{}",
                 section.version_number.get(),
                 section.section_number,
                 section.last_section_number
             ),
-            descriptor_lines(section.descriptors),
+            descriptor_table(section.descriptors),
         ),
-        Event::Section { pid: on, section } => {
+        Event::Section { pid, section } => {
             let syntax = section.syntax.map_or_else(String::new, |syntax| {
                 format!(
-                    "  version_number={}  section_number={}/{}",
+                    "  version {:>2}  section {}/{}",
                     syntax.version_number.get(),
                     syntax.section_number,
                     syntax.last_section_number
                 )
             });
             (
-                format!(
-                    "SECTION  PID={}  table_id=0x{:02X}{syntax}",
-                    pid(*on),
-                    section.table_id.get()
-                ),
+                "SECTION",
+                Some(*pid),
+                format!("table_id {:#04x}{syntax}", section.table_id.get()),
                 vec![byte_run("body", section.body)],
             )
         }
         Event::PesPacket {
-            pid: on,
+            pid,
             packet,
             start_offset,
         } => (
+            "PES",
+            Some(*pid),
             format!(
-                "PES  PID={}  stream_id=0x{:02X}  offset={start_offset}{}",
-                pid(*on),
+                "stream_id {:#04x}  offset {start_offset:>12}  {}",
                 packet.stream_id.get(),
                 pes_times(packet)
             ),
             vec![byte_run("payload", packet.payload)],
         ),
         Event::UnreadablePesPacket {
-            pid: on,
+            pid,
             bytes,
             error,
             start_offset,
         } => (
-            format!(
-                "UNREADABLE PES  PID={}  offset={start_offset}  {error}",
-                pid(*on)
-            ),
+            "UNREADABLE PES",
+            Some(*pid),
+            format!("offset {start_offset:>12}  {error}"),
             vec![byte_run("bytes", bytes)],
         ),
         Event::ScrambledPesPacket {
-            pid: on,
+            pid,
             bytes,
             transport_scrambling_control,
             start_offset,
         } => (
+            "SCRAMBLED PES",
+            Some(*pid),
             format!(
-                "SCRAMBLED PES  PID={}  offset={start_offset}  transport_scrambling_control={:02b}",
-                pid(*on),
+                "offset {start_offset:>12}  transport_scrambling_control {:02b}",
                 transport_scrambling_control.get()
             ),
             vec![byte_run("bytes", bytes)],
         ),
         Event::TruncatedPesPacket {
-            pid: on,
+            pid,
             bytes,
             start_offset,
         } => (
-            format!("TRUNCATED PES  PID={}  offset={start_offset}", pid(*on)),
+            "TRUNCATED PES",
+            Some(*pid),
+            format!("offset {start_offset:>12}"),
             vec![byte_run("bytes", bytes)],
         ),
-        Event::Unsynchronized { bytes } => {
-            ("UNSYNCHRONIZED".to_owned(), vec![byte_run("bytes", bytes)])
-        }
-        Event::Error(error) => (format!("ERROR  {error}"), Vec::new()),
-        _ => (
-            "an event of a kind this example does not know".to_owned(),
-            Vec::new(),
+        Event::Unsynchronized { bytes } => (
+            "UNSYNCHRONIZED",
+            None,
+            String::new(),
+            vec![byte_run("bytes", bytes)],
         ),
+        Event::Error(error) => ("ERROR", None, error.to_string(), Vec::new()),
+        _ => ("UNKNOWN", None, String::new(), Vec::new()),
     }
 }
