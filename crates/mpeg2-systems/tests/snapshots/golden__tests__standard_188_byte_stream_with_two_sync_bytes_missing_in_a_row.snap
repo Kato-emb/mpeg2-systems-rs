@@ -4,8 +4,19 @@ expression: events_of(&stream)
 ---
 [
     "SyncAcquired { packet_size: Standard188 }",
+    "Section { pid: Pid(0), section: Section { table_id: TableId(0), private_indicator: false, reserved_before_section_length: 3, syntax: Some(SectionSyntax { table_id_extension: 1, reserved_before_version_number: 3, version_number: VersionNumber(0), current_next_indicator: true, section_number: 0, last_section_number: 0 }), body: [0, 1, 240, 0] } }",
+    "Section { pid: Pid(4096), section: Section { table_id: TableId(2), private_indicator: false, reserved_before_section_length: 3, syntax: Some(SectionSyntax { table_id_extension: 1, reserved_before_version_number: 3, version_number: VersionNumber(0), current_next_indicator: true, section_number: 0, last_section_number: 0 }), body: [225, 0, 240, 0, 2, 225, 0, 240, 0, 3, 225, 1, 240, 0] } }",
+    "ProgramClockReference { pid: Pid(256), program_clock_reference: ClockReference { base: 63000, extension: 0 } }",
     "Error(SyncByteMissing { found: 0 })",
     "Error(SyncLost)",
     "Unsynchronized { bytes: 188 bytes [00 01 00 18 20 b2 8b 40 0e 80 74 59 45 a1 39 d0 ..] }",
     "SyncAcquired { packet_size: Standard188 }",
+    "Section { pid: Pid(0), section: Section { table_id: TableId(0), private_indicator: false, reserved_before_section_length: 3, syntax: Some(SectionSyntax { table_id_extension: 1, reserved_before_version_number: 3, version_number: VersionNumber(0), current_next_indicator: true, section_number: 0, last_section_number: 0 }), body: [0, 1, 240, 0] } }",
+    "Section { pid: Pid(4096), section: Section { table_id: TableId(2), private_indicator: false, reserved_before_section_length: 3, syntax: Some(SectionSyntax { table_id_extension: 1, reserved_before_version_number: 3, version_number: VersionNumber(0), current_next_indicator: true, section_number: 0, last_section_number: 0 }), body: [225, 0, 240, 0, 2, 225, 0, 240, 0, 3, 225, 1, 240, 0] } }",
+    "ProgramClockReference { pid: Pid(256), program_clock_reference: ClockReference { base: 81000, extension: 0 } }",
+    "Section { pid: Pid(0), section: Section { table_id: TableId(0), private_indicator: false, reserved_before_section_length: 3, syntax: Some(SectionSyntax { table_id_extension: 1, reserved_before_version_number: 3, version_number: VersionNumber(0), current_next_indicator: true, section_number: 0, last_section_number: 0 }), body: [0, 1, 240, 0] } }",
+    "Section { pid: Pid(4096), section: Section { table_id: TableId(2), private_indicator: false, reserved_before_section_length: 3, syntax: Some(SectionSyntax { table_id_extension: 1, reserved_before_version_number: 3, version_number: VersionNumber(0), current_next_indicator: true, section_number: 0, last_section_number: 0 }), body: [225, 0, 240, 0, 2, 225, 0, 240, 0, 3, 225, 1, 240, 0] } }",
+    "ProgramClockReference { pid: Pid(256), program_clock_reference: ClockReference { base: 99000, extension: 0 } }",
+    "Section { pid: Pid(0), section: Section { table_id: TableId(0), private_indicator: false, reserved_before_section_length: 3, syntax: Some(SectionSyntax { table_id_extension: 1, reserved_before_version_number: 3, version_number: VersionNumber(0), current_next_indicator: true, section_number: 0, last_section_number: 0 }), body: [0, 1, 240, 0] } }",
+    "Section { pid: Pid(4096), section: Section { table_id: TableId(2), private_indicator: false, reserved_before_section_length: 3, syntax: Some(SectionSyntax { table_id_extension: 1, reserved_before_version_number: 3, version_number: VersionNumber(0), current_next_indicator: true, section_number: 0, last_section_number: 0 }), body: [225, 0, 240, 0, 2, 225, 0, 240, 0, 3, 225, 1, 240, 0] } }",
 ]

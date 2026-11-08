@@ -11,7 +11,7 @@ use crate::field::{self, FieldReader};
 use crate::field::{FieldWriter, write_or_truncate};
 
 /// Bytes from `table_id` to `section_length`
-pub(super) const PREFIX_LENGTH: usize = 3;
+pub(crate) const PREFIX_LENGTH: usize = 3;
 
 /// Bytes from `table_id_extension` to `last_section_number`
 pub(super) const SYNTAX_LENGTH: usize = 5;

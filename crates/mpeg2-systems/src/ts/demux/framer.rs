@@ -88,6 +88,9 @@ pub(super) enum Output {
     SyncLost,
     /// These bytes were not cut into a packet
     Unsynchronized(Range<usize>),
+    /// Every byte before the end [`PacketFramer::finish`] marked has been
+    /// reported
+    EndOfInput,
 }
 
 struct Transition {
@@ -214,6 +217,7 @@ impl PacketFramer {
         loop {
             if self.ended && self.consumed == self.buffer.len() {
                 self.ended = false;
+                return Output::EndOfInput;
             }
             let transition = self.transition();
             self.state = transition.next_state;

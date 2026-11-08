@@ -20,6 +20,7 @@ enum Seen {
     SyncByteMissing { found: u8 },
     SyncLost,
     Unsynchronized(Vec<u8>),
+    EndOfInput,
 }
 
 fn drain(framer: &mut PacketFramer, seen: &mut Vec<Seen>) {
@@ -34,11 +35,13 @@ fn drain(framer: &mut PacketFramer, seen: &mut Vec<Seen>) {
             Output::SyncByteMissing { found } => Seen::SyncByteMissing { found },
             Output::SyncLost => Seen::SyncLost,
             Output::Unsynchronized(range) => Seen::Unsynchronized(framer.bytes(range).to_vec()),
+            Output::EndOfInput => Seen::EndOfInput,
         });
     }
 }
 
-/// Hands `stream` over in chunks of `chunk_length`, then ends the input
+/// Hands `stream` over in chunks of `chunk_length`, then ends the input, and
+/// returns what came before the end of input
 fn frame(stream: &[u8], chunk_length: usize, fixed: Option<PacketSize>) -> Vec<Seen> {
     let mut framer = PacketFramer::new(fixed);
     let mut seen = Vec::new();
@@ -48,6 +51,7 @@ fn frame(stream: &[u8], chunk_length: usize, fixed: Option<PacketSize>) -> Vec<S
     }
     framer.finish();
     drain(&mut framer, &mut seen);
+    assert_eq!(seen.pop(), Some(Seen::EndOfInput));
     seen
 }
 
@@ -206,7 +210,9 @@ fn input_after_a_drained_end_goes_on_at_the_next_offset_on_the_grid_kept() {
     let mut expected = vec![Seen::SyncAcquired(PacketSize::Standard188)];
     expected.extend(packets_of(&input[..188 * 5], PacketSize::Standard188, 0));
     expected.push(Seen::Unsynchronized(input[188 * 5..188 * 5 + 100].to_vec()));
+    expected.push(Seen::EndOfInput);
     expected.extend(packets_of(&input, PacketSize::Standard188, 188 * 5 + 100));
+    expected.push(Seen::EndOfInput);
     assert_eq!(seen, expected);
 }
 

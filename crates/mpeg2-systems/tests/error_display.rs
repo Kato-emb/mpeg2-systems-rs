@@ -82,4 +82,32 @@ mod tests {
             [(true, false); 17]
         );
     }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_demuxer_error_that_wraps_another_does_not_repeat_its_message() {
+        use mpeg2_systems::ts::Pid;
+        use mpeg2_systems::ts::demux;
+
+        let errors: [&dyn Error; 2] = [
+            &demux::Error::Packet {
+                error: packet::Error::SyncByte { sync_byte: 0x00 },
+            },
+            &demux::Error::Section {
+                pid: Pid::PAT,
+                error: section::Error::ForbiddenTableId,
+            },
+        ];
+
+        assert_eq!(
+            errors.map(|error| {
+                let source = error.source().map(ToString::to_string);
+                (
+                    source.is_some(),
+                    source.is_some_and(|source| error.to_string().contains(&source)),
+                )
+            }),
+            [(true, false); 2]
+        );
+    }
 }
