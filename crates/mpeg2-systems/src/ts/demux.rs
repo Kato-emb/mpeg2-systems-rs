@@ -84,7 +84,9 @@ pub enum Event<'a> {
     /// A section of a PMT, on a PID a PAT names for a program map, the first
     /// time it is seen at a version
     ///
-    /// Reported by version per program, as
+    /// Only the PMT of a program the PAT names on that PID is typed; one of
+    /// another `program_number` comes as an [`Event::Section`]. Reported by
+    /// version per program, as
     /// [`Event::ProgramAssociationSection`] is. No packet after the one
     /// that completes the section is analyzed before this event is polled.
     #[doc(alias = "PMT")]
@@ -104,8 +106,9 @@ pub enum Event<'a> {
     /// its `CRC_32` verified
     ///
     /// Sections are reassembled on the PAT and CAT PIDs, and on each PID a
-    /// PAT names for a program map; the PAT, PMT and CAT sections among them
-    /// come as their own events. A section with `section_syntax_indicator`
+    /// PAT names for a program map; the PAT and CAT sections among them, and
+    /// the PMT sections of the programs the PAT names, come as their own
+    /// events. A section with `section_syntax_indicator`
     /// `'0'` has no `CRC_32` and is reported as read. The demuxer reports
     /// every such section, a repeated one included; reading a table from it
     /// is up to the caller.
@@ -442,7 +445,7 @@ impl Demuxer {
             // sections borrow their loops; the conversion reads the header
             // fields only, and gives on the same bytes what it gave when
             // analyzed.
-            Pending::Section { pid, section, body } => analyzer::section_event(
+            Pending::Section { pid, section, body } => self.analyzer.section_event(
                 pid,
                 &Section {
                     body: match body {

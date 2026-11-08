@@ -431,3 +431,65 @@ fn a_reported_pat_version_survives_sync_loss_and_the_end_of_input() {
         ]
     );
 }
+
+#[test]
+fn a_pmt_of_a_program_the_pat_does_not_name_is_reported_as_a_section() {
+    let pat = pat_section(0, &[(1, 0x0100)]);
+    let pmt = pmt_section(2, 0, &[(0x1B, 0x0101)]);
+    let section = Section::read(&pmt).unwrap();
+    assert_eq!(
+        demux(&[
+            section_packet(0x0000, 0, &pat),
+            section_packet(0x0100, 0, &pmt)
+        ]),
+        [
+            acquired(),
+            pat_event(&pat),
+            described(&Event::Section {
+                pid: Pid::try_from(0x0100).unwrap(),
+                section
+            })
+        ]
+    );
+}
+
+#[test]
+fn a_pmt_that_cannot_be_read_is_reported_once_per_version() {
+    let pat = pat_section(0, &[(1, 0x0100)]);
+    let pmt = table_section(0x02, 1, 0, &[0xE1, 0x01]);
+    let section = Section::read(&pmt).unwrap();
+    let error = TsProgramMapSection::try_from(&section).unwrap_err();
+    assert_eq!(
+        demux(&[
+            section_packet(0x0000, 0, &pat),
+            section_packet(0x0100, 0, &pmt),
+            section_packet(0x0100, 1, &pmt),
+        ]),
+        [
+            acquired(),
+            pat_event(&pat),
+            described(&Event::Error(Error::TsProgramMapSection {
+                pid: Pid::try_from(0x0100).unwrap(),
+                error
+            }))
+        ]
+    );
+}
+
+// Why not test through poll_event: the version memory changes no event, only
+// the memory the demuxer holds.
+#[test]
+fn the_version_memory_holds_no_more_pmts_than_the_pat_names() {
+    let pat = pat_section(0, &[(1, 0x0100)]);
+    let mut packets = vec![section_packet(0x0000, 0, &pat)];
+    for (program_number, continuity_counter) in (1_u16..=300).zip((0_u8..16).cycle()) {
+        packets.push(section_packet(
+            0x0100,
+            continuity_counter,
+            &pmt_section(program_number, 0, &[]),
+        ));
+    }
+    let mut demuxer = Demuxer::new(DemuxerConfig::default());
+    events_of(&mut demuxer, &behind_null_packets(&packets));
+    assert_eq!(demuxer.analyzer.tables.gate.len(), 2);
+}

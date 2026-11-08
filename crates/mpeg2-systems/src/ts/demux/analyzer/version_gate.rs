@@ -3,6 +3,7 @@
 use alloc::collections::BTreeMap;
 
 use crate::psi::VersionNumber;
+use crate::ts::Pid;
 
 /// A section of a table reported by version, told apart as §2.4.4.5 tells
 /// the tables apart
@@ -13,6 +14,7 @@ pub(super) enum TableSection {
         section_number: u8,
     },
     TsProgramMap {
+        pid: Pid,
         program_number: u16,
         section_number: u8,
     },
@@ -57,10 +59,19 @@ impl VersionGate {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.reported.len()
+    }
+
     /// Forgets the PAT sections of a Transport Stream other than
-    /// `transport_stream_id`, and the PMT sections of each program `named`
-    /// refuses
-    pub(super) fn retain(&mut self, transport_stream_id: u16, mut named: impl FnMut(u16) -> bool) {
+    /// `transport_stream_id`, and the PMT sections of each `program_map_PID`
+    /// and `program_number` that `named` refuses
+    pub(super) fn retain(
+        &mut self,
+        transport_stream_id: u16,
+        mut named: impl FnMut(Pid, u16) -> bool,
+    ) {
         // Why forget another transport_stream_id: the memory would otherwise
         // grow with each one a stream names, which untrusted input chooses.
         self.reported.retain(|section, _| match *section {
@@ -68,7 +79,11 @@ impl VersionGate {
                 transport_stream_id: remembered,
                 ..
             } => remembered == transport_stream_id,
-            TableSection::TsProgramMap { program_number, .. } => named(program_number),
+            TableSection::TsProgramMap {
+                pid,
+                program_number,
+                ..
+            } => named(pid, program_number),
             TableSection::ConditionalAccess { .. } => true,
         });
     }
@@ -80,6 +95,7 @@ mod tests {
 
     use super::{Admission, TableSection, VersionGate};
     use crate::psi::VersionNumber;
+    use crate::ts::Pid;
 
     fn version(value: u8) -> VersionNumber {
         VersionNumber::try_from(value).unwrap()
@@ -94,6 +110,7 @@ mod tests {
 
     fn pmt(program_number: u16) -> TableSection {
         TableSection::TsProgramMap {
+            pid: Pid::try_from(0x0100).unwrap(),
             program_number,
             section_number: 0,
         }
@@ -155,7 +172,7 @@ mod tests {
         for section in sections {
             gate.admit(section, version(3));
         }
-        gate.retain(2, |program_number| program_number == 2);
+        gate.retain(2, |_, program_number| program_number == 2);
         assert_eq!(
             sections.map(|section| gate.admit(section, version(3))),
             [
