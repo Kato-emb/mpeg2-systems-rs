@@ -117,6 +117,15 @@ mod program_stream {
         format!("{} bytes [{}{ellipsis}]", bytes.len(), shown.join(" "))
     }
 
+    /// The name of the variant `Debug` prints first
+    fn variant(debug: &str) -> String {
+        debug
+            .split([' ', '(', '{'])
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
     /// The kind of the event, an error by its variants, and the bytes passed
     /// over or cut short by their length and leading bytes
     ///
@@ -128,20 +137,13 @@ mod program_stream {
             Event::Unframable { bytes } => format!("Unframable {{ {} }}", preview(bytes)),
             Event::Truncated { bytes } => format!("Truncated {{ {} }}", preview(bytes)),
             Event::Error(error) => {
-                let variant = |debug: String| -> String {
-                    debug
-                        .split([' ', '(', '{'])
-                        .next()
-                        .unwrap_or_default()
-                        .to_owned()
-                };
                 let inner = core::error::Error::source(error)
                     .map(|source| format!("{source:?}"))
                     .unwrap_or_default();
                 format!(
                     "Error({} {{ {} }})",
-                    variant(format!("{error:?}")),
-                    variant(inner)
+                    variant(&format!("{error:?}")),
+                    variant(&inner)
                 )
             }
             Event::SyncAcquired => "SyncAcquired".to_owned(),

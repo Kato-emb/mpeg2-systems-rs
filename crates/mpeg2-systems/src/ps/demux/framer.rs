@@ -385,9 +385,7 @@ fn observe_synced(bytes: &[u8]) -> Synced {
         // Why wait only for bytes that can begin a start code: others are
         // unframable however many follow, and the end of input would report
         // them as an element cut short.
-        return if START_CODE_PREFIX
-            .starts_with(bytes.get(..START_CODE_PREFIX.len()).unwrap_or(bytes))
-        {
+        return if START_CODE_PREFIX.starts_with(bytes) {
             Synced::NeedMoreData
         } else {
             Synced::Unknown
