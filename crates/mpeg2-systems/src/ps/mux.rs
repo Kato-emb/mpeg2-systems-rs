@@ -53,13 +53,6 @@ use crate::field::write_or_truncate;
 use crate::pes::{self, OptionalHeader, PesPacket, StreamId};
 use crate::time::Timestamp;
 
-/// The lowest `stream_id` of a PES packet; those below it are the start
-/// codes of other elements, ISO/IEC 13818-1 Table 2-22
-const FIRST_PES_STREAM_ID: u8 = 0xBD;
-
-/// The most bytes `PES_packet_length` can state after itself
-const PES_PACKET_LENGTH_MAX: usize = 0xFFFF;
-
 /// Failure to write the PES packets of a payload
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -149,7 +142,10 @@ pub fn write_pes_packets(
     payload: &[u8],
     out: &mut Vec<u8>,
 ) -> Result<usize, Error> {
-    if stream_id.get() < FIRST_PES_STREAM_ID {
+    // Why compare with private_stream_1: it is the lowest stream_id of a PES
+    // packet, and those below it are the start codes of other elements
+    // (Table 2-22).
+    if stream_id.get() < StreamId::PRIVATE_STREAM_1.get() {
         return Err(Error::StreamId { stream_id });
     }
     if pts.is_none() && dts.is_some() {
@@ -178,7 +174,7 @@ pub fn write_pes_packets(
             // Why split even a video payload rather than leave its length
             // unspecified: PES_packet_length 0 is allowed only in a
             // Transport Stream (§2.4.3.7).
-            let capacity = PES_PACKET_LENGTH_MAX.saturating_sub(
+            let capacity = usize::from(u16::MAX).saturating_sub(
                 optional_header
                     .as_ref()
                     .map_or(0, OptionalHeader::encoded_len),
