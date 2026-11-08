@@ -9,8 +9,9 @@
 //! Stream is written the way a Transport Stream is, through
 //! `ts::mux::Muxer`, which keeps the continuity counters, as the two
 //! demuxers are driven by methods of the same names. Where a pack starts is
-//! up to the caller. The crate does not write a system header, a program
-//! stream directory, padding or pack stuffing.
+//! up to the caller. The crate writes a system header the caller has built
+//! but does not work out its bounds, and does not write a program stream
+//! directory, padding or pack stuffing.
 //!
 //! ```
 //! use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
@@ -56,7 +57,10 @@ use core::fmt;
 
 use crate::field::write_or_truncate;
 use crate::pes::{self, OptionalHeader, PesPacket, StreamId};
-use crate::ps::{MPEG_PROGRAM_END_CODE, PackHeader, ProgramStreamMap, pack_header, psm};
+use crate::ps::{
+    MPEG_PROGRAM_END_CODE, PackHeader, ProgramStreamMap, SystemHeader, pack_header, psm,
+    system_header,
+};
 
 /// Failure to write an element of a Program Stream
 #[non_exhaustive]
@@ -79,6 +83,11 @@ pub enum Error {
     PackHeader {
         /// How the pack header failed
         error: pack_header::Error,
+    },
+    /// A system header could not be written
+    SystemHeader {
+        /// How the system header failed
+        error: system_header::Error,
     },
     /// A program stream map could not be written
     ProgramStreamMap {
@@ -107,6 +116,7 @@ impl fmt::Display for Error {
                 stream_id.get()
             ),
             Self::PackHeader { .. } => write!(formatter, "a pack header could not be written"),
+            Self::SystemHeader { .. } => write!(formatter, "a system header could not be written"),
             Self::ProgramStreamMap { .. } => {
                 write!(formatter, "a program stream map could not be written")
             }
@@ -119,6 +129,7 @@ impl core::error::Error for Error {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::PackHeader { error } => Some(error),
+            Self::SystemHeader { error } => Some(error),
             Self::ProgramStreamMap { error } => Some(error),
             Self::PesPacket { error } => Some(error),
             Self::StreamId { .. } | Self::LengthUnspecified { .. } => None,
@@ -131,7 +142,8 @@ impl core::error::Error for Error {
 ///
 /// Each method appends one element, or the PES packets of one payload, and a
 /// write that fails leaves the buffer as it was. The muxer does not decide
-/// where a pack starts, nor write a system header; that is up to the caller.
+/// where a pack starts, nor work out the bounds of a system header; those
+/// are up to the caller.
 #[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct Muxer;
@@ -153,6 +165,25 @@ impl Muxer {
         header
             .write(out)
             .map_err(|error| Error::PackHeader { error })
+    }
+
+    /// Appends `header`, as the caller has built it, to `out`
+    ///
+    /// The muxer does not work out the bounds the header states (`rate_bound`,
+    /// `audio_bound`, the buffer size of each stream); they are the caller's.
+    ///
+    /// # Errors
+    ///
+    /// * [`SystemHeader`](Error::SystemHeader): [`SystemHeader::write`]
+    ///   refuses the header.
+    pub fn write_system_header(
+        &self,
+        header: &SystemHeader<'_>,
+        out: &mut Vec<u8>,
+    ) -> Result<(), Error> {
+        header
+            .write(out)
+            .map_err(|error| Error::SystemHeader { error })
     }
 
     /// Appends `map` to `out`

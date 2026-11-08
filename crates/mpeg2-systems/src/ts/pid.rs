@@ -47,6 +47,13 @@ impl Pid {
     pub const fn is_assignable(self) -> bool {
         matches!(self.0, 0x0010..=0x1ffe)
     }
+
+    /// Returns whether Table 2-3 lets Transport Packets of the PID carry a
+    /// PCR: those of the PAT, of the CAT, and of a PID it leaves free to assign
+    #[cfg(feature = "alloc")]
+    pub(crate) const fn may_carry_pcr(self) -> bool {
+        self.is_assignable() || self.0 == Self::PAT.0 || self.0 == Self::CAT.0
+    }
 }
 
 impl TryFrom<u16> for Pid {

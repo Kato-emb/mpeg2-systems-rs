@@ -240,4 +240,94 @@ mod tests {
 
         assert_eq!(read(&stream), read(STANDARD_188));
     }
+
+    #[test]
+    fn pcrs_written_on_their_own_between_pes_packets_read_back_in_order_without_a_discontinuity() {
+        let mut muxer = Muxer::new();
+        let mut stream = Vec::new();
+        let mut programs = Vec::new();
+        ProgramLoop::write_from([program(1, PMT_PID)], &mut programs).unwrap();
+        let mut pat_section =
+            ProgramAssociationSection::new(1, VersionNumber::try_from(0).unwrap());
+        pat_section.programs = ProgramLoop::from(&programs[..]);
+        let mut streams = Vec::new();
+        ElementaryStreamLoop::write_from(
+            [
+                ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, pid(VIDEO_PID)),
+                ElementaryStream::new(StreamType::ISO_IEC_11172_3_AUDIO, pid(AUDIO_PID)),
+            ],
+            &mut streams,
+        )
+        .unwrap();
+        let mut pmt_section = TsProgramMapSection::new(1, VersionNumber::try_from(0).unwrap());
+        pmt_section.pcr_pid = Some(pid(VIDEO_PID));
+        pmt_section.elementary_streams = ElementaryStreamLoop::from(&streams[..]);
+        muxer
+            .write_program_association_section(&pat_section, &mut stream)
+            .unwrap();
+        muxer
+            .write_ts_program_map_section(pid(PMT_PID), &pmt_section, &mut stream)
+            .unwrap();
+        let pcr = |base: u64| ClockReference::new(base, 0).unwrap();
+        let video = [counting(5_000), counting(400)];
+        let audio = counting(300);
+
+        muxer
+            .write_program_clock_reference(pid(VIDEO_PID), pcr(0), &mut stream)
+            .unwrap();
+        muxer
+            .write_pes_packet(
+                pid(VIDEO_PID),
+                &pes_packet(0xE0, 9_000, None, &video[0]),
+                None,
+                &mut stream,
+            )
+            .unwrap();
+        muxer
+            .write_program_clock_reference(pid(VIDEO_PID), pcr(2_700), &mut stream)
+            .unwrap();
+        muxer
+            .write_pes_packet(
+                pid(AUDIO_PID),
+                &pes_packet(0xC0, 9_100, None, &audio),
+                None,
+                &mut stream,
+            )
+            .unwrap();
+        muxer
+            .write_program_clock_reference(pid(VIDEO_PID), pcr(5_400), &mut stream)
+            .unwrap();
+        muxer
+            .write_pes_packet(
+                pid(VIDEO_PID),
+                &pes_packet(0xE0, 12_600, None, &video[1]),
+                None,
+                &mut stream,
+            )
+            .unwrap();
+
+        assert_eq!(
+            read(&stream),
+            Read {
+                tables: vec![pat(), pmt()],
+                program_clock_references: [0, 2_700, 5_400]
+                    .map(|base| Seen::ProgramClockReference {
+                        pid: VIDEO_PID,
+                        program_clock_reference: pcr(base),
+                    })
+                    .to_vec(),
+                pes_packets: BTreeMap::from([
+                    (
+                        VIDEO_PID,
+                        vec![
+                            (0xE0, Some(9_000), None, video[0].clone()),
+                            (0xE0, Some(12_600), None, video[1].clone()),
+                        ]
+                    ),
+                    (AUDIO_PID, vec![(0xC0, Some(9_100), None, audio)]),
+                ]),
+                others: Vec::new(),
+            }
+        );
+    }
 }

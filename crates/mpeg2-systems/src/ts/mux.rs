@@ -82,7 +82,7 @@ use crate::psi::pat::{self, ProgramAssociationSection};
 use crate::psi::pmt::{self, TsProgramMapSection};
 use crate::psi::section::{self, Section};
 use crate::time::ClockReference;
-use crate::ts::adaptation_field::AdaptationField;
+use crate::ts::adaptation_field::{AdaptationField, MAX_ADAPTATION_FIELD_LENGTH};
 use crate::ts::packet::{self, HEADER_LENGTH, PACKET_LENGTH, TransportPacket};
 use crate::ts::{ContinuityCounter, Pid};
 
@@ -215,6 +215,53 @@ impl Muxer {
         Self {
             continuity_counters: BTreeMap::new(),
         }
+    }
+
+    /// Appends a Transport Packet of `pid` that carries
+    /// `program_clock_reference` and nothing else to `out`
+    ///
+    /// PCR, ISO/IEC 13818-1 §2.4.3.4 and §2.4.3.5
+    ///
+    /// The packet is an adaptation field filling the whole packet, its
+    /// `PCR_flag` set, with no payload, so a PCR can be sent as often as
+    /// §2.7.2 asks however far apart the PES packets of `pid` are; how often
+    /// is up to the caller. The packet takes the `continuity_counter` of the
+    /// packet of `pid` written before it, as a packet without a payload does
+    /// not advance it. A write that fails leaves `out` as it was.
+    ///
+    /// # Errors
+    ///
+    /// * [`Pid`](Error::Pid): `pid` is not one Table 2-3 lets carry a PCR:
+    ///   0x0000, 0x0001 and 0x0010 to 0x1FFE.
+    /// * [`Packet`](Error::Packet): [`TransportPacket::write`] refuses the
+    ///   packet, as it does a PCR with an extension of 300 or more.
+    pub fn write_program_clock_reference(
+        &mut self,
+        pid: Pid,
+        program_clock_reference: ClockReference,
+        out: &mut Vec<u8>,
+    ) -> Result<(), Error> {
+        if !pid.may_carry_pcr() {
+            return Err(Error::Pid { pid });
+        }
+        // Why the counter before the next one rather than the next one: a
+        // packet without a payload does not advance the counter (§2.4.3.3),
+        // so it repeats that of the packet before it, and the next packet
+        // with a payload follows on from it. On a PID not yet written the
+        // same counter makes the first packet with a payload follow on too.
+        let previous = self
+            .continuity_counters
+            .get(&pid)
+            .copied()
+            .unwrap_or(ContinuityCounter(0))
+            .previous();
+        let mut adaptation_field = AdaptationField::new();
+        adaptation_field.program_clock_reference = Some(program_clock_reference);
+        adaptation_field.stuffing_bytes =
+            MAX_ADAPTATION_FIELD_LENGTH.saturating_sub(adaptation_field.adaptation_field_length());
+        let mut packet = TransportPacket::new(pid, previous);
+        packet.adaptation_field = Some(adaptation_field);
+        packet.write(out).map_err(|error| Error::Packet { error })
     }
 
     /// Appends `packet` to `out` as Transport Packets of `pid`, and returns

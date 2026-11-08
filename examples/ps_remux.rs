@@ -69,9 +69,7 @@ fn remux_events(
         if let Event::PackHeader(header) = &event {
             muxer.write_pack_header(header, out)?;
         } else if let Event::SystemHeader(header) = &event {
-            // Why the system header's own writer: the muxer leaves the system
-            // header to the caller.
-            header.write(out)?;
+            muxer.write_system_header(header, out)?;
         } else if let Event::ProgramStreamMap(map) = &event {
             muxer.write_program_stream_map(map, out)?;
         } else if let Event::PesPacket(packet) = &event {
