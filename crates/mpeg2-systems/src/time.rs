@@ -71,9 +71,7 @@ impl fmt::Display for ClockReferenceOutOfRange {
                 formatter,
                 "clock reference base {base} does not fit in 33 bits"
             ),
-            // Why not a separate arm for (false, false): `new` never makes
-            // an error of two values that fit, so it shares the last arm.
-            (false, true) | (false, false) => write!(
+            (false, _) => write!(
                 formatter,
                 "clock reference extension {extension} does not fit in 9 bits"
             ),
@@ -144,6 +142,11 @@ impl Timestamp {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0
+    }
+
+    /// Takes the 33 bits of a time stamp field, keeping only those bits
+    pub(crate) const fn from_33_bits(value: u64) -> Self {
+        Self(value & Self::MODULUS.wrapping_sub(1))
     }
 
     /// Returns the signed distance from `other` to `self`, in 90 kHz ticks
@@ -226,6 +229,10 @@ impl ClockReference {
     /// Number of values the 9 bits of the extension carry, 2^9
     const EXTENSION_LIMIT: u16 = 1 << 9;
 
+    /// Number of values the specification lets the extension take, 0 to 299
+    #[cfg(feature = "alloc")]
+    pub(crate) const EXTENSION_MODULUS: u16 = 300;
+
     /// Creates a clock reference from its base and extension fields
     ///
     /// # Errors
@@ -238,6 +245,15 @@ impl ClockReference {
         }
 
         Ok(Self { base, extension })
+    }
+
+    /// Takes the 33 bits of base and 9 of extension of a clock reference
+    /// field, keeping only those bits
+    pub(crate) const fn from_fields(base: u64, extension: u16) -> Self {
+        Self {
+            base: base & Timestamp::MODULUS.wrapping_sub(1),
+            extension: extension & Self::EXTENSION_LIMIT.wrapping_sub(1),
+        }
     }
 
     /// Returns the base, in ticks of the 90 kHz clock

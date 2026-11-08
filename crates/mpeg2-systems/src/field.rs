@@ -55,12 +55,10 @@ impl fmt::Display for Error {
                 formatter,
                 "field of whole bytes starts at bit {bit_offset} of a byte"
             ),
-            Self::ValueTooWide { width, value } => {
-                write!(
-                    formatter,
-                    "value {value} does not fit in a field of {width} bits"
-                )
-            }
+            Self::ValueTooWide { width, value } => write!(
+                formatter,
+                "value {value} does not fit in a field of {width} bits"
+            ),
             Self::IncompleteByte { pending_bits } => write!(
                 formatter,
                 "writing finished {pending_bits} bits into a byte"
@@ -467,7 +465,7 @@ impl<'output> FieldWriter<'output> {
     /// * [`NotByteAligned`](Error::NotByteAligned): the position is inside a
     ///   byte.
     pub fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), Error> {
-        if self.pending_bits != 0 {
+        if !self.is_byte_aligned() {
             return Err(Error::NotByteAligned {
                 bit_offset: self.pending_bits,
             });
@@ -485,7 +483,7 @@ impl<'output> FieldWriter<'output> {
     /// * [`IncompleteByte`](Error::IncompleteByte): the last byte is only
     ///   partly written; its bits are not appended.
     pub fn finish(self) -> Result<(), Error> {
-        if self.pending_bits != 0 {
+        if !self.is_byte_aligned() {
             return Err(Error::IncompleteByte {
                 pending_bits: self.pending_bits,
             });

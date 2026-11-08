@@ -4,18 +4,17 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
+use super::dsm_trick_mode::DsmTrickMode;
+use super::extension::PesExtension;
+use super::scrambling_control::PesScramblingControl;
 use super::{Error, field_error};
 use crate::field::FieldReader;
 #[cfg(feature = "alloc")]
 use crate::field::FieldWriter;
 use crate::time::{ClockReference, Timestamp};
 
-use super::dsm_trick_mode::DsmTrickMode;
-use super::extension::PesExtension;
-use super::scrambling_control::PesScramblingControl;
-
 /// Bytes from the `'10'` bits to `PES_header_data_length`
-const FIXED_LENGTH: usize = 3;
+pub(super) const FIXED_LENGTH: usize = 3;
 
 /// Most `stuffing_byte`s a PES packet header may hold
 #[cfg(feature = "alloc")]
@@ -134,15 +133,11 @@ impl<'input> OptionalHeader<'input> {
         let five_byte_fields = [self.pts, self.dts].iter().flatten().count();
         let fixed = five_byte_fields
             .saturating_mul(5)
-            .saturating_add(if self.escr.is_some() { 6 } else { 0 })
-            .saturating_add(if self.es_rate.is_some() { 3 } else { 0 })
-            .saturating_add(usize::from(self.dsm_trick_mode.is_some()))
-            .saturating_add(usize::from(self.additional_copy_info.is_some()))
-            .saturating_add(if self.previous_pes_packet_crc.is_some() {
-                2
-            } else {
-                0
-            });
+            .saturating_add(self.escr.map_or(0, |_| 6))
+            .saturating_add(self.es_rate.map_or(0, |_| 3))
+            .saturating_add(self.dsm_trick_mode.map_or(0, |_| 1))
+            .saturating_add(self.additional_copy_info.map_or(0, |_| 1))
+            .saturating_add(self.previous_pes_packet_crc.map_or(0, |_| 2));
 
         fixed
             .saturating_add(
@@ -174,18 +169,16 @@ impl<'input> OptionalHeader<'input> {
     pub fn read(bytes: &'input [u8]) -> Result<Self, Error> {
         let mut reader = FieldReader::new(bytes);
         let mut header = Self::new();
-        let bits = reader
-            .read_u8::<2>()
-            .map_err(|error| field_error("'10'", error))?;
+        let bits = reader.read_u8::<2>().map_err(field_error("'10'"))?;
         if bits != 0b10 {
             return Err(Error::OptionalHeaderStart { bits });
         }
         header.pes_scrambling_control = PesScramblingControl(
             reader
                 .read_u8::<2>()
-                .map_err(|error| field_error("PES_scrambling_control", error))?,
+                .map_err(field_error("PES_scrambling_control"))?,
         );
-        let mut flag = |name| reader.read_bool().map_err(|error| field_error(name, error));
+        let mut flag = |name| reader.read_bool().map_err(field_error(name));
         header.pes_priority = flag("PES_priority")?;
         header.data_alignment_indicator = flag("data_alignment_indicator")?;
         header.copyright = flag("copyright")?;
@@ -200,7 +193,7 @@ impl<'input> OptionalHeader<'input> {
         let pes_extension_flag = flag("PES_extension_flag")?;
         let pes_header_data_length = reader
             .read_u8::<8>()
-            .map_err(|error| field_error("PES_header_data_length", error))?;
+            .map_err(field_error("PES_header_data_length"))?;
         if reader.remaining_bytes() != usize::from(pes_header_data_length) {
             return Err(Error::PesHeaderDataLength {
                 pes_header_data_length,
@@ -211,9 +204,9 @@ impl<'input> OptionalHeader<'input> {
         match (pts_flag, dts_flag) {
             (false, true) => return Err(Error::ForbiddenPtsDtsFlags),
             (true, has_dts) => {
-                header.pts = read_timestamp(&mut reader, "PTS")?;
+                header.pts = Some(read_timestamp(&mut reader, "PTS")?);
                 if has_dts {
-                    header.dts = read_timestamp(&mut reader, "DTS")?;
+                    header.dts = Some(read_timestamp(&mut reader, "DTS")?);
                 }
             }
             (false, false) => {}
@@ -226,10 +219,8 @@ impl<'input> OptionalHeader<'input> {
                 reader.read_bits::<1>()?;
                 Ok((base, extension))
             };
-            let (base, extension) = read().map_err(|error| field_error("ESCR", error))?;
-            // Why not `?`: 33 bits of base and 9 of extension are always in
-            // range, so `new` cannot fail and its error needs no variant here.
-            header.escr = ClockReference::new(base, extension).ok();
+            let (base, extension) = read().map_err(field_error("ESCR"))?;
+            header.escr = Some(ClockReference::from_fields(base, extension));
         }
         if es_rate_flag {
             let mut es_rate = || {
@@ -238,13 +229,13 @@ impl<'input> OptionalHeader<'input> {
                 reader.read_bits::<1>()?;
                 Ok(rate)
             };
-            header.es_rate = Some(es_rate().map_err(|error| field_error("ES_rate", error))?);
+            header.es_rate = Some(es_rate().map_err(field_error("ES_rate"))?);
         }
         if dsm_trick_mode_flag {
             header.dsm_trick_mode = Some(DsmTrickMode::from(
                 reader
                     .read_u8::<8>()
-                    .map_err(|error| field_error("trick_mode_control", error))?,
+                    .map_err(field_error("trick_mode_control"))?,
             ));
         }
         if additional_copy_info_flag {
@@ -253,13 +244,13 @@ impl<'input> OptionalHeader<'input> {
                 reader.read_u8::<7>()
             };
             header.additional_copy_info =
-                Some(copy_info().map_err(|error| field_error("additional_copy_info", error))?);
+                Some(copy_info().map_err(field_error("additional_copy_info"))?);
         }
         if pes_crc_flag {
             header.previous_pes_packet_crc = Some(
                 reader
                     .read_u16::<16>()
-                    .map_err(|error| field_error("previous_PES_packet_CRC", error))?,
+                    .map_err(field_error("previous_PES_packet_CRC"))?,
             );
         }
         if pes_extension_flag {
@@ -330,7 +321,7 @@ impl<'input> OptionalHeader<'input> {
         if let Some(extension) = self
             .escr
             .map(ClockReference::extension)
-            .filter(|value| *value >= 300)
+            .filter(|value| *value >= ClockReference::EXTENSION_MODULUS)
         {
             return Err(Error::EscrExtension { extension });
         }
@@ -363,11 +354,11 @@ impl<'input> OptionalHeader<'input> {
         for flag in flags {
             writer
                 .write_bool(flag)
-                .map_err(|error| field_error("PES header flags", error))?;
+                .map_err(field_error("PES header flags"))?;
         }
         writer
             .write_bits::<8>(pes_header_data_length)
-            .map_err(|error| field_error("PES_header_data_length", error))?;
+            .map_err(field_error("PES_header_data_length"))?;
         match (self.pts, self.dts) {
             (Some(pts), Some(dts)) => {
                 write_timestamp(&mut writer, PTS_PREFIX, pts, "PTS")?;
@@ -383,7 +374,7 @@ impl<'input> OptionalHeader<'input> {
                 writer.write_bits::<9>(escr.extension())?;
                 writer.write_bool(true)
             };
-            write_escr().map_err(|error| field_error("ESCR", error))?;
+            write_escr().map_err(field_error("ESCR"))?;
         }
         if let Some(es_rate) = self.es_rate {
             let mut write_rate = || {
@@ -391,31 +382,29 @@ impl<'input> OptionalHeader<'input> {
                 writer.write_bits::<22>(es_rate)?;
                 writer.write_bool(true)
             };
-            write_rate().map_err(|error| field_error("ES_rate", error))?;
+            write_rate().map_err(field_error("ES_rate"))?;
         }
         if let Some(trick_mode) = self.dsm_trick_mode {
             writer
                 .write_bits::<8>(trick_mode.get())
-                .map_err(|error| field_error("trick_mode_control", error))?;
+                .map_err(field_error("trick_mode_control"))?;
         }
         if let Some(copy_info) = self.additional_copy_info {
             let mut write_copy_info = || {
                 writer.write_bool(true)?;
                 writer.write_bits::<7>(copy_info)
             };
-            write_copy_info().map_err(|error| field_error("additional_copy_info", error))?;
+            write_copy_info().map_err(field_error("additional_copy_info"))?;
         }
         if let Some(crc) = self.previous_pes_packet_crc {
             writer
                 .write_bits::<16>(crc)
-                .map_err(|error| field_error("previous_PES_packet_CRC", error))?;
+                .map_err(field_error("previous_PES_packet_CRC"))?;
         }
         if let Some(extension) = &self.pes_extension {
             extension.write(&mut writer)?;
         }
-        writer
-            .finish()
-            .map_err(|error| field_error("PES header", error))?;
+        writer.finish().map_err(field_error("PES header"))?;
         out.resize(out.len().saturating_add(self.stuffing_bytes), 0xff);
 
         Ok(())
@@ -450,19 +439,14 @@ fn write_marked_33_bits(
 }
 
 /// Reads a PTS or a DTS: 4 bits of prefix and 33 marked bits, 5 bytes
-fn read_timestamp(
-    reader: &mut FieldReader<'_>,
-    field: &'static str,
-) -> Result<Option<Timestamp>, Error> {
+fn read_timestamp(reader: &mut FieldReader<'_>, field: &'static str) -> Result<Timestamp, Error> {
     let mut read = || {
         reader.read_bits::<4>()?;
         read_marked_33_bits(reader)
     };
-    let value = read().map_err(|error| field_error(field, error))?;
-
-    // Why not `?`: 33 bits always fit a Timestamp, so `try_from` cannot fail
-    // and its error needs no variant here.
-    Ok(Timestamp::try_from(value).ok())
+    read()
+        .map(Timestamp::from_33_bits)
+        .map_err(field_error(field))
 }
 
 /// Writes a PTS or a DTS: 4 bits of prefix and 33 marked bits, 5 bytes
@@ -477,7 +461,7 @@ fn write_timestamp(
         writer.write_bits::<4>(prefix)?;
         write_marked_33_bits(writer, timestamp.get())
     };
-    write().map_err(|error| field_error(field, error))
+    write().map_err(field_error(field))
 }
 
 #[cfg(test)]

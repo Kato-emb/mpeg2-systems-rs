@@ -11,13 +11,13 @@ use crate::field::FieldWriter;
 use crate::field::{self, FieldReader};
 
 /// Bytes from `table_id` to `section_length`
-const PREFIX_LENGTH: usize = 3;
+pub(super) const PREFIX_LENGTH: usize = 3;
 
 /// Bytes from `table_id_extension` to `last_section_number`
-const SYNTAX_LENGTH: usize = 5;
+pub(super) const SYNTAX_LENGTH: usize = 5;
 
 /// Bytes of `CRC_32`
-const CRC_32_LENGTH: usize = 4;
+pub(super) const CRC_32_LENGTH: usize = 4;
 
 /// The `reserved` bits a new section has, and a PSI table requires
 const RESERVED: u8 = 0b11;
@@ -32,7 +32,7 @@ pub enum Error {
     Field {
         /// The name of the field in the syntax table
         field: &'static str,
-        /// How the field ran past the end
+        /// How the field failed
         error: field::Error,
     },
     /// `section_length` is larger than the table allows
@@ -374,6 +374,7 @@ impl<'input> Section<'input> {
             field: "last_section_number",
             error,
         })?;
+        let remaining_bits = reader.remaining_bits();
         let body_and_crc = reader
             .read_bytes(reader.remaining_bytes())
             .unwrap_or_default();
@@ -384,9 +385,7 @@ impl<'input> Section<'input> {
                     field: "CRC_32",
                     error: field::Error::Truncated {
                         required_bits: 32,
-                        remaining_bits: u64::try_from(body_and_crc.len())
-                            .unwrap_or(u64::MAX)
-                            .saturating_mul(8),
+                        remaining_bits,
                     },
                 })?;
         if crc_32(bytes) != 0 {
@@ -436,16 +435,15 @@ impl<'input> Section<'input> {
             return Err(Error::ForbiddenTableId);
         }
         if table_id.is_psi_table() {
-            if self.syntax.is_none() {
+            let Some(syntax) = self.syntax else {
                 return Err(Error::SectionSyntaxIndicator { table_id });
-            }
+            };
             if self.private_indicator {
                 return Err(Error::PrivateIndicator { table_id });
             }
-            let syntax_reserved = self
-                .syntax
-                .map_or(RESERVED, |syntax| syntax.reserved_before_version_number);
-            if self.reserved_before_section_length != RESERVED || syntax_reserved != RESERVED {
+            if self.reserved_before_section_length != RESERVED
+                || syntax.reserved_before_version_number != RESERVED
+            {
                 return Err(Error::Reserved { table_id });
             }
         }

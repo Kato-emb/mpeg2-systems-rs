@@ -19,7 +19,6 @@ pub mod elementary_stream;
 pub use elementary_stream::{ElementaryStream, ElementaryStreamLoop};
 
 /// Bytes from `PCR_PID` to `program_info_length`
-#[cfg(feature = "alloc")]
 const PROGRAM_HEADER_LENGTH: usize = 4;
 
 /// Failure to convert a section into a [`TsProgramMapSection`], to read an
@@ -41,7 +40,7 @@ pub enum Error {
     Field {
         /// The name of the field in the syntax table
         field: &'static str,
-        /// How the field ran past the end
+        /// How the field failed
         error: field::Error,
     },
     /// The section to write has a `section_number` or `last_section_number`
@@ -238,7 +237,7 @@ impl<'input> TsProgramMapSection<'input> {
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
         super::LONG_SECTION_OVERHEAD
-            .saturating_add(4)
+            .saturating_add(PROGRAM_HEADER_LENGTH)
             .saturating_add(self.program_info.0.len())
             .saturating_add(self.elementary_streams.0.len())
     }
@@ -280,9 +279,8 @@ impl<'input> TsProgramMapSection<'input> {
         }
 
         let mut body = Vec::with_capacity(
-            PROGRAM_HEADER_LENGTH
-                .saturating_add(self.program_info.0.len())
-                .saturating_add(self.elementary_streams.0.len()),
+            self.encoded_len()
+                .saturating_sub(super::LONG_SECTION_OVERHEAD),
         );
         let mut writer = FieldWriter::new(&mut body);
         // Why not an error per field: every value fits its field's width, and
