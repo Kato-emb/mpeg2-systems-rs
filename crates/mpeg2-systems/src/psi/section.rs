@@ -10,6 +10,10 @@ use crate::field::{self, FieldReader};
 #[cfg(feature = "alloc")]
 use crate::field::{FieldWriter, write_or_truncate};
 
+mod length;
+
+pub use length::section_length;
+
 /// Bytes from `table_id` to `section_length`
 pub(crate) const PREFIX_LENGTH: usize = 3;
 
@@ -292,6 +296,8 @@ impl<'input> Section<'input> {
     }
 
     /// Returns the `section_length` the fields and the body add up to
+    ///
+    /// Unlike the function [`section_length`], leaves out the 3 bytes before.
     #[must_use]
     pub fn section_length(&self) -> usize {
         let syntax = if self.syntax.is_some() {
