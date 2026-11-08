@@ -1,7 +1,7 @@
 [package]
 name = "examples"
 version = "0.0.0"
-description = "Programs that read Transport Streams and Program Streams with mpeg2-systems"
+description = "Programs that read and write Transport Streams and Program Streams with mpeg2-systems"
 publish = false
 edition.workspace = true
 rust-version.workspace = true
@@ -20,6 +20,14 @@ path = "ts_dump.rs"
 [[example]]
 name = "ps_dump"
 path = "ps_dump.rs"
+
+[[example]]
+name = "ts_remux"
+path = "ts_remux.rs"
+
+[[example]]
+name = "ps_remux"
+path = "ps_remux.rs"
 
 [lints]
 workspace = true
