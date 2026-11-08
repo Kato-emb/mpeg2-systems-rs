@@ -1,6 +1,7 @@
 //! Reassembly of the sections one PID carries across Transport Packets
 
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use crate::psi::TableId;
 use crate::psi::section::PREFIX_LENGTH;
@@ -39,38 +40,67 @@ enum Observation<'payload> {
     },
 }
 
-/// The section in flight on one PID, gathered across Transport Packets
+/// Where a completed section starts
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Completed {
+    /// At this offset of the payload pushed: the section lay inside one
+    /// packet
+    InPayload(usize),
+    /// At this offset of the reassembler's buffer: the section crossed
+    /// packets
+    Reassembled(usize),
+}
+
+/// The sections of one PID that cross Transport Packets
+///
+/// `buffer[..in_flight_start]` holds the sections completed since the last
+/// [`SectionReassembler::release`], which stay lent until then;
+/// `buffer[in_flight_start..]` is the section in flight.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct SectionReassembler {
-    in_flight: Vec<u8>,
+    buffer: Vec<u8>,
+    in_flight_start: usize,
 }
 
 impl SectionReassembler {
     pub(super) const fn new() -> Self {
         Self {
-            in_flight: Vec::new(),
+            buffer: Vec::new(),
+            in_flight_start: 0,
         }
+    }
+
+    /// Returns the bytes of a [`Completed::Reassembled`] section
+    pub(super) fn section(&self, range: Range<usize>) -> &[u8] {
+        self.buffer.get(range).unwrap_or_default()
+    }
+
+    /// Drops the completed sections, once none is lent; the section in
+    /// flight stays
+    pub(super) fn release(&mut self) {
+        self.buffer.drain(..self.in_flight_start);
+        self.in_flight_start = 0;
     }
 
     /// Drops the section in flight
     pub(super) fn discard_in_flight(&mut self) {
-        self.in_flight.clear();
+        self.buffer.truncate(self.in_flight_start);
     }
 
     /// Takes the payload of a packet of the PID, and calls `completed` with
-    /// each section it completes, in order
+    /// each section it completes, in order, and where it lies
     pub(super) fn push(
         &mut self,
         payload_unit_start_indicator: bool,
         payload: &[u8],
-        completed: &mut impl FnMut(&[u8]),
+        completed: &mut impl FnMut(Completed, &[u8]),
     ) {
         match unit_of(payload_unit_start_indicator, payload) {
             Unit::Continuation(bytes) => {
                 // Why not start a section from a continuation when none is in
                 // flight: nothing in it says where a section starts.
-                if !self.in_flight.is_empty() {
-                    self.consume(bytes, completed);
+                if !self.in_flight().is_empty() {
+                    self.consume(payload.len(), bytes, completed);
                 }
             }
             Unit::Start { tail, sections } => {
@@ -78,29 +108,48 @@ impl SectionReassembler {
                 // pointer_field counts exactly the bytes that end the section
                 // in flight, so bytes past its end, or too few to end it, mean
                 // the framing and the bytes gathered disagree.
-                if !self.in_flight.is_empty()
-                    && let Observation::Complete { end, .. } = observe(&self.in_flight, tail)
+                if !self.in_flight().is_empty()
+                    && let Observation::Complete { end, .. } = observe(self.in_flight(), tail)
                 {
                     self.complete(end, completed);
                 }
-                self.in_flight.clear();
-                self.consume(sections, completed);
+                self.discard_in_flight();
+                self.consume(payload.len(), sections, completed);
             }
-            Unit::BrokenStart => self.in_flight.clear(),
+            Unit::BrokenStart => self.discard_in_flight(),
         }
     }
 
-    fn consume(&mut self, mut remaining: &[u8], completed: &mut impl FnMut(&[u8])) {
+    fn in_flight(&self) -> &[u8] {
+        self.buffer.get(self.in_flight_start..).unwrap_or_default()
+    }
+
+    /// Consumes `remaining`, the last bytes of a payload of `payload_length`
+    fn consume(
+        &mut self,
+        payload_length: usize,
+        mut remaining: &[u8],
+        completed: &mut impl FnMut(Completed, &[u8]),
+    ) {
         loop {
-            match observe(&self.in_flight, remaining) {
+            match observe(self.in_flight(), remaining) {
                 Observation::Exhausted | Observation::Stuffing => return,
                 Observation::Oversized => {
-                    self.in_flight.clear();
+                    self.discard_in_flight();
                     return;
                 }
                 Observation::Fragment => {
-                    self.in_flight.extend_from_slice(remaining);
+                    self.buffer.extend_from_slice(remaining);
                     return;
+                }
+                // Why not copy a section that lies inside one packet: it can be
+                // lent from the packet, and is copied only to cross packets.
+                Observation::Complete { end, rest } if self.in_flight().is_empty() => {
+                    completed(
+                        Completed::InPayload(payload_length.saturating_sub(remaining.len())),
+                        end,
+                    );
+                    remaining = rest;
                 }
                 Observation::Complete { end, rest } => {
                     self.complete(end, completed);
@@ -110,11 +159,16 @@ impl SectionReassembler {
         }
     }
 
-    /// Appends the bytes that end the section in flight, and hands it over
-    fn complete(&mut self, end: &[u8], completed: &mut impl FnMut(&[u8])) {
-        self.in_flight.extend_from_slice(end);
-        completed(&self.in_flight);
-        self.in_flight.clear();
+    /// Appends the bytes that end the section in flight, and lends it from
+    /// the buffer
+    fn complete(&mut self, end: &[u8], completed: &mut impl FnMut(Completed, &[u8])) {
+        self.buffer.extend_from_slice(end);
+        let start = self.in_flight_start;
+        self.in_flight_start = self.buffer.len();
+        completed(
+            Completed::Reassembled(start),
+            self.section(start..self.in_flight_start),
+        );
     }
 }
 

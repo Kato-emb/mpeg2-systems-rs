@@ -99,19 +99,21 @@ impl ContinuityTracker {
 
 /// Classifies a packet's `continuity_counter` against the PID's last one
 fn observe(previous: Option<PidContinuity>, packet: &TransportPacket<'_>) -> Observation {
-    // Why not check a null packet or one without payload: §2.4.3.3 leaves the
-    // counter unchanged on them, so there is no value to expect.
-    if packet.pid == Pid::NULL || packet.payload.is_none() {
+    let discontinuity_indicator = packet
+        .adaptation_field
+        .as_ref()
+        .is_some_and(|field| field.discontinuity_indicator);
+    // Why not check a null packet, or one without payload unless it indicates
+    // a discontinuity: §2.4.3.3 leaves the counter unchanged on them, so
+    // there is no value to expect, but §2.4.3.5 lets any packet indicate a
+    // discontinuity, which sets the counter the next packet continues.
+    if packet.pid == Pid::NULL || (packet.payload.is_none() && !discontinuity_indicator) {
         return Observation::NotCountable;
     }
     let Some(previous) = previous else {
         return Observation::FirstSeen;
     };
-    if packet
-        .adaptation_field
-        .as_ref()
-        .is_some_and(|field| field.discontinuity_indicator)
-    {
+    if discontinuity_indicator {
         return Observation::Excused;
     }
     let expected = previous.counter.next();
@@ -257,6 +259,20 @@ mod tests {
         assert_eq!(
             verdicts(&[payload_packet(0x0100, 0), excused_packet(0x0100, 9)]),
             [Verdict::InOrder, Verdict::Excused]
+        );
+    }
+
+    #[test]
+    fn a_discontinuity_indicator_without_payload_sets_the_counter_that_follows() {
+        let mut excused = excused_packet(0x0100, 5);
+        excused.payload = None;
+        assert_eq!(
+            verdicts(&[
+                payload_packet(0x0100, 0),
+                excused,
+                payload_packet(0x0100, 6)
+            ]),
+            [Verdict::InOrder, Verdict::Excused, Verdict::InOrder]
         );
     }
 

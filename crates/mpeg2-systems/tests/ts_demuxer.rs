@@ -9,6 +9,7 @@
     reason = "streams are cut at constant offsets well inside their length"
 )]
 mod tests {
+    use mpeg2_systems::psi::TableId;
     use mpeg2_systems::psi::section::{self, Section, SectionSyntax};
     use mpeg2_systems::time::ClockReference;
     use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Error, Event, PacketSize};
@@ -290,6 +291,111 @@ mod tests {
         ]);
         expected.extend(fixture_events().into_iter().skip(1));
         assert_eq!(demux(&with_copies(2), 1000), expected);
+    }
+
+    /// A Transport Packet laid out by hand: the header, an adaptation field
+    /// of `adaptation_field` bytes (its length byte not included) if any, then
+    /// `payload` if any, padded with 0xFF
+    fn packet(
+        pid: u16,
+        payload_unit_start_indicator: bool,
+        continuity_counter: u8,
+        adaptation_field: Option<&[u8]>,
+        payload: Option<&[u8]>,
+    ) -> Vec<u8> {
+        let [high, low] = pid.to_be_bytes();
+        let adaptation_field_control = match (adaptation_field, payload) {
+            (None, _) => 0x10,
+            (Some(_), None) => 0x20,
+            (Some(_), Some(_)) => 0x30,
+        };
+        let mut bytes = vec![
+            0x47,
+            high | if payload_unit_start_indicator {
+                0x40
+            } else {
+                0
+            },
+            low,
+            adaptation_field_control | continuity_counter,
+        ];
+        if let Some(field) = adaptation_field {
+            let length = if payload.is_some() { field.len() } else { 183 };
+            bytes.push(u8::try_from(length).unwrap());
+            bytes.extend_from_slice(field);
+            bytes.resize(5 + length, 0xFF);
+        }
+        bytes.extend_from_slice(payload.unwrap_or_default());
+        bytes.resize(188, 0xFF);
+        bytes
+    }
+
+    /// A short-form section of `table_id` with `body`, which carries no
+    /// `CRC_32`
+    fn short_section(table_id: u8, body: &[u8]) -> Vec<u8> {
+        let [high, low] = u16::try_from(body.len()).unwrap().to_be_bytes();
+        let mut bytes = vec![table_id, 0x30 | high, low];
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    /// Null packets enough to acquire the grid, then `packets`
+    fn behind_null_packets(packets: &[Vec<u8>]) -> Vec<u8> {
+        let mut stream = Vec::new();
+        for _ in 0..5 {
+            stream.extend(packet(0x1FFF, false, 0, None, Some(&[])));
+        }
+        for bytes in packets {
+            stream.extend_from_slice(bytes);
+        }
+        stream
+    }
+
+    #[test]
+    fn sections_inside_one_packet_and_across_packets_are_reported_in_order() {
+        let whole = short_section(0x80, &[0xAA; 20]);
+        let across = short_section(0x81, &[0xBB; 300]);
+        let after = short_section(0x82, &[0xCC; 10]);
+        // Why split there: the head must run to the end of the packet, or
+        // the padding after it would be read as more of the section
+        let (head, tail) = across.split_at(184 - 1 - whole.len());
+        let first = [&[0x00][..], &whole, head].concat();
+        let second = [&[u8::try_from(tail.len()).unwrap()][..], tail, &after].concat();
+        let stream = behind_null_packets(&[
+            packet(0x0000, true, 0, None, Some(&first)),
+            packet(0x0000, true, 1, None, Some(&second)),
+        ]);
+        let expected = acquired_then(
+            PacketSize::Standard188,
+            vec![
+                seen_section(0x0000, &Section::new(TableId::from(0x80), &[0xAA; 20])),
+                seen_section(0x0000, &Section::new(TableId::from(0x81), &[0xBB; 300])),
+                seen_section(0x0000, &Section::new(TableId::from(0x82), &[0xCC; 10])),
+            ],
+        );
+        for chunk_length in [1, 7, 188, 1000, stream.len()] {
+            assert_eq!(
+                demux(&stream, chunk_length),
+                expected,
+                "in chunks of {chunk_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_discontinuity_indicator_without_payload_drops_the_section_in_flight_and_sets_the_counter()
+    {
+        let across = short_section(0x80, &[0xBB; 300]);
+        let (head, tail) = across.split_at(184 - 1);
+        let stream = behind_null_packets(&[
+            packet(0x0000, true, 0, None, Some(&[&[0x00][..], head].concat())),
+            packet(0x0000, false, 5, Some(&[0x80]), None),
+            packet(0x0000, false, 6, None, Some(tail)),
+        ]);
+        assert_eq!(
+            demux(&stream, 1000),
+            acquired_then(PacketSize::Standard188, Vec::new())
+        );
     }
 
     #[test]

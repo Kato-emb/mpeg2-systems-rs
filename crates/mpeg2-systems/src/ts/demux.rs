@@ -206,12 +206,22 @@ enum Pending {
     Ready(Event<'static>),
     /// A range of the framer's buffer
     Unsynchronized(Range<usize>),
-    /// A section read whole, whose body is a range of the analyzer's buffer
+    /// A section read whole, without the body it lends
     Section {
         pid: Pid,
         section: Section<'static>,
-        body: Range<usize>,
+        body: Lent,
     },
+}
+
+/// Where the body of a queued section is
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Lent {
+    /// A range of the framer's buffer: the section lay inside one packet
+    Packet(Range<usize>),
+    /// A range of the reassembly buffer of the section's PID: the section
+    /// crossed packets
+    Reassembled(Range<usize>),
 }
 
 /// Transport Stream demuxer, which takes input of any length and reports what
@@ -295,8 +305,9 @@ impl Demuxer {
             let pending = match self.framer.step() {
                 Output::NeedMoreData => return None,
                 Output::Packet { range, .. } => {
+                    let start = range.start;
                     self.analyzer
-                        .analyze(self.framer.bytes(range), &mut self.pending);
+                        .analyze(self.framer.bytes(range), start, &mut self.pending);
                     continue;
                 }
                 // Why not keep the continuity history and the sections in
@@ -330,7 +341,10 @@ impl Demuxer {
             Pending::Section { pid, section, body } => Event::Section {
                 pid,
                 section: Section {
-                    body: self.analyzer.body(body),
+                    body: match body {
+                        Lent::Packet(range) => self.framer.bytes(range),
+                        Lent::Reassembled(range) => self.analyzer.reassembled(pid, range),
+                    },
                     ..section
                 },
             },

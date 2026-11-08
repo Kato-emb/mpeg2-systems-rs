@@ -34,7 +34,7 @@ fn push_all(payloads: &[(bool, Vec<u8>)]) -> Vec<Vec<Vec<u8>>> {
         .iter()
         .map(|(payload_unit_start_indicator, payload)| {
             let mut sections = Vec::new();
-            reassembler.push(*payload_unit_start_indicator, payload, &mut |section| {
+            reassembler.push(*payload_unit_start_indicator, payload, &mut |_, section| {
                 sections.push(section.to_vec());
             });
             sections
@@ -164,4 +164,50 @@ fn a_prefix_split_across_packets_is_joined() {
         push_all(&[(true, unit_start(&[], head)), (false, rest.to_vec())]),
         [vec![], vec![bytes.clone()]]
     );
+}
+
+#[test]
+fn a_section_inside_one_payload_is_not_copied() {
+    let first = section(0x00, &[0xAA; 9]);
+    let second = section(0x02, &[0xBB; 12]);
+    let mut reassembler = SectionReassembler::new();
+    let payload = unit_start(&[], &[first.clone(), second.clone()].concat());
+    let mut lent = Vec::new();
+    reassembler.push(true, &payload, &mut |completed, _| lent.push(completed));
+    assert_eq!(
+        (lent, reassembler.buffer.capacity()),
+        (
+            vec![
+                Completed::InPayload(1),
+                Completed::InPayload(1 + first.len()),
+            ],
+            0
+        )
+    );
+}
+
+#[test]
+fn a_section_across_packets_is_lent_from_the_buffer_until_released() {
+    let bytes = section(0x02, &[0xAA; 30]);
+    let after = section(0x02, &[0xBB; 5]);
+    let (head, tail) = bytes.split_at(10);
+    let mut reassembler = SectionReassembler::new();
+    reassembler.push(true, &unit_start(&[], head), &mut |_, _| {});
+    let mut lent = Vec::new();
+    reassembler.push(
+        true,
+        &unit_start(tail, &after),
+        &mut |completed, section| {
+            lent.push((completed, section.to_vec()));
+        },
+    );
+    assert_eq!(
+        lent,
+        [
+            (Completed::Reassembled(0), bytes.clone()),
+            (Completed::InPayload(1 + tail.len()), after.clone()),
+        ]
+    );
+    reassembler.release();
+    assert_eq!(reassembler.buffer, Vec::<u8>::new());
 }
