@@ -53,7 +53,9 @@ cargo test --workspace -- --ignored
 The `conformance` job pins the versions it installs; a difference between your
 tools and the pinned ones is a reason to look at the job, not at the test.
 `scripts/fetch-tools.sh <directory>` puts the same pinned tools in
-`<directory>/bin` on a Linux host, for you to put on `PATH`.
+`<directory>/bin` on an Ubuntu 24.04 host, for you to put on `PATH`; the
+TSDuck package is built for that release, and another distribution may lack
+the shared libraries it needs.
 
 ### Fixtures
 
