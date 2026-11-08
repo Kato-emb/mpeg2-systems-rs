@@ -349,9 +349,10 @@ impl<'input> PesPacket<'input> {
     ///
     /// The value [`Bounded`](PesPacketLength::Bounded) holds is what
     /// [`encoded_len`](Self::encoded_len) gives for the packet
-    /// [`read`](Self::read) reads from those bytes.
-    /// `packet_start_code_prefix` is not checked; [`read`](Self::read) checks
-    /// it. A length of 0, which the specification allows only for video
+    /// [`read`](Self::read) reads from those bytes, and
+    /// [`NeedMoreData`](PesPacketLength::NeedMoreData) is returned when fewer
+    /// than 6 are given. `packet_start_code_prefix` is not checked;
+    /// [`read`](Self::read) checks it. A length of 0, which the specification allows only for video
     /// carried in a Transport Stream, leaves the end of the packet to the next
     /// `payload_unit_start_indicator`.
     ///
