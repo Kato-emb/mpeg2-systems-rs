@@ -22,7 +22,6 @@ mod tests {
     use mpeg2_systems::psi::VersionNumber;
     use mpeg2_systems::psi::pat::{Program, ProgramAssociationSection, ProgramLoop};
     use mpeg2_systems::psi::pmt::{self, TsProgramMapSection};
-    use mpeg2_systems::psi::section::Section;
     use mpeg2_systems::stream_type::StreamType;
     use mpeg2_systems::time::{ClockReference, Timestamp};
     use mpeg2_systems::ts::Pid;
@@ -538,10 +537,8 @@ mod tests {
         .unwrap();
         let mut pat = ProgramAssociationSection::new(1, VersionNumber::try_from(0).unwrap());
         pat.programs = ProgramLoop::from(&programs[..]);
-        let mut section = Vec::new();
-        pat.write(&mut section).unwrap();
         muxer
-            .write_section(Pid::PAT, &Section::read(&section).unwrap(), &mut written)
+            .write_program_association_section(&pat, &mut written)
             .unwrap();
         let mut streams = Vec::new();
         pmt::ElementaryStreamLoop::write_from(
@@ -555,10 +552,8 @@ mod tests {
         let mut pmt = TsProgramMapSection::new(1, VersionNumber::try_from(0).unwrap());
         pmt.pcr_pid = Some(pid(VIDEO_PID));
         pmt.elementary_streams = pmt::ElementaryStreamLoop::from(&streams[..]);
-        let mut section = Vec::new();
-        pmt.write(&mut section).unwrap();
         muxer
-            .write_section(pid(0x1000), &Section::read(&section).unwrap(), &mut written)
+            .write_ts_program_map_section(pid(0x1000), &pmt, &mut written)
             .unwrap();
         let mut expected: BTreeMap<u64, Vec<Timing>> = BTreeMap::new();
         for (index, (timing, payload)) in video.iter().enumerate() {

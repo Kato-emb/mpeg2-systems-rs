@@ -15,7 +15,6 @@
 //! use mpeg2_systems::psi::VersionNumber;
 //! use mpeg2_systems::psi::pat::{Program, ProgramAssociationSection, ProgramLoop};
 //! use mpeg2_systems::psi::pmt::{ElementaryStream, ElementaryStreamLoop, TsProgramMapSection};
-//! use mpeg2_systems::psi::section::Section;
 //! use mpeg2_systems::stream_type::StreamType;
 //! use mpeg2_systems::time::{ClockReference, Timestamp};
 //! use mpeg2_systems::ts::Pid;
@@ -37,9 +36,7 @@
 //! )?;
 //! let mut pat = ProgramAssociationSection::new(1, VersionNumber::try_from(0)?);
 //! pat.programs = ProgramLoop::from(&programs[..]);
-//! let mut section = Vec::new();
-//! pat.write(&mut section)?;
-//! muxer.write_section(Pid::PAT, &Section::read(&section)?, &mut stream)?;
+//! muxer.write_program_association_section(&pat, &mut stream)?;
 //! // The PMT, its PCR on the video PID
 //! let mut streams = Vec::new();
 //! ElementaryStreamLoop::write_from(
@@ -49,9 +46,7 @@
 //! let mut pmt = TsProgramMapSection::new(1, VersionNumber::try_from(0)?);
 //! pmt.pcr_pid = Some(video_pid);
 //! pmt.elementary_streams = ElementaryStreamLoop::from(&streams[..]);
-//! let mut section = Vec::new();
-//! pmt.write(&mut section)?;
-//! muxer.write_section(pmt_pid, &Section::read(&section)?, &mut stream)?;
+//! muxer.write_ts_program_map_section(pmt_pid, &pmt, &mut stream)?;
 //! // An access unit, with the PCR of the program
 //! let access_unit = vec![0xaa; 1_000];
 //! let mut header = OptionalHeader::new();
@@ -82,6 +77,9 @@ use core::fmt;
 
 use crate::field::write_or_truncate;
 use crate::pes::{self, PesPacket, StreamId};
+use crate::psi::cat::{self, CaSection};
+use crate::psi::pat::{self, ProgramAssociationSection};
+use crate::psi::pmt::{self, TsProgramMapSection};
 use crate::psi::section::{self, Section};
 use crate::time::ClockReference;
 use crate::ts::adaptation_field::AdaptationField;
@@ -133,6 +131,21 @@ pub enum Error {
         /// How the section failed
         error: section::Error,
     },
+    /// The program association section could not be written
+    ProgramAssociationSection {
+        /// How the section failed
+        error: pat::Error,
+    },
+    /// The TS program map section could not be written
+    TsProgramMapSection {
+        /// How the section failed
+        error: pmt::Error,
+    },
+    /// The CA section could not be written
+    CaSection {
+        /// How the section failed
+        error: cat::Error,
+    },
     /// A Transport Packet could not be written
     Packet {
         /// How the Transport Packet failed
@@ -155,6 +168,16 @@ impl fmt::Display for Error {
             ),
             Self::PesPacket { .. } => write!(formatter, "a PES packet could not be written"),
             Self::Section { .. } => write!(formatter, "a section could not be written"),
+            Self::ProgramAssociationSection { .. } => {
+                write!(
+                    formatter,
+                    "a program association section could not be written"
+                )
+            }
+            Self::TsProgramMapSection { .. } => {
+                write!(formatter, "a TS program map section could not be written")
+            }
+            Self::CaSection { .. } => write!(formatter, "a CA section could not be written"),
             Self::Packet { .. } => write!(formatter, "a Transport Packet could not be written"),
         }
     }
@@ -165,6 +188,9 @@ impl core::error::Error for Error {
         match self {
             Self::PesPacket { error } => Some(error),
             Self::Section { error } => Some(error),
+            Self::ProgramAssociationSection { error } => Some(error),
+            Self::TsProgramMapSection { error } => Some(error),
+            Self::CaSection { error } => Some(error),
             Self::Packet { error } => Some(error),
             Self::Pid { .. } | Self::StreamId { .. } => None,
         }
@@ -272,6 +298,98 @@ impl Muxer {
         section: &Section<'_>,
         out: &mut Vec<u8>,
     ) -> Result<usize, Error> {
+        self.write_section_with(
+            pid,
+            |out| section.write(out).map_err(|error| Error::Section { error }),
+            out,
+        )
+    }
+
+    /// Appends `section`, the PAT, to `out` as Transport Packets of the PID
+    /// of the PAT, and returns how many it wrote
+    ///
+    /// The packets are those [`write_section`](Self::write_section) writes.
+    ///
+    /// # Errors
+    ///
+    /// * [`ProgramAssociationSection`](Error::ProgramAssociationSection):
+    ///   [`ProgramAssociationSection::write`] refuses the section.
+    pub fn write_program_association_section(
+        &mut self,
+        section: &ProgramAssociationSection<'_>,
+        out: &mut Vec<u8>,
+    ) -> Result<usize, Error> {
+        self.write_section_with(
+            Pid::PAT,
+            |out| {
+                section
+                    .write(out)
+                    .map_err(|error| Error::ProgramAssociationSection { error })
+            },
+            out,
+        )
+    }
+
+    /// Appends `section`, a PMT, to `out` as Transport Packets of `pid`, its
+    /// `program_map_PID`, and returns how many it wrote
+    ///
+    /// The packets are those [`write_section`](Self::write_section) writes.
+    ///
+    /// # Errors
+    ///
+    /// * [`Pid`](Error::Pid): `pid` is that of null packets.
+    /// * [`TsProgramMapSection`](Error::TsProgramMapSection):
+    ///   [`TsProgramMapSection::write`] refuses the section.
+    pub fn write_ts_program_map_section(
+        &mut self,
+        pid: Pid,
+        section: &TsProgramMapSection<'_>,
+        out: &mut Vec<u8>,
+    ) -> Result<usize, Error> {
+        self.write_section_with(
+            pid,
+            |out| {
+                section
+                    .write(out)
+                    .map_err(|error| Error::TsProgramMapSection { error })
+            },
+            out,
+        )
+    }
+
+    /// Appends `section`, the CAT, to `out` as Transport Packets of the PID
+    /// of the CAT, and returns how many it wrote
+    ///
+    /// The packets are those [`write_section`](Self::write_section) writes.
+    ///
+    /// # Errors
+    ///
+    /// * [`CaSection`](Error::CaSection): [`CaSection::write`] refuses the
+    ///   section.
+    pub fn write_ca_section(
+        &mut self,
+        section: &CaSection<'_>,
+        out: &mut Vec<u8>,
+    ) -> Result<usize, Error> {
+        self.write_section_with(
+            Pid::CAT,
+            |out| {
+                section
+                    .write(out)
+                    .map_err(|error| Error::CaSection { error })
+            },
+            out,
+        )
+    }
+
+    /// Appends the section `write_section` writes as Transport Packets of
+    /// `pid`, after a `pointer_field` of 0, and returns how many it wrote
+    fn write_section_with(
+        &mut self,
+        pid: Pid,
+        write_section: impl FnOnce(&mut Vec<u8>) -> Result<(), Error>,
+        out: &mut Vec<u8>,
+    ) -> Result<usize, Error> {
         if pid == Pid::NULL {
             return Err(Error::Pid { pid });
         }
@@ -279,7 +397,7 @@ impl Muxer {
             pid,
             |out| {
                 out.push(POINTER_FIELD);
-                section.write(out).map_err(|error| Error::Section { error })
+                write_section(out)
             },
             None,
             Stuffing::Payload,

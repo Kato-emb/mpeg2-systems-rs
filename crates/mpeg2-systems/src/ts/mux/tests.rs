@@ -3,7 +3,10 @@ use alloc::vec::Vec;
 
 use super::*;
 use crate::pes::OptionalHeader;
-use crate::psi::TableId;
+use crate::psi::cat::CaSection;
+use crate::psi::pat::{self, Program, ProgramAssociationSection, ProgramLoop};
+use crate::psi::pmt::{self, TsProgramMapSection};
+use crate::psi::{TableId, VersionNumber};
 use crate::time::Timestamp;
 use crate::ts::adaptation_field::{self, AdaptationField};
 use crate::ts::packet::TransportPacket;
@@ -434,4 +437,124 @@ fn a_section_the_section_writer_refuses_is_refused_leaving_out_as_it_was() {
         }
     );
     assert_eq!(out, [0x47]);
+}
+
+/// The payload of the one Transport Packet a short section goes into
+fn section_payload(section: &[u8]) -> Vec<u8> {
+    let mut payload = vec![0x00];
+    payload.extend_from_slice(section);
+    payload.resize(184, 0xFF);
+    payload
+}
+
+#[test]
+fn a_pat_goes_on_the_pat_pid_as_its_section() {
+    let mut programs = Vec::new();
+    ProgramLoop::write_from(
+        [Program::ProgramMap {
+            program_number: 1.try_into().unwrap(),
+            program_map_pid: pid(0x1000),
+        }],
+        &mut programs,
+    )
+    .unwrap();
+    let mut pat = ProgramAssociationSection::new(1, VersionNumber::try_from(0).unwrap());
+    pat.programs = ProgramLoop::from(&programs[..]);
+    let mut bytes = Vec::new();
+    pat.write(&mut bytes).unwrap();
+    let payload = section_payload(&bytes);
+    let mut out = Vec::new();
+
+    let written = Muxer::new()
+        .write_program_association_section(&pat, &mut out)
+        .unwrap();
+
+    assert_eq!(written, 1);
+    assert_eq!(packets(&out), [packet(Pid::PAT, 0, true, None, &payload)]);
+}
+
+#[test]
+fn a_pmt_goes_on_the_pid_given_as_its_section() {
+    let mut pmt = TsProgramMapSection::new(1, VersionNumber::try_from(0).unwrap());
+    pmt.pcr_pid = Some(pid(0x100));
+    let mut bytes = Vec::new();
+    pmt.write(&mut bytes).unwrap();
+    let payload = section_payload(&bytes);
+    let mut out = Vec::new();
+
+    Muxer::new()
+        .write_ts_program_map_section(pid(0x1000), &pmt, &mut out)
+        .unwrap();
+
+    assert_eq!(
+        packets(&out),
+        [packet(pid(0x1000), 0, true, None, &payload)]
+    );
+}
+
+#[test]
+fn a_cat_goes_on_the_cat_pid_as_its_section() {
+    let cat = CaSection::new(VersionNumber::try_from(0).unwrap());
+    let mut bytes = Vec::new();
+    cat.write(&mut bytes).unwrap();
+    let payload = section_payload(&bytes);
+    let mut out = Vec::new();
+
+    Muxer::new().write_ca_section(&cat, &mut out).unwrap();
+
+    assert_eq!(packets(&out), [packet(Pid::CAT, 0, true, None, &payload)]);
+}
+
+#[test]
+fn a_table_its_writer_refuses_is_refused_leaving_out_and_the_counter_as_they_were() {
+    let mut programs = Vec::new();
+    let program = Program::ProgramMap {
+        program_number: 1.try_into().unwrap(),
+        program_map_pid: pid(0x1000),
+    };
+    ProgramLoop::write_from([program, program], &mut programs).unwrap();
+    let mut pat = ProgramAssociationSection::new(1, VersionNumber::try_from(0).unwrap());
+    pat.programs = ProgramLoop::from(&programs[..]);
+    let mut pmt = TsProgramMapSection::new(1, VersionNumber::try_from(0).unwrap());
+    pmt.pcr_pid = Some(pid(0x0005));
+    let mut muxer = Muxer::new();
+    let mut out = vec![0x47];
+
+    let errors = [
+        muxer.write_program_association_section(&pat, &mut out),
+        muxer.write_ts_program_map_section(pid(0x1000), &pmt, &mut out),
+        muxer.write_ts_program_map_section(
+            Pid::NULL,
+            &TsProgramMapSection::new(1, VersionNumber::try_from(0).unwrap()),
+            &mut out,
+        ),
+    ];
+
+    assert_eq!(
+        errors,
+        [
+            Err(Error::ProgramAssociationSection {
+                error: pat::Error::ProgramNumber { program_number: 1 }
+            }),
+            Err(Error::TsProgramMapSection {
+                error: pmt::Error::PcrPid { pid: pid(0x0005) }
+            }),
+            Err(Error::Pid { pid: Pid::NULL }),
+        ]
+    );
+    assert_eq!(out, [0x47]);
+    let mut one_program = Vec::new();
+    ProgramLoop::write_from([program], &mut one_program).unwrap();
+    pat.programs = ProgramLoop::from(&one_program[..]);
+    let mut bytes = Vec::new();
+    pat.write(&mut bytes).unwrap();
+    let payload = section_payload(&bytes);
+    let mut written = Vec::new();
+    muxer
+        .write_program_association_section(&pat, &mut written)
+        .unwrap();
+    assert_eq!(
+        packets(&written),
+        [packet(Pid::PAT, 0, true, None, &payload)]
+    );
 }

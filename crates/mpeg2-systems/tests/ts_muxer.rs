@@ -23,7 +23,6 @@ mod tests {
     use mpeg2_systems::psi::VersionNumber;
     use mpeg2_systems::psi::pat::{ProgramAssociationSection, ProgramLoop};
     use mpeg2_systems::psi::pmt::{ElementaryStream, ElementaryStreamLoop, TsProgramMapSection};
-    use mpeg2_systems::psi::section::Section;
     use mpeg2_systems::stream_type::StreamType;
     use mpeg2_systems::time::{ClockReference, Timestamp};
     use mpeg2_systems::ts::Pid;
@@ -103,15 +102,6 @@ mod tests {
         read
     }
 
-    /// The section `write` writes, as a [`Section`] over `bytes`
-    fn section<E: core::fmt::Debug>(
-        bytes: &mut Vec<u8>,
-        write: impl FnOnce(&mut Vec<u8>) -> Result<(), E>,
-    ) -> Section<'_> {
-        write(bytes).unwrap();
-        Section::read(bytes).unwrap()
-    }
-
     fn pes_packet<'payload>(
         stream_id: u8,
         pts: u64,
@@ -147,21 +137,11 @@ mod tests {
         let mut pmt_section = TsProgramMapSection::new(1, VersionNumber::try_from(0).unwrap());
         pmt_section.pcr_pid = Some(pid(VIDEO_PID));
         pmt_section.elementary_streams = ElementaryStreamLoop::from(&streams[..]);
-        let mut bytes = Vec::new();
         muxer
-            .write_section(
-                Pid::PAT,
-                &section(&mut bytes, |out| pat_section.write(out)),
-                &mut stream,
-            )
+            .write_program_association_section(&pat_section, &mut stream)
             .unwrap();
-        let mut bytes = Vec::new();
         muxer
-            .write_section(
-                pid(PMT_PID),
-                &section(&mut bytes, |out| pmt_section.write(out)),
-                &mut stream,
-            )
+            .write_ts_program_map_section(pid(PMT_PID), &pmt_section, &mut stream)
             .unwrap();
 
         // Video: one access unit longer than PES_packet_length can state
@@ -236,15 +216,14 @@ mod tests {
         // and each goes back on a video PES packet of its own.
         let mut pcrs = VecDeque::new();
         while let Some(event) = demuxer.poll_event() {
-            let mut bytes = Vec::new();
             if let Event::ProgramAssociationSection(pat) = &event {
-                let section = section(&mut bytes, |out| pat.write(out));
                 muxer
-                    .write_section(Pid::PAT, &section, &mut stream)
+                    .write_program_association_section(pat, &mut stream)
                     .unwrap();
             } else if let Event::TsProgramMapSection { pid, section: pmt } = &event {
-                let section = section(&mut bytes, |out| pmt.write(out));
-                muxer.write_section(*pid, &section, &mut stream).unwrap();
+                muxer
+                    .write_ts_program_map_section(*pid, pmt, &mut stream)
+                    .unwrap();
             } else if let Event::ProgramClockReference {
                 program_clock_reference,
                 ..
