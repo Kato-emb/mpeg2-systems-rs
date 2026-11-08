@@ -51,30 +51,28 @@ fn frame(stream: &[u8], chunk_length: usize, fixed: Option<PacketSize>) -> Vec<S
     seen
 }
 
-/// The packets of a fixture whose first `sync_byte` is at `lead`
-fn packets_of(stream: &[u8], packet_size: PacketSize, lead: usize) -> Vec<Seen> {
-    (lead..stream.len())
+/// The packets of the units from `first_unit` on that hold a whole packet
+fn packets_of(stream: &[u8], packet_size: PacketSize, first_unit: usize) -> Vec<Seen> {
+    let prefix = packet_size.prefix();
+    (first_unit..)
         .step_by(packet_size.stride())
-        .map(|start| Seen::Packet {
-            bytes: stream[start..start + PACKET_LENGTH].to_vec(),
-            offset: u64::try_from(start).unwrap(),
+        .take_while(|unit| unit + prefix + PACKET_LENGTH <= stream.len())
+        .map(|unit| Seen::Packet {
+            bytes: stream[unit + prefix..unit + prefix + PACKET_LENGTH].to_vec(),
+            offset: u64::try_from(unit).unwrap(),
         })
         .collect()
 }
 
 #[test]
 fn every_fixture_is_cut_into_the_same_packets_whatever_the_chunk_length() {
-    for (stream, packet_size, lead) in [
-        (STANDARD_188, PacketSize::Standard188, 0),
-        (TIMESTAMPED_192, PacketSize::Timestamped192, 4),
-        (REED_SOLOMON_204, PacketSize::ReedSolomon204, 0),
+    for (stream, packet_size) in [
+        (STANDARD_188, PacketSize::Standard188),
+        (TIMESTAMPED_192, PacketSize::Timestamped192),
+        (REED_SOLOMON_204, PacketSize::ReedSolomon204),
     ] {
-        let mut expected = Vec::new();
-        if lead > 0 {
-            expected.push(Seen::Unsynchronized(stream[..lead].to_vec()));
-        }
-        expected.push(Seen::SyncAcquired(packet_size));
-        expected.extend(packets_of(stream, packet_size, lead));
+        let mut expected = vec![Seen::SyncAcquired(packet_size)];
+        expected.extend(packets_of(stream, packet_size, 0));
         for chunk_length in CHUNK_LENGTHS {
             assert_eq!(
                 frame(stream, chunk_length, None),
@@ -82,6 +80,36 @@ fn every_fixture_is_cut_into_the_same_packets_whatever_the_chunk_length() {
                 "{packet_size:?} in chunks of {chunk_length}"
             );
         }
+    }
+}
+
+#[test]
+fn a_192_byte_stream_cut_inside_a_timestamp_is_unsynchronized_up_to_its_next_unit() {
+    let stream = &TIMESTAMPED_192[2..];
+    let mut expected = vec![
+        Seen::Unsynchronized(stream[..190].to_vec()),
+        Seen::SyncAcquired(PacketSize::Timestamped192),
+    ];
+    expected.extend(packets_of(stream, PacketSize::Timestamped192, 190));
+    for chunk_length in CHUNK_LENGTHS {
+        assert_eq!(
+            frame(stream, chunk_length, None),
+            expected,
+            "in chunks of {chunk_length}"
+        );
+    }
+}
+
+#[test]
+fn the_end_salvages_a_last_packet_that_lacks_only_the_carrier_bytes_after_it() {
+    for (stream, packet_size, cut) in [
+        (TIMESTAMPED_192, PacketSize::Timestamped192, 192),
+        (REED_SOLOMON_204, PacketSize::ReedSolomon204, 16),
+    ] {
+        let stream = &stream[..stream.len() - cut];
+        let mut expected = vec![Seen::SyncAcquired(packet_size)];
+        expected.extend(packets_of(stream, packet_size, 0));
+        assert_eq!(frame(stream, 1000, None), expected, "{packet_size:?}");
     }
 }
 
@@ -150,11 +178,17 @@ fn a_stream_that_never_synchronizes_is_handed_back_in_bounded_pieces() {
 
 #[test]
 fn the_end_reports_a_partial_packet_on_the_grid_as_unsynchronized() {
-    let stream = &STANDARD_188[..188 * 10 + 100];
-    let mut expected = vec![Seen::SyncAcquired(PacketSize::Standard188)];
-    expected.extend(packets_of(&stream[..188 * 10], PacketSize::Standard188, 0));
-    expected.push(Seen::Unsynchronized(stream[188 * 10..].to_vec()));
-    assert_eq!(frame(stream, 1000, None), expected);
+    for (stream, packet_size) in [
+        (STANDARD_188, PacketSize::Standard188),
+        (TIMESTAMPED_192, PacketSize::Timestamped192),
+    ] {
+        let units = 10 * packet_size.stride();
+        let stream = &stream[..units + 100];
+        let mut expected = vec![Seen::SyncAcquired(packet_size)];
+        expected.extend(packets_of(&stream[..units], packet_size, 0));
+        expected.push(Seen::Unsynchronized(stream[units..].to_vec()));
+        assert_eq!(frame(stream, 1000, None), expected, "{packet_size:?}");
+    }
 }
 
 #[test]

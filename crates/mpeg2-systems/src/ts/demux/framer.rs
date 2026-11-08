@@ -1,8 +1,8 @@
 //! Framing of Transport Packets off the packet grid
 //!
-//! Every packet is reported with the input offset of its `sync_byte`, counted
-//! from the first byte ever handed to [`PacketFramer::extend`], and every
-//! other byte is reported as unsynchronized.
+//! Every packet is reported with the input offset of its unit, the stride of
+//! bytes it takes on the wire, counted from the first byte ever handed to
+//! [`PacketFramer::extend`]; every other byte is reported as unsynchronized.
 
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -42,14 +42,16 @@ enum Input {
     Ends,
 }
 
-/// What the framer saw at the front of the buffer on the locked grid
+/// What the framer saw in the unit at the front of the buffer on the locked
+/// grid
 enum FrameObservation {
     OnGrid,
     SyncByteMissing {
         found: u8,
     },
     NeedMoreData,
-    /// At the end of input, a packet on the grid without the stride after it
+    /// At the end of input, a packet on the grid without the carrier bytes
+    /// after it
     TrailingPacket,
     /// At the end of input, bytes that fill no packet
     Leftover,
@@ -69,7 +71,8 @@ pub(super) enum Output {
     Packet {
         /// The 188 bytes of the packet, without what the carrier added
         range: Range<usize>,
-        /// Input offset of the packet's `sync_byte`
+        /// Input offset of the packet's unit, from where the grid can be
+        /// picked up again
         offset: u64,
     },
     /// One `sync_byte` was missing; the grid is kept for now
@@ -138,7 +141,7 @@ impl PacketFramer {
     /// Ends the input at the bytes handed over so far
     ///
     /// The steps that follow cut a final packet the grid holds without the
-    /// stride after it, and report every other byte before the end as
+    /// carrier bytes after it, and report every other byte before the end as
     /// [`Output::Unsynchronized`]. Bytes extended after the end are framed
     /// once the end is reported.
     pub(super) fn finish(&mut self) {
@@ -255,7 +258,7 @@ impl PacketFramer {
                             consecutive_misses: 0,
                         },
                         consume: packet_size.stride(),
-                        output: Some(self.packet_at(consumed)),
+                        output: Some(self.packet_at(consumed, packet_size)),
                     },
                     FrameObservation::SyncByteMissing { .. }
                         if consecutive_misses.saturating_add(1) >= SYNC_LOSS_COUNT =>
@@ -282,8 +285,8 @@ impl PacketFramer {
                     // still holds if the caller resumes.
                     FrameObservation::TrailingPacket => Transition {
                         next_state: self.state,
-                        consume: PACKET_LENGTH,
-                        output: Some(self.packet_at(consumed)),
+                        consume: packet_size.prefix().saturating_add(PACKET_LENGTH),
+                        output: Some(self.packet_at(consumed, packet_size)),
                     },
                     // Why report what is left rather than drop it: a byte
                     // dropped without an event breaks the guarantee that
@@ -315,38 +318,40 @@ impl PacketFramer {
         }
     }
 
-    fn packet_at(&self, start: usize) -> Output {
+    /// The packet of the unit that starts at `start`
+    fn packet_at(&self, start: usize, packet_size: PacketSize) -> Output {
+        let packet_start = start.saturating_add(packet_size.prefix());
         Output::Packet {
-            range: start..start.saturating_add(PACKET_LENGTH),
+            range: packet_start..packet_start.saturating_add(PACKET_LENGTH),
             offset: self.offset_of(start),
         }
     }
 }
 
-/// Classifies the front of `bytes` against the locked grid
+/// Classifies the unit at the front of `bytes` against the locked grid
 fn observe(bytes: &[u8], packet_size: PacketSize, input: Input) -> FrameObservation {
-    match (bytes.first(), input) {
-        (None, _) => FrameObservation::NeedMoreData,
-        // Why a stride, not a packet, before cutting mid-stream: the stride
-        // holds the next packet's carrier bytes (192's timestamp), so a packet
-        // is not cut while what follows it may still be a partial stride.
-        (Some(_), Input::Continues) if bytes.len() < packet_size.stride() => {
-            FrameObservation::NeedMoreData
+    let prefix = packet_size.prefix();
+    match (bytes.get(prefix), bytes.len(), input) {
+        (Some(&SYNC_BYTE), length, _) if length >= packet_size.stride() => FrameObservation::OnGrid,
+        (Some(&found), length, _) if length >= packet_size.stride() => {
+            FrameObservation::SyncByteMissing { found }
         }
-        // Why PACKET_LENGTH, not a stride, at the end: no next carrier bytes
-        // will arrive, so a packet's worth on the grid is a whole packet.
-        // 192's last packet has no timestamp after it and would otherwise be
-        // lost.
-        (Some(&SYNC_BYTE), Input::Ends) if bytes.len() < packet_size.stride() => {
-            if bytes.len() >= PACKET_LENGTH {
-                FrameObservation::TrailingPacket
-            } else {
-                FrameObservation::Leftover
-            }
+        // Why wait for the whole unit mid-stream, not only its packet: the
+        // unit is consumed whole, so a packet is not cut while the carrier
+        // bytes after it (204's parity) may still be on their way.
+        (_, _, Input::Continues) => FrameObservation::NeedMoreData,
+        // Why a packet, not a whole unit, at the end: no carrier bytes after
+        // it will arrive, so the prefix and 188 bytes on the grid are a whole
+        // packet; a 204-byte stream cut before its last parity would
+        // otherwise lose its last packet.
+        (Some(&SYNC_BYTE), length, Input::Ends)
+            if length >= prefix.saturating_add(PACKET_LENGTH) =>
+        {
+            FrameObservation::TrailingPacket
         }
-        (Some(_), Input::Ends) if bytes.len() < packet_size.stride() => FrameObservation::Leftover,
-        (Some(&SYNC_BYTE), _) => FrameObservation::OnGrid,
-        (Some(&found), _) => FrameObservation::SyncByteMissing { found },
+        // Why no empty case: step ends the input once every byte before the
+        // end is consumed, so the bytes at the end are never empty here.
+        (_, _, Input::Ends) => FrameObservation::Leftover,
     }
 }
 

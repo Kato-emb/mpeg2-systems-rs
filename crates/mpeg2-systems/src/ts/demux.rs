@@ -43,8 +43,8 @@ pub enum Event<'a> {
     ///
     /// Reported for the bytes before the grid is found, those the search
     /// walks past after [`Error::SyncLost`], and those [`Demuxer::finish`]
-    /// leaves that fill no packet. A long run arrives as several events, each
-    /// at most 64 KiB, so the bytes the demuxer holds stay bounded. The bytes
+    /// leaves that fill no packet. A long run arrives as several events, so
+    /// the bytes the demuxer holds stay bounded. The bytes
     /// of these events and of the packets cut add up to every byte handed to
     /// [`Demuxer::handle_input`].
     Unsynchronized {

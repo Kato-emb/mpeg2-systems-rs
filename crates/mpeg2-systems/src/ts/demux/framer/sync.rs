@@ -35,20 +35,31 @@ impl PacketSize {
             Self::ReedSolomon204 => 204,
         }
     }
+
+    /// Bytes the carrier puts before each `sync_byte`
+    pub(super) const fn prefix(self) -> usize {
+        match self {
+            Self::Timestamped192 => 4,
+            Self::Standard188 | Self::ReedSolomon204 => 0,
+        }
+    }
 }
 
 /// What the search saw at the front of the bytes it has not ruled on
+///
+/// A unit is the stride of bytes one packet takes on the wire; it starts
+/// [`PacketSize::prefix`] bytes before its `sync_byte`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SearchObservation {
-    /// This many bytes before the next `sync_byte` value, or to the end
+    /// This many bytes before the first place a unit can start
     LeadingGarbage(usize),
-    /// A `sync_byte` value at the front repeats at this period
+    /// A unit starts at the front, and its `sync_byte` repeats at this period
     GridConfirmed(PacketSize),
     /// Too few bytes to confirm or rule out every candidate period
     Undecided,
     /// Too few bytes to decide, and no more will follow
     UndecidedAtEnd,
-    /// A `sync_byte` value at the front that no candidate period repeats
+    /// A unit could start at the front, but no candidate period repeats it
     NoGridAtFront,
 }
 
@@ -76,25 +87,49 @@ pub(super) fn observe(
     garbage_limit: usize,
     input: Input,
 ) -> SearchObservation {
-    let scanned = bytes.get(..garbage_limit).unwrap_or(bytes);
-    let leading_garbage = scanned
-        .iter()
-        .position(|&byte| byte == SYNC_BYTE)
-        .unwrap_or(scanned.len());
-    if leading_garbage > 0 {
-        return SearchObservation::LeadingGarbage(leading_garbage);
-    }
     let candidates = fixed
         .as_ref()
         .map_or(&CANDIDATES[..], core::slice::from_ref);
+    let longest_prefix = candidates
+        .iter()
+        .map(|packet_size| packet_size.prefix())
+        .max()
+        .unwrap_or_default();
+    // Why stop short of the end by the longest prefix when no unit start is
+    // found: a sync_byte past the end can still start a unit that many bytes
+    // before it.
+    let horizon = garbage_limit.min(bytes.len().saturating_sub(longest_prefix));
+    let mut leading_garbage = horizon;
+    let scanned = bytes
+        .get(..horizon.saturating_add(longest_prefix))
+        .unwrap_or(bytes);
+    for (index, _) in scanned
+        .iter()
+        .enumerate()
+        .filter(|&(_, &byte)| byte == SYNC_BYTE)
+    {
+        // Why stop here: a later sync_byte starts a unit at most the longest
+        // prefix before it, so none can start one earlier than found.
+        if index >= leading_garbage.saturating_add(longest_prefix) {
+            break;
+        }
+        for packet_size in candidates {
+            if let Some(start) = index.checked_sub(packet_size.prefix()) {
+                leading_garbage = leading_garbage.min(start);
+            }
+        }
+    }
+    if leading_garbage > 0 {
+        return SearchObservation::LeadingGarbage(leading_garbage);
+    }
     let mut undecided = false;
     for &packet_size in candidates {
-        match check_grid(bytes, packet_size.stride()) {
+        match check_grid(bytes, packet_size) {
             // Why not tie-break against a larger period confirming first:
             // candidates run smallest-first, and a smaller period being
             // undecided means the bytes are too few for any larger one to
             // confirm (188 undecided => len <= 4 * 188, but 192 needs
-            // 4 * 192 + 1), so the first Confirmed is always the smallest
+            // 4 + 4 * 192 + 1), so the first Confirmed is always the smallest
             // matching period.
             GridCheck::Confirmed => return SearchObservation::GridConfirmed(packet_size),
             GridCheck::RuledOut => {}
@@ -108,9 +143,14 @@ pub(super) fn observe(
     }
 }
 
-/// Checks the `sync_byte` cadence at offsets `0, stride, 2 * stride, ...`
-fn check_grid(bytes: &[u8], stride: usize) -> GridCheck {
-    let sampled = bytes.iter().step_by(stride).take(SYNC_LOCK_COUNT);
+/// Checks the `sync_byte` cadence of units starting at the front
+fn check_grid(bytes: &[u8], packet_size: PacketSize) -> GridCheck {
+    let sampled = bytes
+        .get(packet_size.prefix()..)
+        .unwrap_or_default()
+        .iter()
+        .step_by(packet_size.stride())
+        .take(SYNC_LOCK_COUNT);
     if sampled.clone().any(|&byte| byte != SYNC_BYTE) {
         GridCheck::RuledOut
     } else if sampled.count() < SYNC_LOCK_COUNT {
@@ -151,7 +191,7 @@ pub(super) mod tests {
         for packet_size in CANDIDATES {
             assert_eq!(
                 observe(
-                    &grid(packet_size.stride(), SYNC_LOCK_COUNT, 0),
+                    &grid(packet_size.stride(), SYNC_LOCK_COUNT, packet_size.prefix()),
                     None,
                     usize::MAX,
                     Input::Continues
@@ -175,7 +215,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn bytes_before_the_first_sync_byte_are_leading_garbage() {
+    fn a_192_byte_unit_starts_at_the_timestamp_before_its_sync_byte() {
         assert_eq!(
             observe(
                 &grid(192, SYNC_LOCK_COUNT, 4),
@@ -183,7 +223,46 @@ pub(super) mod tests {
                 usize::MAX,
                 Input::Continues
             ),
-            SearchObservation::LeadingGarbage(4)
+            SearchObservation::GridConfirmed(PacketSize::Timestamped192)
+        );
+    }
+
+    #[test]
+    fn bytes_before_the_first_unit_are_leading_garbage() {
+        assert_eq!(
+            observe(
+                &grid(188, SYNC_LOCK_COUNT, 10),
+                Some(PacketSize::Standard188),
+                usize::MAX,
+                Input::Continues
+            ),
+            SearchObservation::LeadingGarbage(10)
+        );
+    }
+
+    #[test]
+    fn detection_keeps_the_bytes_a_timestamp_could_take_before_a_sync_byte() {
+        assert_eq!(
+            observe(
+                &grid(188, SYNC_LOCK_COUNT, 10),
+                None,
+                usize::MAX,
+                Input::Continues
+            ),
+            SearchObservation::LeadingGarbage(10 - 4)
+        );
+    }
+
+    #[test]
+    fn a_sync_byte_with_no_room_for_a_timestamp_starts_no_192_byte_unit() {
+        assert_eq!(
+            observe(
+                &grid(192, SYNC_LOCK_COUNT, 2),
+                Some(PacketSize::Timestamped192),
+                usize::MAX,
+                Input::Continues
+            ),
+            SearchObservation::LeadingGarbage(2 + 192 - 4)
         );
     }
 

@@ -88,10 +88,7 @@ mod tests {
             (
                 TIMESTAMPED_192,
                 PacketSize::Timestamped192,
-                vec![
-                    Seen::Unsynchronized(TIMESTAMPED_192[..4].to_vec()),
-                    Seen::SyncAcquired(PacketSize::Timestamped192),
-                ],
+                vec![Seen::SyncAcquired(PacketSize::Timestamped192)],
             ),
             (
                 REED_SOLOMON_204,
@@ -107,6 +104,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_192_byte_stream_cut_inside_a_timestamp_is_unsynchronized_up_to_its_next_unit() {
+        let stream = &TIMESTAMPED_192[2..];
+        for chunk_length in [1, 7, 188, 1000, stream.len()] {
+            assert_eq!(
+                demux(stream, chunk_length),
+                [
+                    Seen::Unsynchronized(stream[..190].to_vec()),
+                    Seen::SyncAcquired(PacketSize::Timestamped192),
+                ],
+                "in chunks of {chunk_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_192_byte_stream_cut_between_units_leaves_nothing_at_the_end() {
+        let stream = &TIMESTAMPED_192[..TIMESTAMPED_192.len() - 192];
+        assert_eq!(
+            demux(stream, 1000),
+            [Seen::SyncAcquired(PacketSize::Timestamped192)]
+        );
     }
 
     #[test]
