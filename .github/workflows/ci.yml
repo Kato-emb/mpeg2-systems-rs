@@ -32,6 +32,7 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
       - run: cargo fmt --manifest-path benches/Cargo.toml --check
+      - run: cargo fmt --manifest-path fuzz/Cargo.toml --check
       - uses: crate-ci/typos@4c8b7f51ca60df14e3c5ca82770dfbbe6c3dae85 # v1.52.0
       # A TODO/FIXME must carry an issue link or owner: `TODO(#12):`, `TODO(name):`, or a URL.
       - name: Forbid bare TODO/FIXME markers
@@ -65,6 +66,9 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo hack clippy --workspace --feature-powerset --all-targets -- -D warnings
       - run: cargo clippy --manifest-path benches/Cargo.toml --all-targets -- -D warnings
+      # The fuzz targets are a workspace of their own, which the run above never
+      # reaches. They build on stable; only running them needs a nightly.
+      - run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
 
   # The tests run instrumented, so one run both gates and measures. Coverage is
   # reported, never gated on: a threshold rewards tests that execute lines
@@ -190,6 +194,56 @@ jobs:
       # The alloc-free build has doctests of its own to pass, without the items alloc adds.
       - run: cargo test --doc -p mpeg2-systems --no-default-features
 
+  # Each fuzz target for a fixed time, seeded with the fixtures. A failure is
+  # a bug, so it blocks the merge. Bounded by time rather than by a number of
+  # runs: the corpus a run starts from grows, and with it the time each run
+  # takes, so a number of runs would not bound the wait. The nightly is pinned
+  # so that a regression in it cannot block a change of ours; it is raised by
+  # hand. One job per target, so the wait is the longest target rather than
+  # the sum of them.
+  fuzz:
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [ts_demux]
+    runs-on: ubuntu-latest
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: nightly-2026-10-13
+      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: fuzz
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The corpus the fuzz job of fuzz.yml grew, where there is one.
+      # The key is never saved here: a run only restores by the prefix.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/corpus
+          key: fuzz-corpus-${{ matrix.target }}-
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      # The first directory takes what a run adds, and is never kept. The seeds
+      # are copied out so that every path given is absolute.
+      - run: |
+          mkdir -p "$RUNNER_TEMP/seeds" "$RUNNER_TEMP/corpus"
+          cp fuzz/seeds/* "$RUNNER_TEMP/seeds/"
+      # The target is spelled out: the cargo-fuzz this action installs is a
+      # static musl binary, and defaults to the triple it was built for.
+      # LeakSanitizer rather than AddressSanitizer: unsafe code is forbidden in
+      # every crate the targets reach, so AddressSanitizer's memory checks have
+      # nothing to find and slow every run. Not no sanitizer at all: libFuzzer
+      # fails a run on an allocation past its limit only through a sanitizer's
+      # allocator, and an allocation sized by the input is a bug here.
+      - run: cargo fuzz run "$TARGET" --target x86_64-unknown-linux-gnu --sanitizer leak "$RUNNER_TEMP/corpus" "$RUNNER_TEMP/seeds" -- -max_total_time=180
+
   # Advisories, license policy, banned crates and sources, per deny.toml.
   deny:
     runs-on: ubuntu-latest
@@ -202,13 +256,16 @@ jobs:
           tool: cargo-deny
       - run: cargo deny check
       - run: cargo deny --manifest-path benches/Cargo.toml check
+      # The fuzz targets are a workspace of their own, so the check above never
+      # sees libfuzzer-sys or what it pulls in.
+      - run: cargo deny --manifest-path fuzz/Cargo.toml check
 
   # The one check the main ruleset requires besides the PR title, so a job can
   # be added or renamed here without editing the ruleset. A skipped job passes:
   # `test` is skipped on pull requests by design.
   ci-success:
     if: always()
-    needs: [lint, clippy, coverage, test, msrv, no-std, docs, deny]
+    needs: [lint, clippy, coverage, test, msrv, no-std, docs, fuzz, deny]
     runs-on: ubuntu-latest
     steps:
       - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
