@@ -89,7 +89,7 @@ mod tests {
         muxer.write_pes_packets(&video_packet, &mut stream).unwrap();
         muxer.write_pes_packets(&audio_packet, &mut stream).unwrap();
         let pes_end = stream.len();
-        muxer.finish(&mut stream);
+        muxer.write_program_end_code(&mut stream);
 
         let hand_cut = cut_by_hand(&stream[pes_start..pes_end]);
         assert_eq!(

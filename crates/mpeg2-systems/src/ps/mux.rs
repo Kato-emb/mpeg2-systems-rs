@@ -35,7 +35,7 @@
 //! packet.optional_header = Some(header);
 //! assert_eq!(muxer.write_pes_packets(&packet, &mut stream)?, 2);
 //! // The end of the Program Stream
-//! muxer.finish(&mut stream);
+//! muxer.write_program_end_code(&mut stream);
 //!
 //! // Read back, the payloads of the PES packets join into the access unit
 //! let mut demuxer = Demuxer::new();
@@ -246,7 +246,7 @@ impl Muxer {
 
     /// Appends `MPEG_program_end_code`, which ends the Program Stream, to
     /// `out`
-    pub fn finish(&self, out: &mut Vec<u8>) {
+    pub fn write_program_end_code(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&MPEG_PROGRAM_END_CODE);
     }
 }
