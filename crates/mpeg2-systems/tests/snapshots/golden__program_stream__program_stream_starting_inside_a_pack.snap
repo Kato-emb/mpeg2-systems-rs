@@ -1,0 +1,16 @@
+---
+source: crates/mpeg2-systems/tests/golden.rs
+expression: "events_of(&PROGRAM[3000..])"
+---
+[
+    "Unsynchronized { 1096 bytes [65 49 33 b6 17 06 52 26 a0 b6 b8 83 bc 12 12 57 ..] }",
+    "SyncAcquired",
+    "PackHeader",
+    "PesPacket",
+    "PesPacket",
+    "PackHeader",
+    "PesPacket",
+    "PackHeader",
+    "PesPacket",
+    "PesPacket",
+]

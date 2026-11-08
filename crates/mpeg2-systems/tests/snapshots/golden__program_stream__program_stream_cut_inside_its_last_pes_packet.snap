@@ -1,0 +1,20 @@
+---
+source: crates/mpeg2-systems/tests/golden.rs
+expression: "events_of(&PROGRAM[..PROGRAM.len() - 700])"
+---
+[
+    "SyncAcquired",
+    "PackHeader",
+    "SystemHeader",
+    "PesPacket",
+    "PackHeader",
+    "PesPacket",
+    "PackHeader",
+    "PesPacket",
+    "PesPacket",
+    "PackHeader",
+    "PesPacket",
+    "PackHeader",
+    "PesPacket",
+    "Truncated { 548 bytes [00 00 01 be 04 da ff ff ff ff ff ff ff ff ff ff ..] }",
+]

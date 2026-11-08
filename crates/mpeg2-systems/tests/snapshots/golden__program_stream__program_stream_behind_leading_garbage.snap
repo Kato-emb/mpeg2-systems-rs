@@ -1,0 +1,21 @@
+---
+source: crates/mpeg2-systems/tests/golden.rs
+expression: events_of(&stream)
+---
+[
+    "Unsynchronized { 500 bytes [ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ..] }",
+    "SyncAcquired",
+    "PackHeader",
+    "SystemHeader",
+    "PesPacket",
+    "PackHeader",
+    "PesPacket",
+    "PackHeader",
+    "PesPacket",
+    "PesPacket",
+    "PackHeader",
+    "PesPacket",
+    "PackHeader",
+    "PesPacket",
+    "PesPacket",
+]

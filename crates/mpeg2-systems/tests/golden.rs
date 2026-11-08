@@ -84,3 +84,106 @@ mod tests {
         insta::assert_debug_snapshot!(events_of(&stream));
     }
 }
+
+/// Event sequences of the Program Stream demuxer across errors
+#[cfg(test)]
+#[cfg(feature = "alloc")]
+#[expect(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "streams are cut at constant offsets well inside their length"
+)]
+mod program_stream {
+    use mpeg2_systems::ps::demux::{Demuxer, Event};
+
+    /// A Program Stream FFmpeg wrote, carried over from the previous
+    /// implementation
+    const PROGRAM: &[u8] = include_bytes!("fixtures/program.ps");
+
+    /// Leading bytes of the lent bytes a snapshot shows
+    const PREVIEW_LENGTH: usize = 16;
+
+    fn preview(bytes: &[u8]) -> String {
+        let shown: Vec<String> = bytes
+            .iter()
+            .take(PREVIEW_LENGTH)
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let ellipsis = if bytes.len() > PREVIEW_LENGTH {
+            " .."
+        } else {
+            ""
+        };
+        format!("{} bytes [{}{ellipsis}]", bytes.len(), shown.join(" "))
+    }
+
+    /// The name of the variant `Debug` prints first
+    fn variant(debug: &str) -> String {
+        debug
+            .split([' ', '(', '{'])
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// The kind of the event, an error by its variants, and the bytes passed
+    /// over or cut short by their length and leading bytes
+    ///
+    /// The elements read are not shown: what they hold is checked against
+    /// the stream FFmpeg wrote, not pinned here.
+    fn describe(event: &Event<'_>) -> String {
+        match event {
+            Event::Unsynchronized { bytes } => format!("Unsynchronized {{ {} }}", preview(bytes)),
+            Event::Unframable { bytes } => format!("Unframable {{ {} }}", preview(bytes)),
+            Event::Truncated { bytes } => format!("Truncated {{ {} }}", preview(bytes)),
+            Event::Error(error) => {
+                let inner = core::error::Error::source(error)
+                    .map(|source| format!("{source:?}"))
+                    .unwrap_or_default();
+                format!(
+                    "Error({} {{ {} }})",
+                    variant(&format!("{error:?}")),
+                    variant(&inner)
+                )
+            }
+            Event::SyncAcquired => "SyncAcquired".to_owned(),
+            Event::PackHeader(_) => "PackHeader".to_owned(),
+            Event::SystemHeader(_) => "SystemHeader".to_owned(),
+            Event::ProgramStreamMap(_) => "ProgramStreamMap".to_owned(),
+            Event::PesPacket(_) => "PesPacket".to_owned(),
+            Event::ProgramEnd => "ProgramEnd".to_owned(),
+            other => format!("{other:?}"),
+        }
+    }
+
+    fn events_of(stream: &[u8]) -> Vec<String> {
+        let mut demuxer = Demuxer::new();
+        let mut events = Vec::new();
+        demuxer.handle_input(stream);
+        while let Some(event) = demuxer.poll_event() {
+            events.push(describe(&event));
+        }
+        demuxer.finish();
+        while let Some(event) = demuxer.poll_event() {
+            events.push(describe(&event));
+        }
+        events
+    }
+
+    #[test]
+    fn program_stream_behind_leading_garbage() {
+        let mut stream = vec![0xFF; 500];
+        stream.extend_from_slice(PROGRAM);
+        insta::assert_debug_snapshot!(events_of(&stream));
+    }
+
+    #[test]
+    fn program_stream_starting_inside_a_pack() {
+        insta::assert_debug_snapshot!(events_of(&PROGRAM[3000..]));
+    }
+
+    #[test]
+    fn program_stream_cut_inside_its_last_pes_packet() {
+        insta::assert_debug_snapshot!(events_of(&PROGRAM[..PROGRAM.len() - 700]));
+    }
+}
