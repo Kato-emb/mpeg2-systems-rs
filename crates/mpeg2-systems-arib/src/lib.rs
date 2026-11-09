@@ -1,12 +1,16 @@
 //! ARIB extensions to mpeg2-systems: the ARIB STD-B10 descriptors that lead
-//! from a Program Map Table to ARIB STD-B24 captions
+//! from a Program Map Table to ARIB STD-B24 captions, and the PES data that
+//! carries them
 //!
 //! The crate builds on the public API of [`mpeg2_systems`] alone. Its
 //! descriptors are converted from a [`RawDescriptor`] with `TryFrom`, as the
 //! descriptors of ISO/IEC 13818-1 are, and report through the same
-//! [`mpeg2_systems::descriptor::Error`], so one loop handles both.
+//! [`mpeg2_systems::descriptor::Error`], so one loop handles both. Its PES
+//! data is converted from the [`PesPacket`] the demuxer reports, the same
+//! way.
 //!
 //! [`RawDescriptor`]: mpeg2_systems::descriptor::RawDescriptor
+//! [`PesPacket`]: mpeg2_systems::pes::PesPacket
 //!
 //! # Finding the captions of a program
 //!
@@ -53,6 +57,33 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
+//! # Reading the data groups of a caption PES packet
+//!
+//! A PES packet of the caption elementary stream, such as the `packet` of
+//! the demuxer's `Event::PesPacket` on its PID, carries synchronized PES
+//! data, whose data is a data group. This packet, of caption management
+//! data, was written independently of this crate and read by FFmpeg's ARIB
+//! caption decoder:
+//!
+//! ```
+//! use mpeg2_systems::pes::PesPacket;
+//! use mpeg2_systems_arib::caption::data_group::{DataGroup, DataGroupId};
+//! use mpeg2_systems_arib::independent_pes::SynchronizedPesData;
+//!
+//! let bytes = [
+//!     0x00, 0x00, 0x01, 0xbd, 0x00, 0x1c, 0x80, 0x80, 0x05, 0x21, 0x00, 0x05, 0xbf, 0x21, 0x80,
+//!     0xff, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x3f, 0x01, 0x1a, 0x6a, 0x70, 0x6e, 0x80, 0x00,
+//!     0x00, 0x00, 0xb0, 0x78,
+//! ];
+//! let packet = PesPacket::read(&bytes)?;
+//! let data = SynchronizedPesData::try_from(&packet)?;
+//! let group = DataGroup::read(data.synchronized_pes_data_byte)?;
+//! // Data group 0 carries caption management data
+//! assert_eq!(group.data_group_id, DataGroupId::try_from(0)?);
+//! assert_eq!(group.data_group_data_byte.len(), 10);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
 //! # What the crate does not do
 //!
 //! - It does not read the SI tables of ARIB STD-B10, such as the NIT, the
@@ -63,6 +94,7 @@
 //! # Modules
 //!
 //! - [`descriptor`]: the ARIB STD-B10 descriptors
+//! - [`independent_pes`]: the PES data of ARIB STD-B24 Volume 3
 //! - [`caption`]: the syntax of ARIB STD-B24 captions
 //!
 //! # Features
@@ -77,3 +109,4 @@ extern crate alloc;
 
 pub mod caption;
 pub mod descriptor;
+pub mod independent_pes;
