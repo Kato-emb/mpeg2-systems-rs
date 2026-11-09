@@ -236,10 +236,7 @@ impl<'input> TsProgramMapSection<'input> {
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
-        super::LONG_SECTION_OVERHEAD
-            .saturating_add(PROGRAM_HEADER_LENGTH)
-            .saturating_add(self.program_info.0.len())
-            .saturating_add(self.elementary_streams.0.len())
+        encoded_len(self.program_info.0.len(), self.elementary_streams.0.len())
     }
 
     /// Appends the section to `out`, with its `CRC_32`
@@ -265,7 +262,7 @@ impl<'input> TsProgramMapSection<'input> {
     ///   [`RawDescriptor::write`](crate::descriptor::RawDescriptor::write).
     #[cfg(feature = "alloc")]
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
-        super::check_section_length(TableId::TS_PROGRAM_MAP, self.encoded_len())?;
+        check_encoded_len(self.encoded_len())?;
         if self.section_number != 0 || self.last_section_number != 0 {
             return Err(Error::SectionNumber {
                 section_number: self.section_number,
@@ -339,6 +336,44 @@ impl<'input> TsProgramMapSection<'input> {
         ));
         section
     }
+}
+
+/// Returns the bytes of a section whose descriptors of the program take
+/// `program_info_length` bytes and whose elementary stream loop takes
+/// `loop_length`
+const fn encoded_len(program_info_length: usize, loop_length: usize) -> usize {
+    super::LONG_SECTION_OVERHEAD
+        .saturating_add(PROGRAM_HEADER_LENGTH)
+        .saturating_add(program_info_length)
+        .saturating_add(loop_length)
+}
+
+/// Refuses a section whose descriptors of the program are `program_info` and
+/// whose elementary stream loop holds `elementary_streams`, from the lengths
+/// alone: an `ES_info_length` past its width, or a `section_length` larger
+/// than 1021
+#[cfg(feature = "alloc")]
+pub(crate) fn check_lengths<'stream>(
+    program_info: DescriptorLoop<'_>,
+    elementary_streams: impl IntoIterator<Item = ElementaryStream<'stream>>,
+) -> Result<(), Error> {
+    let loop_length = elementary_streams
+        .into_iter()
+        .try_fold(0_usize, |length, stream| {
+            elementary_stream::check_es_info_length(stream.es_info)?;
+            Ok::<_, Error>(length.saturating_add(stream.encoded_len()))
+        })?;
+    check_encoded_len(encoded_len(program_info.0.len(), loop_length))
+}
+
+/// Refuses a section of `encoded_len` bytes, its `section_length` larger
+/// than 1021
+#[cfg(feature = "alloc")]
+fn check_encoded_len(encoded_len: usize) -> Result<(), Error> {
+    Ok(super::check_section_length(
+        TableId::TS_PROGRAM_MAP,
+        encoded_len,
+    )?)
 }
 
 impl<'input> TryFrom<&Section<'input>> for TsProgramMapSection<'input> {

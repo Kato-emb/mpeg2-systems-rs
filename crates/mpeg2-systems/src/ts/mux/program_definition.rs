@@ -7,7 +7,7 @@ use core::num::NonZeroU16;
 use super::Error;
 use crate::psi::VersionNumber;
 use crate::psi::pat::{Program, ProgramAssociationSection, ProgramLoop};
-use crate::psi::pmt::{ElementaryStream, ElementaryStreamLoop, TsProgramMapSection};
+use crate::psi::pmt::{self, ElementaryStream, ElementaryStreamLoop, TsProgramMapSection};
 use crate::psi::section::Section;
 use crate::stream_type::StreamType;
 use crate::time::SystemTimeClock;
@@ -28,6 +28,17 @@ pub(super) struct ProgramDefinition {
     pub(super) streams: Vec<Stream>,
 }
 
+/// Refuses the PMT of `program_info` and `elementary_streams` where it would
+/// be longer than its syntax allows, from the lengths alone, before anything
+/// of them is copied
+pub(super) fn check_pmt_length<'stream>(
+    program_info: &[u8],
+    elementary_streams: impl IntoIterator<Item = ElementaryStream<'stream>>,
+) -> Result<(), Error> {
+    pmt::check_lengths(program_info.into(), elementary_streams)
+        .map_err(|error| Error::TsProgramMapSection { error })
+}
+
 /// A stream registered with the program
 #[derive(Debug, Clone)]
 pub(super) struct Stream {
@@ -36,8 +47,7 @@ pub(super) struct Stream {
     pub(super) es_info: Vec<u8>,
     /// The time of the STC the DTS (the PTS without one) of the last PES
     /// packet given on the stream samples, `None` before the first
-    // Why not the clock of the muxer: the clock follows every stream, and a
-    // stream may run behind another.
+    // Why not one time of the muxer: a stream may run behind another.
     pub(super) last_timestamp: Option<SystemTimeClock>,
 }
 
@@ -45,6 +55,15 @@ impl ProgramDefinition {
     /// Returns the stream registered on `pid`
     pub(super) fn stream(&self, pid: Pid) -> Option<&Stream> {
         self.streams.iter().find(|stream| stream.pid == pid)
+    }
+
+    /// Returns the latest `last_timestamp` of the streams, the time of the
+    /// STC the input has reached, `None` before the first time stamp
+    pub(super) fn latest_timestamp(&self) -> Option<SystemTimeClock> {
+        self.streams
+            .iter()
+            .filter_map(|stream| stream.last_timestamp)
+            .max()
     }
 
     /// Returns the PID the PCR goes on: the `pcr_pid` registered, or else
@@ -113,7 +132,7 @@ impl ProgramDefinition {
     }
 
     /// Returns the entry of the elementary stream loop of each stream
-    fn elementary_streams(&self) -> impl Iterator<Item = ElementaryStream<'_>> {
+    pub(super) fn elementary_streams(&self) -> impl Iterator<Item = ElementaryStream<'_>> {
         self.streams.iter().map(|stream| {
             let mut entry = ElementaryStream::new(stream.stream_type, stream.pid);
             entry.es_info = stream.es_info.as_slice().into();

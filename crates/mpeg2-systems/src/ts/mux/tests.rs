@@ -916,3 +916,111 @@ fn a_psi_interval_of_duration_max_sends_the_pat_and_the_pmt_before_the_first_pes
         .collect();
     assert_eq!(psi_of_each(config, &inputs), expected);
 }
+
+/// Whole descriptors of tag 0x80 that come to `length` bytes, which is not 1
+fn descriptors(length: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut rest = length;
+    while rest > 0 {
+        let body = (rest - 2).min(255);
+        bytes.extend([0x80, u8::try_from(body).unwrap()]);
+        bytes.extend(core::iter::repeat_n(0xaa, body));
+        rest -= 2 + body;
+    }
+    bytes
+}
+
+#[test]
+fn a_program_is_taken_whose_descriptors_fill_the_pmt_and_refused_one_byte_past_it() {
+    // A PMT without streams: 13 bytes of `section_length` besides its
+    // descriptors leave 1008 of the 1021
+    let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
+    assert_eq!(
+        [
+            muxer.add_program(1, pid(PMT_PID), None, &descriptors(1_009)),
+            muxer.add_program(1, pid(PMT_PID), None, &descriptors(1_008)),
+        ],
+        [
+            Err(Error::TsProgramMapSection {
+                error: pmt::Error::Section(section::Error::SectionLength {
+                    section_length: 1_022,
+                    limit: 1_021
+                })
+            }),
+            Ok(()),
+        ]
+    );
+}
+
+#[test]
+fn a_stream_is_taken_whose_descriptors_fill_the_pmt_and_refused_one_byte_past_it() {
+    // A PMT of video and audio: 13 bytes besides its loops, two entries of
+    // 5, and 5 for the stream added, leave 993 bytes of descriptors
+    let mut muxer = muxer_of(MuxerConfig::new());
+    let mut add = |es_info: &[u8]| muxer.add_stream(1, pid(0x0102), StreamType::AVC_VIDEO, es_info);
+    assert_eq!(
+        [add(&descriptors(994)), add(&descriptors(993))],
+        [
+            Err(Error::TsProgramMapSection {
+                error: pmt::Error::Section(section::Error::SectionLength {
+                    section_length: 1_022,
+                    limit: 1_021
+                })
+            }),
+            Ok(()),
+        ]
+    );
+}
+
+const PRIVATE_PID: u16 = 0x0102;
+
+/// A muxer of the default settings with program 1, a video stream and a
+/// stream of `private_stream_2`
+fn muxer_with_private_stream_2() -> Muxer {
+    let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
+    muxer.add_program(1, pid(PMT_PID), None, &[]).unwrap();
+    muxer
+        .add_stream(1, pid(VIDEO_PID), StreamType::ISO_IEC_13818_2_VIDEO, &[])
+        .unwrap();
+    muxer
+        .add_stream(
+            1,
+            pid(PRIVATE_PID),
+            StreamType::ISO_IEC_13818_1_PES_PRIVATE_DATA,
+            &[],
+        )
+        .unwrap();
+    muxer
+}
+
+#[test]
+fn a_stream_without_an_optional_header_is_taken_without_a_pts_after_the_first_pes_packet() {
+    let mut muxer = muxer_with_private_stream_2();
+    let private = PesPacket::new(StreamId::PRIVATE_STREAM_2, &[0xcc; 10]);
+    let results = [
+        muxer.handle_pes_packet(pid(VIDEO_PID), &stamped(0xe0, 90_000)),
+        muxer.handle_pes_packet(pid(PRIVATE_PID), &private),
+        muxer.handle_pes_packet(pid(PRIVATE_PID), &private),
+    ];
+    let mut out = Vec::new();
+    muxer.poll_output(&mut out);
+    let private_packets = out
+        .chunks(188)
+        .filter(|chunk| TransportPacket::read(chunk).unwrap().pid == pid(PRIVATE_PID))
+        .count();
+    assert_eq!((results, private_packets), ([Ok(()), Ok(()), Ok(())], 2));
+}
+
+#[test]
+fn a_first_pes_packet_without_a_time_stamp_is_refused_on_a_stream_without_an_optional_header() {
+    let mut muxer = muxer_with_private_stream_2();
+    assert_eq!(
+        muxer.handle_pes_packet(
+            pid(PRIVATE_PID),
+            &PesPacket::new(StreamId::PRIVATE_STREAM_2, &[0xcc])
+        ),
+        Err(Error::MissingPts {
+            pid: pid(PRIVATE_PID)
+        })
+    );
+}
