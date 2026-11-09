@@ -2,3 +2,4 @@
 # English. Their spellings are fixed by the specifications, so they are
 # vocabulary rather than prose — correcting one would change the name.
 [default.extend-words]
+EIT = "EIT"
