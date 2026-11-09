@@ -275,7 +275,8 @@ jobs:
       - run: cargo fuzz run "$TARGET" --target x86_64-unknown-linux-gnu --sanitizer leak "$RUNNER_TEMP/corpus" "$RUNNER_TEMP/seeds" -- -max_total_time=180
 
   # The ignored tests, which compare this crate's reading of the fixtures, and
-  # what its muxer writes, with TSDuck's and ffprobe's.
+  # what its multiplexing and packetizing layers write, with TSDuck's and
+  # ffprobe's.
   conformance:
     # Not ubuntu-latest: the TSDuck package is built for Ubuntu 24.04, and the
     # libraries it links to are taken from the runner's release.

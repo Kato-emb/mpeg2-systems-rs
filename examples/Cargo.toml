@@ -12,6 +12,8 @@ license.workspace = true
 [dev-dependencies]
 # The demuxers reassemble sections and PES packets, which takes `alloc`.
 mpeg2-systems = { workspace = true, features = ["alloc"] }
+# What ffprobe prints, read by the test of `ps_to_ts` against it.
+serde_json = { version = "=1.0.154", default-features = false, features = ["std"] }
 
 [[example]]
 name = "ts_dump"
@@ -28,6 +30,13 @@ path = "ts_remux.rs"
 [[example]]
 name = "ps_remux"
 path = "ps_remux.rs"
+
+# Why not test the conversion in the crate's tests: they do not depend on
+# this package.
+[[example]]
+name = "ps_to_ts"
+path = "ps_to_ts.rs"
+test = true
 
 [lints]
 workspace = true

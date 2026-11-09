@@ -96,10 +96,71 @@ while let Some(event) = demuxer.poll_event() {
 assert_eq!((packs, pes_packets), (5, 7));
 ```
 
-## Writing a Transport Stream
+## Multiplexing PES packets
 
-A muxer appends to a buffer the caller owns. This one writes a PAT, a PMT, a
-PCR on its own and an access unit, and reads the stream back.
+The multiplexing layer takes the PES packets of the streams registered with
+it and builds the stream around them: `ts::mux::Muxer` sends the PAT, the PMT
+and the PCRs, and `ps::mux::Muxer` writes the packs, their SCRs, the system
+header and the program stream map. The caller registers the streams before
+the first PES packet, gives the PES packets in the order of their DTS across
+the streams, and takes the output into a buffer it owns; at the end it calls
+`finish` and takes what is left. Both `Muxer`s are driven the same way. This
+one multiplexes an access unit into a Transport Stream and reads it back.
+
+```rust
+use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
+use mpeg2_systems::stream_type::StreamType;
+use mpeg2_systems::time::Timestamp;
+use mpeg2_systems::ts::Pid;
+use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event};
+use mpeg2_systems::ts::mux::{Muxer, MuxerConfig};
+
+let (pmt_pid, video_pid) = (Pid::try_from(0x1000)?, Pid::try_from(0x0100)?);
+let mut muxer = Muxer::new(MuxerConfig::new())?;
+let mut stream = Vec::new();
+// Register the program and its stream before the first PES packet
+muxer.add_program(1, pmt_pid, None, &[])?;
+muxer.add_stream(1, video_pid, StreamType::ISO_IEC_13818_2_VIDEO, &[])?;
+// Give an access unit in a PES packet, and take the Transport Packets
+let access_unit = vec![0xaa; 1_000];
+let mut header = OptionalHeader::new();
+header.pts = Some(Timestamp::try_from(90_000)?);
+let mut packet = PesPacket::new(StreamId::from(0xe0), &access_unit);
+packet.optional_header = Some(header);
+muxer.handle_pes_packet(video_pid, &packet)?;
+muxer.poll_output(&mut stream);
+// End the stream, and take what the muxer still holds
+muxer.finish();
+muxer.poll_output(&mut stream);
+
+// Read back, subscribing to the PIDs the PMT names
+let mut demuxer = Demuxer::new(DemuxerConfig::default());
+demuxer.handle_input(&stream);
+demuxer.finish();
+let (mut pids, mut payloads) = (Vec::new(), Vec::new());
+while let Some(event) = demuxer.poll_event() {
+    if let Event::TsProgramMapSection { section, .. } = &event {
+        pids.extend(section.elementary_streams.iter().flatten().map(|stream| stream.elementary_pid));
+    } else if let Event::PesPacket { packet, .. } = &event {
+        payloads.push(packet.payload.to_vec());
+    }
+    drop(event);
+    for pid in pids.drain(..) {
+        demuxer.subscribe_pes(pid);
+    }
+}
+assert_eq!(payloads, [access_unit]);
+```
+
+## Writing element by element
+
+The packetizing layer writes each element it is given, in the order given,
+into a buffer the caller owns: `ts::mux::PacketWriter` cuts a PES packet or a
+section into the Transport Packets of a PID, or writes a PCR on its own, and
+`ps::mux::PackWriter` writes pack headers, system headers, program stream
+maps and PES packets. When to send the PSI and the PCRs, and where a pack
+starts, are up to the caller. This one writes a PAT, a PMT, a PCR on its own
+and an access unit, and reads the stream back.
 
 ```rust
 use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
@@ -281,8 +342,8 @@ assert_eq!(texts, [[0x24, 0x22], [0x24, 0x24]]);
 | Section, PAT, PMT, CAT (§2.4.4) | yes | yes |
 | Descriptors 0x02–0x12, AVC video, MPEG-2 AAC audio, HEVC video (§2.6) | yes | yes |
 | Pack header, system header, program stream map (§2.5.3) | yes | yes |
-| Transport Stream: framing in 188, 192 and 204 bytes, PSI, PES reassembly, PCR | `ts::demux` | `ts::mux`: PES packets, sections, PCRs on their own |
-| Program Stream: packs, system headers, maps, PES packets | `ps::demux` | `ps::mux`: pack headers, system headers, maps, PES packets split to fit |
+| Transport Stream: framing in 188, 192 and 204 bytes, PSI, PES reassembly, PCR | `ts::demux` | `ts::mux`: `Muxer` (one program at a variable bit rate, the PAT, the PMT and the PCRs sent at intervals) and `PacketWriter` (PES packets, sections, PCRs on their own) |
+| Program Stream: packs, system headers, maps, PES packets | `ps::demux` | `ps::mux`: `Muxer` (packs, their SCRs, the system header and the program stream map at the start) and `PackWriter` (pack headers, system headers, maps, PES packets split to fit) |
 
 `mpeg2-systems-arib` reads and writes:
 
@@ -292,10 +353,12 @@ assert_eq!(texts, [[0x24, 0x22], [0x24, 0x24]]);
 | Synchronized and asynchronous PES data (STD-B24 Volume 3 Chapter 5) | yes | yes |
 | Data group, caption management data, caption statement data, data units (STD-B24 Volume 1 Part 3 §9.2–§9.4) | yes | yes |
 
-Out of scope: working out the bounds of a system header; writing a program
-stream directory, padding or pack stuffing; null packets for a constant bit
-rate; checking the T-STD or the P-STD; working out the time of a PCR;
-subscribing to the sections of a PID other than those of the PSI; and, in
+Out of scope: null packets for a constant bit rate; more than one program in
+a Transport Stream; checking the T-STD or the P-STD, whose buffer bounds the
+Program Stream `Muxer` takes from the caller; sending the system header and
+the program stream map again; writing padding, pack stuffing or a program
+stream directory; pacing the output in real time; subscribing to the
+sections of a PID other than those of the PSI; and, in
 `mpeg2-systems-arib`, the SI tables of ARIB STD-B10, decoding the 8-unit code
 of ARIB STD-B24, and checking the operational rules of ARIB TR-B14 and
 TR-B15.
@@ -303,23 +366,26 @@ TR-B15.
 ## `no_std` and features
 
 The crate is `no_std`. The `alloc` feature, on by default, brings the
-demuxers, the muxers and the writers of the syntax types; without it the
-syntax layer reads with no allocator. `mpeg2-systems-arib` is `no_std` too,
-and its `alloc` feature, on by default, brings its writers and the `alloc`
-feature of `mpeg2-systems`.
+demuxers, the multiplexing and packetizing layers and the writers of the
+syntax types; without it the syntax layer reads with no allocator.
+`mpeg2-systems-arib` is `no_std` too, and its `alloc` feature, on by
+default, brings its writers and the `alloc` feature of `mpeg2-systems`.
 
 ## Examples and tests
 
 - `cargo run -p examples --example ts_dump -- <file>` prints every event of a
   Transport Stream; `ps_dump` does the same for a Program Stream.
 - `cargo run -p examples --example ts_remux -- <in> <out>` reads a Transport
-  Stream and writes it back through the muxer; `ps_remux` does the same for a
-  Program Stream.
+  Stream and writes it back through the packetizing layer (`PacketWriter`);
+  `ps_remux` does the same for a Program Stream (`PackWriter`).
+- `cargo run -p examples --example ps_to_ts -- <in> <out>` reads a Program
+  Stream and multiplexes its PES packets into a Transport Stream through the
+  multiplexing layer (`Muxer`).
 - Fixtures: streams FFmpeg wrote, under `crates/mpeg2-systems/tests/fixtures/`,
   and an ARIB caption stream of TSDuck's tables and hand-built PES packets,
   under `crates/mpeg2-systems-arib/tests/fixtures/`.
 - Conformance: ignored tests compare this crate's reading, and what its
-  muxers write, with TSDuck's and ffprobe's.
+  multiplexing and packetizing layers write, with TSDuck's and ffprobe's.
 - Benchmarks: the per-packet paths, in `benches/`.
 - Fuzz: a target for each demuxer, in `fuzz/`.
 
