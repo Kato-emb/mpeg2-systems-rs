@@ -5,16 +5,16 @@
 Sans-IO reading and writing of MPEG-2 Systems streams (ISO/IEC 13818-1) in
 Rust: the Transport Stream and the Program Stream.
 
-> **Status:** the layers of ISO/IEC 13818-1 are in place. Nothing is
-> published to crates.io. A crate for the extensions of ARIB STD-B24 and
-> STD-B10 is in progress.
+> **Status:** the layers of ISO/IEC 13818-1 are in place, and so are the
+> ARIB STD-B10 descriptors and STD-B24 captions of `mpeg2-systems-arib`.
+> Neither crate is published to crates.io.
 
 ## Crates
 
 | Crate | Holds |
 |---|---|
 | `mpeg2-systems` | the syntax layer, which reads and writes one syntax element from the bytes that hold it: `ts` (the Transport Packet and its adaptation field, §2.4.3), `pes` (the PES packet, §2.4.3.6), `psi` (the section and the PAT, PMT and CAT, §2.4.4), `descriptor` (§2.6) and `ps` (the pack header, system header and program stream map, §2.5.3); `ts::demux` and `ps::demux`, which read a stream; and `ts::mux` and `ps::mux`, which write one. Each layer is usable alone |
-| `mpeg2-systems-arib` | planned: the extensions of ARIB STD-B24 and STD-B10 |
+| `mpeg2-systems-arib` | the ARIB extensions, on the public API of `mpeg2-systems` alone: `descriptor` (the stream identifier and data component descriptors, 0x52 and 0xFD, ARIB STD-B10 §6.2.16 and §6.2.20), `independent_pes` (the synchronized and asynchronous PES data, STD-B24 Volume 3 Chapter 5) and `caption` (the data group, the caption management and caption statement data and their data units, STD-B24 Volume 1 Part 3 Chapter 9) |
 
 ## Driving a demuxer
 
@@ -190,6 +190,88 @@ for program in pat.programs.iter() {
 }
 ```
 
+## Reading ARIB captions
+
+This one finds the caption elementary stream in the PMT, reads each of its
+PES packets down to its data units, and collects the characters of the
+caption statements; decoding the 8-unit code is left to the caller. It runs
+as a doctest of `mpeg2-systems-arib`, from `crates/mpeg2-systems-arib`, where
+its fixture is.
+
+```rust
+use mpeg2_systems::descriptor::Error;
+use mpeg2_systems::stream_type::StreamType;
+use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event};
+use mpeg2_systems_arib::caption::Dmf;
+use mpeg2_systems_arib::caption::data_group::DataGroup;
+use mpeg2_systems_arib::caption::data_unit::DataUnitParameter;
+use mpeg2_systems_arib::caption::management::CaptionManagementData;
+use mpeg2_systems_arib::caption::statement::CaptionData;
+use mpeg2_systems_arib::descriptor::data_component::{
+    AdditionalAribCaptionInfo, DataComponentDescriptor, DataComponentId, Timing,
+};
+use mpeg2_systems_arib::independent_pes::SynchronizedPesData;
+
+let stream = std::fs::read("tests/fixtures/caption.ts")?;
+let mut demuxer = Demuxer::new(DemuxerConfig::default());
+let (mut captions, mut languages, mut texts) = (Vec::new(), Vec::new(), Vec::new());
+for packet in stream.chunks(188) {
+    demuxer.handle_input(packet);
+    let mut subscribe = Vec::new();
+    while let Some(event) = demuxer.poll_event() {
+        // A caption stream: PES private data whose data component is captions
+        if let Event::TsProgramMapSection { section, .. } = &event {
+            for stream in section.elementary_streams.iter() {
+                let stream = stream?;
+                if stream.stream_type != StreamType::ISO_IEC_13818_1_PES_PRIVATE_DATA {
+                    continue;
+                }
+                for raw in stream.es_info.iter() {
+                    let descriptor = match DataComponentDescriptor::try_from(&raw?) {
+                        Ok(descriptor) => descriptor,
+                        Err(Error::DescriptorTag { .. }) => continue,
+                        Err(error) => return Err(error.into()),
+                    };
+                    if descriptor.data_component_id == DataComponentId::CAPTION_AND_SUPERIMPOSE {
+                        let info = AdditionalAribCaptionInfo::read(descriptor.additional_data_component_info)?;
+                        captions.push((stream.elementary_pid.get(), info));
+                        subscribe.push(stream.elementary_pid);
+                    }
+                }
+            }
+        }
+        // Its PES packets: a data group each, of management or of a statement
+        if let Event::PesPacket { packet, .. } = &event {
+            let data = SynchronizedPesData::try_from(packet)?;
+            let group = DataGroup::read(data.synchronized_pes_data_byte)?;
+            if matches!(group.data_group_id.get(), 0x00 | 0x20) {
+                for language in CaptionManagementData::try_from(&group)?.languages.iter() {
+                    languages.push(language?.iso_639_language_code);
+                }
+            } else {
+                for unit in CaptionData::try_from(&group)?.data_units.iter() {
+                    let unit = unit?;
+                    // The 8-unit code characters, which the caller decodes
+                    if unit.data_unit_parameter == DataUnitParameter::STATEMENT_BODY {
+                        texts.push(unit.data_unit_data_byte.to_vec());
+                    }
+                }
+            }
+        }
+    }
+    // Subscribe once the events, which borrow the demuxer, are taken
+    for pid in subscribe {
+        demuxer.subscribe_pes(pid);
+    }
+}
+demuxer.finish();
+while demuxer.poll_event().is_some() {}
+let info = AdditionalAribCaptionInfo::new(Dmf::try_from(0b0011)?, Timing::PROGRAM_SYNCHRONOUS);
+assert_eq!(captions, [(0x0130, info)]);
+assert_eq!(languages, [*b"jpn"]);
+assert_eq!(texts, [[0x24, 0x22], [0x24, 0x24]]);
+```
+
 ## What is covered
 
 | | Read | Write |
@@ -202,18 +284,29 @@ for program in pat.programs.iter() {
 | Transport Stream: framing in 188, 192 and 204 bytes, PSI, PES reassembly, PCR | `ts::demux` | `ts::mux`: PES packets, sections, PCRs on their own |
 | Program Stream: packs, system headers, maps, PES packets | `ps::demux` | `ps::mux`: pack headers, system headers, maps, PES packets split to fit |
 
-Planned: the ARIB extensions, in a crate of their own.
+`mpeg2-systems-arib` reads and writes:
+
+| | Read | Write |
+|---|---|---|
+| Stream identifier and data component descriptors, `additional_arib_caption_info` (STD-B10 §6.2.16, §6.2.20; STD-B24 Volume 1 Part 3 §9.6.1) | yes | yes |
+| Synchronized and asynchronous PES data (STD-B24 Volume 3 Chapter 5) | yes | yes |
+| Data group, caption management data, caption statement data, data units (STD-B24 Volume 1 Part 3 §9.2–§9.4) | yes | yes |
 
 Out of scope: working out the bounds of a system header; writing a program
 stream directory, padding or pack stuffing; null packets for a constant bit
-rate; checking the T-STD or the P-STD; working out the time of a PCR; and
-subscribing to the sections of a PID other than those of the PSI.
+rate; checking the T-STD or the P-STD; working out the time of a PCR;
+subscribing to the sections of a PID other than those of the PSI; and, in
+`mpeg2-systems-arib`, the SI tables of ARIB STD-B10, decoding the 8-unit code
+of ARIB STD-B24, and checking the operational rules of ARIB TR-B14 and
+TR-B15.
 
 ## `no_std` and features
 
 The crate is `no_std`. The `alloc` feature, on by default, brings the
 demuxers, the muxers and the writers of the syntax types; without it the
-syntax layer reads with no allocator.
+syntax layer reads with no allocator. `mpeg2-systems-arib` is `no_std` too,
+and its `alloc` feature, on by default, brings its writers and the `alloc`
+feature of `mpeg2-systems`.
 
 ## Examples and tests
 
@@ -222,7 +315,9 @@ syntax layer reads with no allocator.
 - `cargo run -p examples --example ts_remux -- <in> <out>` reads a Transport
   Stream and writes it back through the muxer; `ps_remux` does the same for a
   Program Stream.
-- Fixtures: streams FFmpeg wrote, under `crates/mpeg2-systems/tests/fixtures/`.
+- Fixtures: streams FFmpeg wrote, under `crates/mpeg2-systems/tests/fixtures/`,
+  and an ARIB caption stream of TSDuck's tables and hand-built PES packets,
+  under `crates/mpeg2-systems-arib/tests/fixtures/`.
 - Conformance: ignored tests compare this crate's reading, and what its
   muxers write, with TSDuck's and ffprobe's.
 - Benchmarks: the per-packet paths, in `benches/`.
