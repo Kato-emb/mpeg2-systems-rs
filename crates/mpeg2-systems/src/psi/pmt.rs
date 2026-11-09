@@ -282,9 +282,19 @@ impl<'input> TsProgramMapSection<'input> {
             self.encoded_len()
                 .saturating_sub(super::LONG_SECTION_OVERHEAD),
         );
-        let mut writer = FieldWriter::new(&mut body);
+        self.write_body(&mut body)?;
+        Ok(self.section(&body).write(out)?)
+    }
+
+    /// Appends the bytes of the section from `PCR_PID` to the end of the
+    /// elementary stream loop to `body`, for a section
+    /// [`write`](Self::write) accepts
+    #[cfg(feature = "alloc")]
+    pub(crate) fn write_body(&self, body: &mut Vec<u8>) -> Result<(), Error> {
+        let mut writer = FieldWriter::new(body);
         // Why not an error per field: every value fits its field's width, and
-        // `program_info` is at most 1008 bytes after the check above.
+        // `program_info` is at most 1008 bytes once `write` has checked the
+        // length of the section.
         (|| {
             writer.write_bits::<3>(0b111_u8)?;
             writer.write_bits::<13>(self.pcr_pid.unwrap_or(Pid::NULL).get())?;
@@ -297,10 +307,15 @@ impl<'input> TsProgramMapSection<'input> {
             field: "program header",
             error,
         })?;
-        DescriptorLoop::write_entries(self.program_info, &mut body)?;
-        elementary_stream::write_entries(self.elementary_streams, &mut body)?;
+        DescriptorLoop::write_entries(self.program_info, body)?;
+        elementary_stream::write_entries(self.elementary_streams, body)
+    }
 
-        let mut section = Section::new(TableId::TS_PROGRAM_MAP, &body);
+    /// Returns the section that carries `body`, as
+    /// [`write_body`](Self::write_body) writes it
+    #[cfg(feature = "alloc")]
+    pub(crate) fn section<'body>(&self, body: &'body [u8]) -> Section<'body> {
+        let mut section = Section::new(TableId::TS_PROGRAM_MAP, body);
         section.syntax = Some(SectionSyntax::new(
             self.program_number,
             self.version_number,
@@ -308,7 +323,7 @@ impl<'input> TsProgramMapSection<'input> {
             self.section_number,
             self.last_section_number,
         ));
-        Ok(section.write(out)?)
+        section
     }
 }
 

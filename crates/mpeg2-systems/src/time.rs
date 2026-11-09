@@ -284,6 +284,20 @@ impl ClockReference {
             .wrapping_add(u64::from(self.extension))
     }
 
+    /// Returns the clock reference that counts `ticks` 27 MHz ticks, round
+    /// the circle of [`MODULUS`](Self::MODULUS) ticks
+    #[cfg(feature = "alloc")]
+    pub(crate) fn from_ticks(ticks: u64) -> Self {
+        let extension_modulus = u64::from(Self::EXTENSION_MODULUS);
+        Self::from_fields(
+            ticks.checked_div(extension_modulus).unwrap_or(0),
+            ticks
+                .checked_rem(extension_modulus)
+                .and_then(|extension| u16::try_from(extension).ok())
+                .unwrap_or(0),
+        )
+    }
+
     /// Returns the signed distance from `other` to `self`, in 27 MHz ticks
     ///
     /// The distance is the shorter way round the circle of

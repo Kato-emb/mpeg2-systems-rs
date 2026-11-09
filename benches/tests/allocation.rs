@@ -7,7 +7,8 @@
 //! flight, the PES packets reassembled on a subscribed PID, and the elements
 //! of a Program Stream reuse what was allocated before. Writing the same PES
 //! packets, or PCRs on their own, again reuses the output buffer and the
-//! continuity counters of the PIDs written before.
+//! continuity counters of the PIDs written before, and multiplexing PES
+//! packets with the muxer reuses its output held and its scratch buffer.
 
 #[cfg(test)]
 mod tests {
@@ -17,8 +18,9 @@ mod tests {
     use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig};
     use mpeg2_systems::ts::mux::PacketWriter;
     use mpeg2_systems_bench::{
-        ACCESS_UNIT_LENGTH, CountingAllocator, PROGRAM, STREAMS, allocations_once_grown,
-        demux_events, mux_pes_packets, program_stream_events, subscribed_demuxer,
+        ACCESS_UNIT_LENGTH, CountingAllocator, PES_PACKETS, PROGRAM, STREAMS,
+        allocations_once_grown, demux_events, multiplex_pes_packets, mux_pes_packets,
+        program_stream_events, registered_muxer, subscribed_demuxer,
     };
 
     #[global_allocator]
@@ -80,6 +82,14 @@ mod tests {
         });
         allocations.push(("pcrs on their own", 1_000, "ts mux", counted));
         none.push(("pcrs on their own", 1_000, "ts mux", 0));
+        let mut muxer = registered_muxer();
+        let mut first_dts = 90_000;
+        let counted = allocations_once_grown(&ALLOCATOR, || {
+            multiplex_pes_packets(&mut muxer, &access_unit, first_dts, &mut out);
+            first_dts += 3_600 * u64::try_from(PES_PACKETS).unwrap();
+        });
+        allocations.push(("pes packets", ACCESS_UNIT_LENGTH, "ts muxer", counted));
+        none.push(("pes packets", ACCESS_UNIT_LENGTH, "ts muxer", 0));
         assert_eq!(allocations, none);
     }
 }

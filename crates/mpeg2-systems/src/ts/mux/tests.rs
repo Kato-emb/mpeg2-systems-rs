@@ -3,665 +3,505 @@ use alloc::vec::Vec;
 
 use super::*;
 use crate::pes::OptionalHeader;
-use crate::psi::cat::CaSection;
-use crate::psi::pat::{self, Program, ProgramAssociationSection, ProgramLoop};
-use crate::psi::pmt::{self, TsProgramMapSection};
-use crate::psi::{TableId, VersionNumber};
+use crate::psi::VersionNumber;
+use crate::psi::pat::{Program as PatProgram, ProgramAssociationSection, ProgramLoop};
+use crate::psi::pmt::{ElementaryStream, ElementaryStreamLoop, TsProgramMapSection};
 use crate::time::Timestamp;
-use crate::ts::adaptation_field::{self, AdaptationField};
 use crate::ts::packet::TransportPacket;
 
-/// `stream_id` of the first video stream
-const VIDEO: u8 = 0xE0;
-/// `stream_id` of the first audio stream
-const AUDIO: u8 = 0xC0;
+const PMT_PID: u16 = 0x1000;
+const VIDEO_PID: u16 = 0x0100;
+const AUDIO_PID: u16 = 0x0101;
 
 fn pid(value: u16) -> Pid {
     Pid::try_from(value).unwrap()
 }
 
-fn counter(value: u8) -> ContinuityCounter {
-    ContinuityCounter::try_from(value).unwrap()
-}
-
-/// `length` bytes counting up, so bytes out of place differ
-fn counting(length: usize) -> Vec<u8> {
-    (0..length)
-        .map(|index| u8::try_from(index % 251).unwrap())
-        .collect()
-}
-
-/// A PES packet of `stream_id` with a PTS, carrying `payload`
-fn pes_packet(stream_id: u8, payload: &[u8]) -> PesPacket<'_> {
+/// A PES packet of `stream_id` carrying `payload`, with a DTS (and a PTS
+/// after it) of `dts` 90 kHz ticks, or no time stamp
+fn pes_packet(stream_id: u8, payload: &[u8], dts: Option<u64>) -> PesPacket<'_> {
     let mut header = OptionalHeader::new();
-    header.pts = Some(Timestamp::try_from(90_000).unwrap());
+    if let Some(dts) = dts {
+        header.pts = Some(Timestamp::try_from(dts + 3_600).unwrap());
+        header.dts = Some(Timestamp::try_from(dts).unwrap());
+    }
     let mut packet = PesPacket::new(StreamId::from(stream_id), payload);
     packet.optional_header = Some(header);
     packet
 }
 
-/// A PES packet of `stream_id` whose bytes come to `length`, as
-/// [`PesPacket::write`] writes them
-fn pes_packet_of_length(stream_id: u8, payload: &mut Vec<u8>, length: usize) -> PesPacket<'_> {
-    let header_length = pes_bytes(&pes_packet(stream_id, &[])).len();
-    *payload = counting(length.checked_sub(header_length).unwrap());
-    pes_packet(stream_id, payload)
-}
-
-fn pes_bytes(packet: &PesPacket<'_>) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    packet.write(&mut bytes).unwrap();
-    bytes
-}
-
-fn section_bytes(section: &Section<'_>) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    section.write(&mut bytes).unwrap();
-    bytes
-}
-
-/// The Transport Packets `bytes` hold, which must be a whole number of them
-fn packets(bytes: &[u8]) -> Vec<TransportPacket<'_>> {
-    assert_eq!(bytes.len() % 188, 0, "not a whole number of packets");
-    bytes
-        .chunks(188)
-        .map(|packet| TransportPacket::read(packet).unwrap())
-        .collect()
-}
-
-/// A Transport Packet of `pid` as the writer writes it
-fn packet<'input>(
-    pid: Pid,
-    continuity_counter: u8,
-    payload_unit_start_indicator: bool,
-    adaptation_field: Option<AdaptationField<'input>>,
-    payload: &'input [u8],
-) -> TransportPacket<'input> {
-    let mut packet = TransportPacket::new(pid, counter(continuity_counter));
-    packet.payload_unit_start_indicator = payload_unit_start_indicator;
-    packet.adaptation_field = adaptation_field;
-    packet.payload = Some(payload);
-    packet
-}
-
-/// An adaptation field of nothing but `stuffing_bytes`
-fn stuffing(stuffing_bytes: usize) -> AdaptationField<'static> {
-    let mut adaptation_field = AdaptationField::new();
-    adaptation_field.stuffing_bytes = stuffing_bytes;
-    adaptation_field
-}
-
-#[test]
-fn a_pes_packet_shorter_than_a_payload_is_stuffed_in_the_adaptation_field() {
-    let mut payload = Vec::new();
-    let packet_to_write = pes_packet_of_length(VIDEO, &mut payload, 100);
-    let bytes = pes_bytes(&packet_to_write);
-    let mut out = Vec::new();
-
-    let written = PacketWriter::new()
-        .write_pes_packet(pid(0x100), &packet_to_write, None, &mut out)
+/// A muxer of `config` with program 1 and a video and an audio stream
+fn muxer_of(config: MuxerConfig) -> Muxer {
+    let mut muxer = Muxer::new(config);
+    muxer.add_program(1, pid(PMT_PID), None, &[]).unwrap();
+    muxer
+        .add_stream(1, pid(VIDEO_PID), StreamType::ISO_IEC_13818_2_VIDEO, &[])
         .unwrap();
-
-    assert_eq!(written, 1);
-    assert_eq!(
-        packets(&out),
-        [packet(pid(0x100), 0, true, Some(stuffing(83)), &bytes)]
-    );
-}
-
-#[test]
-fn a_pes_packet_one_byte_short_of_a_payload_takes_an_empty_adaptation_field() {
-    let mut payload = Vec::new();
-    let packet_to_write = pes_packet_of_length(VIDEO, &mut payload, 183);
-    let bytes = pes_bytes(&packet_to_write);
-    let mut out = Vec::new();
-
-    PacketWriter::new()
-        .write_pes_packet(pid(0x100), &packet_to_write, None, &mut out)
+    muxer
+        .add_stream(1, pid(AUDIO_PID), StreamType::ISO_IEC_13818_3_AUDIO, &[])
         .unwrap();
-
-    assert_eq!(
-        packets(&out),
-        [packet(pid(0x100), 0, true, Some(stuffing(0)), &bytes)]
-    );
+    muxer
 }
 
-#[test]
-fn a_pes_packet_of_a_payload_exactly_takes_no_adaptation_field() {
-    let mut payload = Vec::new();
-    let packet_to_write = pes_packet_of_length(VIDEO, &mut payload, 184);
-    let bytes = pes_bytes(&packet_to_write);
-    let mut out = Vec::new();
+/// The 90 kHz ticks the default `mux_delay` comes to
+const DELAY: u64 = 63_000;
 
-    PacketWriter::new()
-        .write_pes_packet(pid(0x100), &packet_to_write, None, &mut out)
-        .unwrap();
-
-    assert_eq!(packets(&out), [packet(pid(0x100), 0, true, None, &bytes)]);
-}
-
-#[test]
-fn a_pes_packet_one_byte_past_a_payload_continues_into_a_stuffed_packet() {
-    let mut payload = Vec::new();
-    let packet_to_write = pes_packet_of_length(VIDEO, &mut payload, 185);
-    let bytes = pes_bytes(&packet_to_write);
-    let (first, second) = bytes.split_at(184);
-    let mut out = Vec::new();
-
-    let written = PacketWriter::new()
-        .write_pes_packet(pid(0x100), &packet_to_write, None, &mut out)
-        .unwrap();
-
-    assert_eq!(written, 2);
-    assert_eq!(
-        packets(&out),
-        [
-            packet(pid(0x100), 0, true, None, first),
-            packet(pid(0x100), 1, false, Some(stuffing(182)), second),
-        ]
-    );
-}
-
-#[test]
-fn a_pcr_given_goes_in_the_adaptation_field_of_the_first_packet() {
-    let mut payload = Vec::new();
-    let packet_to_write = pes_packet_of_length(VIDEO, &mut payload, 200);
-    let bytes = pes_bytes(&packet_to_write);
-    let (first, second) = bytes.split_at(176);
-    let pcr = ClockReference::new(123_456, 78).unwrap();
-    let mut out = Vec::new();
-
-    PacketWriter::new()
-        .write_pes_packet(pid(0x100), &packet_to_write, Some(pcr), &mut out)
-        .unwrap();
-
-    let mut with_pcr = AdaptationField::new();
-    with_pcr.program_clock_reference = Some(pcr);
-    assert_eq!(
-        packets(&out),
-        [
-            packet(pid(0x100), 0, true, Some(with_pcr), first),
-            packet(pid(0x100), 1, false, Some(stuffing(159)), second),
-        ]
-    );
-}
-
-#[test]
-fn a_pcr_on_a_short_pes_packet_shares_its_adaptation_field_with_the_stuffing() {
-    let mut payload = Vec::new();
-    let packet_to_write = pes_packet_of_length(VIDEO, &mut payload, 100);
-    let bytes = pes_bytes(&packet_to_write);
-    let pcr = ClockReference::new(0, 0).unwrap();
-    let mut out = Vec::new();
-
-    PacketWriter::new()
-        .write_pes_packet(pid(0x100), &packet_to_write, Some(pcr), &mut out)
-        .unwrap();
-
-    let mut with_pcr = AdaptationField::new();
-    with_pcr.program_clock_reference = Some(pcr);
-    with_pcr.stuffing_bytes = 76;
-    assert_eq!(
-        packets(&out),
-        [packet(pid(0x100), 0, true, Some(with_pcr), &bytes)]
-    );
-}
-
-#[test]
-fn a_video_pes_packet_longer_than_its_length_field_is_written_unbounded() {
-    let payload = counting(70_000);
-    let mut packet_to_write = pes_packet(VIDEO, &payload);
-    packet_to_write.length_unspecified = true;
-    let bytes = pes_bytes(&packet_to_write);
-    let mut out = Vec::new();
-
-    let written = PacketWriter::new()
-        .write_pes_packet(pid(0x100), &packet_to_write, None, &mut out)
-        .unwrap();
-
-    assert_eq!(written, bytes.len().div_ceil(184));
-    let joined: Vec<u8> = packets(&out)
-        .iter()
-        .flat_map(|packet| packet.payload.unwrap().iter().copied())
-        .collect();
-    assert_eq!(joined, bytes);
-}
-
-#[test]
-fn an_audio_pes_packet_longer_than_its_length_field_is_refused_leaving_out_as_it_was() {
-    let payload = counting(70_000);
-    let packet_to_write = pes_packet(AUDIO, &payload);
-    let mut out = vec![0x47];
-    let mut writer = PacketWriter::new();
-
-    let error = writer
-        .write_pes_packet(pid(0x101), &packet_to_write, None, &mut out)
-        .unwrap_err();
-
-    assert!(
-        matches!(
-            error,
-            Error::PesPacket {
-                error: pes::Error::TooLong { .. }
-            }
-        ),
-        "{error:?}"
-    );
-    assert_eq!(out, [0x47]);
-}
-
-#[test]
-fn a_refused_write_leaves_the_continuity_counter_where_it_was() {
-    let too_long = counting(70_000);
-    let short = counting(10);
-    let mut writer = PacketWriter::new();
-    let mut out = Vec::new();
-
-    writer
-        .write_pes_packet(pid(0x101), &pes_packet(AUDIO, &too_long), None, &mut out)
-        .unwrap_err();
-    writer
-        .write_pes_packet(pid(0x101), &pes_packet(AUDIO, &short), None, &mut out)
-        .unwrap();
-
-    assert_eq!(
-        packets(&out).first().unwrap().continuity_counter,
-        counter(0)
-    );
-}
-
-#[test]
-fn a_pcr_with_an_extension_of_300_or_more_is_refused() {
-    let pcr = ClockReference::new(0, 300).unwrap();
-    let payload = counting(10);
-    let mut out = Vec::new();
-
-    let error = PacketWriter::new()
-        .write_pes_packet(
-            pid(0x100),
-            &pes_packet(VIDEO, &payload),
-            Some(pcr),
-            &mut out,
-        )
-        .unwrap_err();
-
-    assert_eq!(
-        error,
-        Error::Packet {
-            error: packet::Error::AdaptationField(
-                adaptation_field::Error::ClockReferenceExtension {
-                    field: "program_clock_reference",
-                    extension: 300,
-                }
-            )
-        }
-    );
-    assert!(out.is_empty());
-}
-
-#[test]
-fn a_pes_packet_on_a_reserved_pid_is_refused() {
-    let payload = counting(10);
-    for refused in [Pid::PAT, Pid::CAT, pid(0x000F), Pid::NULL] {
-        let mut out = Vec::new();
-        let error = PacketWriter::new()
-            .write_pes_packet(refused, &pes_packet(VIDEO, &payload), None, &mut out)
-            .unwrap_err();
-        assert_eq!(error, Error::Pid { pid: refused });
-        assert!(out.is_empty());
-    }
-}
-
-#[test]
-fn a_stream_id_that_is_not_of_a_pes_packet_is_refused() {
-    let mut out = Vec::new();
-    let error = PacketWriter::new()
-        .write_pes_packet(
-            pid(0x100),
-            &PesPacket::new(StreamId::from(0xBC), &[1]),
-            None,
-            &mut out,
-        )
-        .unwrap_err();
-
-    assert_eq!(
-        error,
-        Error::StreamId {
-            stream_id: StreamId::from(0xBC)
-        }
-    );
-    assert!(out.is_empty());
-}
-
-#[test]
-fn the_continuity_counter_runs_on_per_pid_and_wraps_after_15() {
-    let payload = counting(10);
-    let mut writer = PacketWriter::new();
-    let mut out = Vec::new();
-    for _ in 0..17 {
-        writer
-            .write_pes_packet(pid(0x100), &pes_packet(VIDEO, &payload), None, &mut out)
-            .unwrap();
-        writer
-            .write_pes_packet(pid(0x101), &pes_packet(AUDIO, &payload), None, &mut out)
-            .unwrap();
-    }
-    writer
-        .write_pes_packet(pid(0x101), &pes_packet(AUDIO, &payload), None, &mut out)
-        .unwrap();
-
-    let counters = |of: Pid| -> Vec<u8> {
-        packets(&out)
-            .iter()
-            .filter(|packet| packet.pid == of)
-            .map(|packet| packet.continuity_counter.get())
-            .collect()
-    };
-    let expected: Vec<u8> = (0..17).map(|index| index % 16).collect();
-    assert_eq!(counters(pid(0x100)), expected);
-    assert_eq!(counters(pid(0x101)), [expected, vec![1]].concat());
-}
-
-#[test]
-fn a_section_starts_after_a_pointer_field_of_0_and_is_stuffed_with_0xff() {
-    let body = counting(20);
-    let section = Section::new(TableId::from(0x80), &body);
-    let mut payload = vec![0x00];
-    payload.extend(section_bytes(&section));
-    payload.resize(184, 0xFF);
-    let mut out = Vec::new();
-
-    let written = PacketWriter::new()
-        .write_section(pid(0x1000), &section, &mut out)
-        .unwrap();
-
-    assert_eq!(written, 1);
-    assert_eq!(
-        packets(&out),
-        [packet(pid(0x1000), 0, true, None, &payload)]
-    );
-}
-
-#[test]
-fn a_section_longer_than_a_payload_continues_without_a_pointer_field() {
-    let body = counting(300);
-    let section = Section::new(TableId::from(0x80), &body);
-    let bytes = section_bytes(&section);
-    let (head, tail) = bytes.split_at(183);
-    let mut first = vec![0x00];
-    first.extend_from_slice(head);
-    let mut second = tail.to_vec();
-    second.resize(184, 0xFF);
-    let mut out = Vec::new();
-
-    let written = PacketWriter::new()
-        .write_section(pid(0x1000), &section, &mut out)
-        .unwrap();
-
-    assert_eq!(written, 2);
-    assert_eq!(
-        packets(&out),
-        [
-            packet(pid(0x1000), 0, true, None, &first),
-            packet(pid(0x1000), 1, false, None, &second),
-        ]
-    );
-}
-
-#[test]
-fn a_section_on_the_pid_of_null_packets_is_refused() {
-    let section = Section::new(TableId::from(0x80), &[]);
-    let mut out = Vec::new();
-
-    let error = PacketWriter::new()
-        .write_section(Pid::NULL, &section, &mut out)
-        .unwrap_err();
-
-    assert_eq!(error, Error::Pid { pid: Pid::NULL });
-    assert!(out.is_empty());
-}
-
-#[test]
-fn a_section_the_section_writer_refuses_is_refused_leaving_out_as_it_was() {
-    let section = Section::new(TableId::FORBIDDEN, &[]);
-    let mut out = vec![0x47];
-
-    let error = PacketWriter::new()
-        .write_section(Pid::PAT, &section, &mut out)
-        .unwrap_err();
-
-    assert_eq!(
-        error,
-        Error::Section {
-            error: section::Error::ForbiddenTableId
-        }
-    );
-    assert_eq!(out, [0x47]);
-}
-
-/// The payload of the one Transport Packet a short section goes into
-fn section_payload(section: &[u8]) -> Vec<u8> {
-    let mut payload = vec![0x00];
-    payload.extend_from_slice(section);
-    payload.resize(184, 0xFF);
-    payload
-}
-
-#[test]
-fn a_pat_goes_on_the_pat_pid_as_its_section() {
+/// The PAT and the PMT [`muxer_of`] sends, written with `writer`
+fn psi(writer: &mut PacketWriter, out: &mut Vec<u8>) {
     let mut programs = Vec::new();
     ProgramLoop::write_from(
-        [Program::ProgramMap {
-            program_number: 1.try_into().unwrap(),
-            program_map_pid: pid(0x1000),
+        [PatProgram::ProgramMap {
+            program_number: NonZeroU16::new(1).unwrap(),
+            program_map_pid: pid(PMT_PID),
         }],
         &mut programs,
     )
     .unwrap();
-    let mut pat = ProgramAssociationSection::new(1, VersionNumber::try_from(0).unwrap());
-    pat.programs = ProgramLoop::from(&programs[..]);
-    let mut bytes = Vec::new();
-    pat.write(&mut bytes).unwrap();
-    let payload = section_payload(&bytes);
-    let mut out = Vec::new();
-
-    let written = PacketWriter::new()
-        .write_program_association_section(&pat, &mut out)
+    let mut pat = ProgramAssociationSection::new(1, VersionNumber(0));
+    pat.programs = ProgramLoop::from(programs.as_slice());
+    writer.write_program_association_section(&pat, out).unwrap();
+    let mut streams = Vec::new();
+    ElementaryStreamLoop::write_from(
+        [
+            ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, pid(VIDEO_PID)),
+            ElementaryStream::new(StreamType::ISO_IEC_13818_3_AUDIO, pid(AUDIO_PID)),
+        ],
+        &mut streams,
+    )
+    .unwrap();
+    let mut pmt = TsProgramMapSection::new(1, VersionNumber(0));
+    pmt.pcr_pid = Some(pid(VIDEO_PID));
+    pmt.elementary_streams = ElementaryStreamLoop::from(streams.as_slice());
+    writer
+        .write_ts_program_map_section(pid(PMT_PID), &pmt, out)
         .unwrap();
+}
 
-    assert_eq!(written, 1);
-    assert_eq!(packets(&out), [packet(Pid::PAT, 0, true, None, &payload)]);
+fn pcr(ticks: u64) -> ClockReference {
+    ClockReference::from_fields(ticks / 300, u16::try_from(ticks % 300).unwrap())
+}
+
+/// What one input put in the output: the PID of each Transport Packet, and
+/// whether it carries a PCR
+fn summary(bytes: &[u8]) -> Vec<(u16, bool)> {
+    bytes
+        .chunks(188)
+        .map(|chunk| {
+            let packet = TransportPacket::read(chunk).unwrap();
+            let carries_pcr = packet
+                .adaptation_field
+                .is_some_and(|field| field.program_clock_reference.is_some());
+            (packet.pid.get(), carries_pcr)
+        })
+        .collect()
 }
 
 #[test]
-fn a_pmt_goes_on_the_pid_given_as_its_section() {
-    let mut pmt = TsProgramMapSection::new(1, VersionNumber::try_from(0).unwrap());
-    pmt.pcr_pid = Some(pid(0x100));
-    let mut bytes = Vec::new();
-    pmt.write(&mut bytes).unwrap();
-    let payload = section_payload(&bytes);
+fn the_first_pes_packet_on_the_pcr_pid_follows_the_pat_and_the_pmt_with_the_pcr_in_its_first_packet()
+ {
+    let mut muxer = muxer_of(MuxerConfig::new());
+    let payload = vec![0xaa; 500];
+    let packet = pes_packet(0xe0, &payload, Some(90_000));
+    muxer.handle_pes_packet(pid(VIDEO_PID), &packet).unwrap();
     let mut out = Vec::new();
+    muxer.poll_output(&mut out);
 
-    PacketWriter::new()
-        .write_ts_program_map_section(pid(0x1000), &pmt, &mut out)
+    let mut writer = PacketWriter::new();
+    let mut expected = Vec::new();
+    psi(&mut writer, &mut expected);
+    writer
+        .write_pes_packet(
+            pid(VIDEO_PID),
+            &packet,
+            Some(pcr((90_000 - DELAY) * 300)),
+            &mut expected,
+        )
         .unwrap();
-
-    assert_eq!(
-        packets(&out),
-        [packet(pid(0x1000), 0, true, None, &payload)]
-    );
+    assert_eq!(out, expected);
 }
 
 #[test]
-fn a_cat_goes_on_the_cat_pid_as_its_section() {
-    let cat = CaSection::new(VersionNumber::try_from(0).unwrap());
-    let mut bytes = Vec::new();
-    cat.write(&mut bytes).unwrap();
-    let payload = section_payload(&bytes);
+fn the_first_pes_packet_off_the_pcr_pid_follows_a_packet_of_the_pcr_alone() {
+    let mut muxer = muxer_of(MuxerConfig::new());
+    let payload = vec![0xbb; 100];
+    let packet = pes_packet(0xc0, &payload, Some(90_000));
+    muxer.handle_pes_packet(pid(AUDIO_PID), &packet).unwrap();
     let mut out = Vec::new();
+    muxer.poll_output(&mut out);
 
-    PacketWriter::new()
-        .write_ca_section(&cat, &mut out)
+    let mut writer = PacketWriter::new();
+    let mut expected = Vec::new();
+    psi(&mut writer, &mut expected);
+    writer
+        .write_program_clock_reference(pid(VIDEO_PID), pcr((90_000 - DELAY) * 300), &mut expected)
         .unwrap();
-
-    assert_eq!(packets(&out), [packet(Pid::CAT, 0, true, None, &payload)]);
+    writer
+        .write_pes_packet(pid(AUDIO_PID), &packet, None, &mut expected)
+        .unwrap();
+    assert_eq!(out, expected);
 }
 
 #[test]
-fn a_table_its_writer_refuses_is_refused_leaving_out_and_the_counter_as_they_were() {
-    let mut programs = Vec::new();
-    let program = Program::ProgramMap {
-        program_number: 1.try_into().unwrap(),
-        program_map_pid: pid(0x1000),
+fn the_pat_and_the_pmt_and_the_pcr_are_sent_again_once_their_interval_has_passed() {
+    let mut muxer = muxer_of(MuxerConfig::new());
+    let payload = [0xcc; 10];
+    let mut inputs = Vec::new();
+    for index in 0..8 {
+        let dts = 90_000 + index * 1_800;
+        let mut out = Vec::new();
+        muxer
+            .handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &payload, Some(dts)))
+            .unwrap();
+        muxer.poll_output(&mut out);
+        inputs.push(summary(&out));
+        out.clear();
+        muxer
+            .handle_pes_packet(pid(AUDIO_PID), &pes_packet(0xc0, &payload, Some(dts + 900)))
+            .unwrap();
+        muxer
+            .handle_pes_packet(pid(AUDIO_PID), &pes_packet(0xc0, &payload, None))
+            .unwrap();
+        muxer.poll_output(&mut out);
+        inputs.push(summary(&out));
+    }
+
+    let (pat, pmt) = ((0, false), (PMT_PID, false));
+    let video = |pcr| vec![(VIDEO_PID, pcr)];
+    let audio = vec![(AUDIO_PID, false); 2];
+    let with_psi = |mut packets: Vec<(u16, bool)>| {
+        packets.splice(0..0, [pat, pmt]);
+        packets
     };
-    ProgramLoop::write_from([program, program], &mut programs).unwrap();
-    let mut pat = ProgramAssociationSection::new(1, VersionNumber::try_from(0).unwrap());
-    pat.programs = ProgramLoop::from(&programs[..]);
-    let mut pmt = TsProgramMapSection::new(1, VersionNumber::try_from(0).unwrap());
-    pmt.pcr_pid = Some(pid(0x0005));
-    let mut writer = PacketWriter::new();
-    let mut out = vec![0x47];
-
-    let errors = [
-        writer.write_program_association_section(&pat, &mut out),
-        writer.write_ts_program_map_section(pid(0x1000), &pmt, &mut out),
-        writer.write_ts_program_map_section(
-            Pid::NULL,
-            &TsProgramMapSection::new(1, VersionNumber::try_from(0).unwrap()),
-            &mut out,
-        ),
-    ];
-
     assert_eq!(
-        errors,
+        inputs,
         [
-            Err(Error::ProgramAssociationSection {
-                error: pat::Error::ProgramNumber { program_number: 1 }
+            with_psi(video(true)),
+            audio.clone(),
+            video(false),
+            audio.clone(),
+            video(true),
+            audio.clone(),
+            video(false),
+            audio.clone(),
+            video(true),
+            audio.clone(),
+            with_psi(video(false)),
+            audio.clone(),
+            video(true),
+            audio.clone(),
+            video(false),
+            audio.clone(),
+        ]
+    );
+}
+
+#[test]
+fn without_a_stream_on_the_pcr_pid_the_pcr_goes_alone() {
+    let mut muxer = Muxer::new(MuxerConfig::new());
+    muxer
+        .add_program(1, pid(PMT_PID), Some(pid(0x01ff)), &[])
+        .unwrap();
+    muxer
+        .add_stream(1, pid(VIDEO_PID), StreamType::AVC_VIDEO, &[])
+        .unwrap();
+    muxer
+        .handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &[1, 2, 3], Some(90_000)))
+        .unwrap();
+    let mut out = Vec::new();
+    muxer.poll_output(&mut out);
+    assert_eq!(
+        summary(&out),
+        [
+            (0, false),
+            (PMT_PID, false),
+            (0x01ff, true),
+            (VIDEO_PID, false)
+        ]
+    );
+}
+
+#[test]
+fn the_pcr_goes_on_the_first_video_stream_or_else_the_first_stream() {
+    let first_pcr_pid = |stream_types: &[StreamType]| {
+        let mut muxer = Muxer::new(MuxerConfig::new());
+        muxer.add_program(1, pid(PMT_PID), None, &[]).unwrap();
+        for (pid_value, stream_type) in (0x0100..).zip(stream_types) {
+            muxer
+                .add_stream(1, pid(pid_value), *stream_type, &[])
+                .unwrap();
+        }
+        muxer
+            .program
+            .as_ref()
+            .and_then(ProgramDefinition::pcr_pid)
+            .map(Pid::get)
+    };
+    assert_eq!(
+        [
+            first_pcr_pid(&[StreamType::ISO_IEC_13818_7_AUDIO, StreamType::HEVC_VIDEO]),
+            first_pcr_pid(&[
+                StreamType::ISO_IEC_13818_7_AUDIO,
+                StreamType::LCEVC_VIDEO,
+                StreamType::ISO_IEC_13818_3_AUDIO
+            ]),
+        ],
+        [Some(0x0101), Some(0x0100)]
+    );
+}
+
+#[test]
+fn an_input_past_the_buffer_limit_is_refused_and_taken_once_the_output_is() {
+    let payload = vec![0xdd; 1_000];
+    let first = pes_packet(0xe0, &payload, Some(90_000));
+    let second = pes_packet(0xe0, &payload, Some(93_600));
+    let mut unbounded = muxer_of(MuxerConfig::new());
+    unbounded.handle_pes_packet(pid(VIDEO_PID), &first).unwrap();
+    let mut first_output = Vec::new();
+    unbounded.poll_output(&mut first_output);
+
+    let mut config = MuxerConfig::new();
+    config.buffer_limit = first_output.len();
+    let mut bounded = muxer_of(config);
+    bounded.handle_pes_packet(pid(VIDEO_PID), &first).unwrap();
+    let refused = bounded.handle_pes_packet(pid(VIDEO_PID), &second);
+    let mut out = Vec::new();
+    bounded.poll_output(&mut out);
+    bounded.handle_pes_packet(pid(VIDEO_PID), &second).unwrap();
+    bounded.poll_output(&mut out);
+
+    unbounded
+        .handle_pes_packet(pid(VIDEO_PID), &second)
+        .unwrap();
+    let mut expected = first_output.clone();
+    unbounded.poll_output(&mut expected);
+    assert_eq!(
+        (refused, out),
+        (
+            Err(Error::BufferFull {
+                length: first_output.len() + 6 * 188
             }),
+            expected
+        )
+    );
+}
+
+#[test]
+fn an_input_alone_past_the_buffer_limit_is_refused() {
+    let mut config = MuxerConfig::new();
+    config.buffer_limit = 3 * 188;
+    let mut muxer = muxer_of(config);
+    let payload = vec![0xee; 200];
+    let refused =
+        muxer.handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &payload, Some(90_000)));
+    let mut out = Vec::new();
+    muxer.poll_output(&mut out);
+    assert_eq!(
+        (refused, out),
+        (Err(Error::BufferFull { length: 4 * 188 }), Vec::new())
+    );
+}
+
+#[test]
+fn a_refused_pes_packet_leaves_the_muxer_as_it_was() {
+    let mut muxer = muxer_of(MuxerConfig::new());
+    let payload = vec![0x11; 70_000];
+    let too_long = pes_packet(0xc0, &payload, Some(90_000));
+    let too_long_error = too_long.write(&mut Vec::new()).unwrap_err();
+    let results = [
+        muxer.handle_pes_packet(pid(0x0200), &pes_packet(0xe0, &[], Some(90_000))),
+        muxer.handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xbc, &[], Some(90_000))),
+        muxer.handle_pes_packet(pid(AUDIO_PID), &too_long),
+    ];
+    let mut out = Vec::new();
+    muxer.poll_output(&mut out);
+    let mut fresh = muxer_of(MuxerConfig::new());
+    let packet = pes_packet(0xe0, &[], Some(90_000));
+    muxer.handle_pes_packet(pid(VIDEO_PID), &packet).unwrap();
+    fresh.handle_pes_packet(pid(VIDEO_PID), &packet).unwrap();
+    let (mut written, mut expected) = (Vec::new(), Vec::new());
+    muxer.poll_output(&mut written);
+    fresh.poll_output(&mut expected);
+    assert_eq!(
+        (results, out, written),
+        (
+            [
+                Err(Error::UnregisteredPid { pid: pid(0x0200) }),
+                Err(Error::StreamId {
+                    stream_id: StreamId::from(0xbc)
+                }),
+                Err(Error::PesPacket {
+                    error: too_long_error
+                }),
+            ],
+            Vec::new(),
+            expected
+        )
+    );
+}
+
+#[test]
+fn a_program_is_refused_for_program_number_0_a_pid_not_free_to_assign_or_its_descriptors() {
+    let broken = [0x05, 0x04, 0x00];
+    let mut pmt = TsProgramMapSection::new(1, VersionNumber(0));
+    pmt.program_info = broken.as_slice().into();
+    let broken_error = pmt.write(&mut Vec::new()).unwrap_err();
+    let mut muxer = Muxer::new(MuxerConfig::new());
+    let results = [
+        muxer.add_program(0, pid(PMT_PID), None, &[]),
+        muxer.add_program(1, pid(0x000f), None, &[]),
+        muxer.add_program(1, pid(PMT_PID), Some(Pid::NULL), &[]),
+        muxer.add_program(1, pid(PMT_PID), None, &broken),
+        muxer.add_program(1, pid(PMT_PID), None, &[]),
+    ];
+    assert_eq!(
+        results,
+        [
+            Err(Error::ProgramNumber { program_number: 0 }),
+            Err(Error::Pid { pid: pid(0x000f) }),
+            Err(Error::Pid { pid: Pid::NULL }),
             Err(Error::TsProgramMapSection {
-                error: pmt::Error::PcrPid { pid: pid(0x0005) }
+                error: broken_error
             }),
-            Err(Error::Pid { pid: Pid::NULL }),
-        ]
-    );
-    assert_eq!(out, [0x47]);
-    let mut one_program = Vec::new();
-    ProgramLoop::write_from([program], &mut one_program).unwrap();
-    pat.programs = ProgramLoop::from(&one_program[..]);
-    let mut bytes = Vec::new();
-    pat.write(&mut bytes).unwrap();
-    let payload = section_payload(&bytes);
-    let mut written = Vec::new();
-    writer
-        .write_program_association_section(&pat, &mut written)
-        .unwrap();
-    assert_eq!(
-        packets(&written),
-        [packet(Pid::PAT, 0, true, None, &payload)]
-    );
-}
-
-/// The Transport Packet of a PCR on its own: an adaptation field filling the
-/// packet, with no payload
-fn pcr_packet(pid: Pid, continuity_counter: u8, pcr: ClockReference) -> TransportPacket<'static> {
-    let mut adaptation_field = AdaptationField::new();
-    adaptation_field.program_clock_reference = Some(pcr);
-    adaptation_field.stuffing_bytes = 176;
-    let mut packet = TransportPacket::new(pid, counter(continuity_counter));
-    packet.adaptation_field = Some(adaptation_field);
-    packet
-}
-
-#[test]
-fn a_pcr_on_its_own_fills_a_packet_with_its_adaptation_field() {
-    let pcr = ClockReference::new(27_000_000 / 300, 123).unwrap();
-    let mut out = Vec::new();
-
-    PacketWriter::new()
-        .write_program_clock_reference(pid(0x100), pcr, &mut out)
-        .unwrap();
-
-    assert_eq!(packets(&out), [pcr_packet(pid(0x100), 15, pcr)]);
-}
-
-#[test]
-fn a_pcr_on_its_own_repeats_the_continuity_counter_of_the_packet_before_it() {
-    let pcr = ClockReference::new(0, 0).unwrap();
-    let payload = counting(10);
-    let bytes = pes_bytes(&pes_packet(VIDEO, &payload));
-    let mut writer = PacketWriter::new();
-    let mut out = Vec::new();
-
-    writer
-        .write_program_clock_reference(pid(0x100), pcr, &mut out)
-        .unwrap();
-    writer
-        .write_pes_packet(pid(0x100), &pes_packet(VIDEO, &payload), None, &mut out)
-        .unwrap();
-    writer
-        .write_program_clock_reference(pid(0x100), pcr, &mut out)
-        .unwrap();
-    writer
-        .write_program_clock_reference(Pid::PAT, pcr, &mut out)
-        .unwrap();
-    writer
-        .write_pes_packet(pid(0x100), &pes_packet(VIDEO, &payload), None, &mut out)
-        .unwrap();
-
-    assert_eq!(
-        packets(&out),
-        [
-            pcr_packet(pid(0x100), 15, pcr),
-            packet(
-                pid(0x100),
-                0,
-                true,
-                Some(stuffing(bytes.len().abs_diff(183))),
-                &bytes
-            ),
-            pcr_packet(pid(0x100), 0, pcr),
-            pcr_packet(Pid::PAT, 15, pcr),
-            packet(
-                pid(0x100),
-                1,
-                true,
-                Some(stuffing(bytes.len().abs_diff(183))),
-                &bytes
-            ),
+            Ok(()),
         ]
     );
 }
 
 #[test]
-fn a_pcr_on_a_pid_that_cannot_carry_one_or_beyond_its_fields_is_refused_leaving_out_as_it_was() {
-    let pcr = ClockReference::new(0, 0).unwrap();
-    let mut writer = PacketWriter::new();
-    let mut out = vec![0x47];
-
-    let errors = [
-        writer.write_program_clock_reference(Pid::TSDT, pcr, &mut out),
-        writer.write_program_clock_reference(Pid::NULL, pcr, &mut out),
-        writer.write_program_clock_reference(
-            pid(0x100),
-            ClockReference::new(0, 300).unwrap(),
-            &mut out,
+fn a_stream_is_refused_off_the_program_on_a_pid_in_use_or_for_its_descriptors() {
+    let mut muxer = Muxer::new(MuxerConfig::new());
+    let before_the_program = muxer.add_stream(1, pid(VIDEO_PID), StreamType::AVC_VIDEO, &[]);
+    muxer.add_program(1, pid(PMT_PID), None, &[]).unwrap();
+    muxer
+        .add_stream(1, pid(VIDEO_PID), StreamType::AVC_VIDEO, &[])
+        .unwrap();
+    let too_long = vec![0u8; 1_024];
+    let results = [
+        before_the_program,
+        muxer.add_stream(2, pid(AUDIO_PID), StreamType::ISO_IEC_13818_7_AUDIO, &[]),
+        muxer.add_stream(1, Pid::NULL, StreamType::ISO_IEC_13818_7_AUDIO, &[]),
+        muxer.add_stream(1, pid(VIDEO_PID), StreamType::ISO_IEC_13818_7_AUDIO, &[]),
+        muxer.add_stream(1, pid(PMT_PID), StreamType::ISO_IEC_13818_7_AUDIO, &[]),
+        muxer.add_stream(
+            1,
+            pid(AUDIO_PID),
+            StreamType::ISO_IEC_13818_7_AUDIO,
+            &too_long,
         ),
+        muxer.add_stream(1, pid(AUDIO_PID), StreamType::ISO_IEC_13818_7_AUDIO, &[]),
     ];
-
     assert_eq!(
-        errors,
+        results,
         [
-            Err(Error::Pid { pid: Pid::TSDT }),
+            Err(Error::UnregisteredProgram { program_number: 1 }),
+            Err(Error::UnregisteredProgram { program_number: 2 }),
             Err(Error::Pid { pid: Pid::NULL }),
-            Err(Error::Packet {
-                error: packet::Error::AdaptationField(
-                    adaptation_field::Error::ClockReferenceExtension {
-                        field: "program_clock_reference",
-                        extension: 300,
-                    }
-                )
+            Err(Error::PidInUse {
+                pid: pid(VIDEO_PID)
             }),
+            Err(Error::PidInUse { pid: pid(PMT_PID) }),
+            Err(Error::TsProgramMapSection {
+                error: pmt::Error::EsInfoLength { length: 1_024 }
+            }),
+            Ok(()),
         ]
     );
-    assert_eq!(out, [0x47]);
+}
+
+#[test]
+#[should_panic(expected = "a program is registered already")]
+fn a_second_program_panics() {
+    let mut muxer = muxer_of(MuxerConfig::new());
+    let _ = muxer.add_program(2, pid(0x1001), None, &[]);
+}
+
+#[test]
+#[should_panic(expected = "a stream is registered after the first PES packet")]
+fn a_stream_after_the_first_pes_packet_panics() {
+    let mut muxer = muxer_of(MuxerConfig::new());
+    muxer
+        .handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &[], Some(90_000)))
+        .unwrap();
+    let _ = muxer.add_stream(1, pid(0x0102), StreamType::AVC_VIDEO, &[]);
+}
+
+#[test]
+#[should_panic(expected = "a PES packet is given after finish")]
+fn a_pes_packet_after_finish_panics() {
+    let mut muxer = muxer_of(MuxerConfig::new());
+    muxer.finish();
+    let _ = muxer.handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &[], Some(90_000)));
+}
+
+#[test]
+fn after_finish_poll_output_gives_what_is_held_and_a_second_finish_does_nothing() {
+    let mut muxer = muxer_of(MuxerConfig::new());
+    let packet = pes_packet(0xe0, &[1], Some(90_000));
+    muxer.handle_pes_packet(pid(VIDEO_PID), &packet).unwrap();
+    muxer.finish();
+    muxer.finish();
+    let mut out = Vec::new();
+    muxer.poll_output(&mut out);
+    let mut fresh = muxer_of(MuxerConfig::new());
+    fresh.handle_pes_packet(pid(VIDEO_PID), &packet).unwrap();
+    let mut expected = Vec::new();
+    fresh.poll_output(&mut expected);
+    assert_eq!(out, expected);
+}
+
+#[test]
+fn the_packets_counted_are_those_a_payload_unit_is_cut_into() {
+    let mut adaptation_field = AdaptationField::new();
+    adaptation_field.program_clock_reference = Some(pcr(0));
+    let mut counted = Vec::new();
+    let mut written = Vec::new();
+    for length in 1..=600 {
+        for field in [None, Some(adaptation_field.clone())] {
+            let field_length = field.as_ref().map_or(0, AdaptationField::encoded_len);
+            counted.push(packet_count(length, field_length));
+            let mut out = Vec::new();
+            let unit = vec![0; length];
+            written.push(
+                PacketWriter::new()
+                    .write_payload_unit(
+                        pid(VIDEO_PID),
+                        |out| {
+                            out.extend_from_slice(&unit);
+                            Ok(())
+                        },
+                        field,
+                        Stuffing::AdaptationField,
+                        &mut out,
+                    )
+                    .unwrap(),
+            );
+        }
+    }
+    assert_eq!(counted, written);
+}
+
+#[test]
+fn the_pcr_is_the_dts_less_the_mux_delay_and_never_goes_back() {
+    let mut config = MuxerConfig::new();
+    config.pcr_interval = Duration::ZERO;
+    let mut muxer = muxer_of(config);
+    let mut pcrs = Vec::new();
+    for dts in [90_000, 99_000, 95_000, 108_000] {
+        muxer
+            .handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &[0], Some(dts)))
+            .unwrap();
+        let mut out = Vec::new();
+        muxer.poll_output(&mut out);
+        pcrs.extend(out.chunks(188).filter_map(|chunk| {
+            TransportPacket::read(chunk)
+                .unwrap()
+                .adaptation_field
+                .and_then(|field| field.program_clock_reference)
+                .map(ClockReference::ticks)
+        }));
+    }
+    assert_eq!(
+        pcrs,
+        [27_000 * 300, 36_000 * 300, 36_000 * 300, 45_000 * 300]
+    );
 }
