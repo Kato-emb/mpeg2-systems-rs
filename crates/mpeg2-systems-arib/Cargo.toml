@@ -1,0 +1,21 @@
+[package]
+name = "mpeg2-systems-arib"
+version = "0.0.0"
+description = "ARIB extensions to mpeg2-systems: the STD-B10 descriptors that lead from a Program Map Table to ARIB STD-B24 captions"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+license.workspace = true
+
+[features]
+default = ["alloc"]
+alloc = ["mpeg2-systems/alloc"]
+
+[dependencies]
+mpeg2-systems = { workspace = true }
+
+[lints]
+workspace = true
