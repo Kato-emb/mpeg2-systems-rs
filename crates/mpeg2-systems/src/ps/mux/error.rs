@@ -13,9 +13,10 @@ use crate::time::Timestamp;
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Error {
-    /// The `stream_id` given is not that of a PES packet: below 0xBD it is
-    /// the start code of another element, such as a pack header or a
-    /// program stream map
+    /// The `stream_id` given is below 0xBD, which this entry point does not
+    /// take: 0xBC, the `program_stream_map`, is written with
+    /// [`ProgramStreamMap`](crate::ps::ProgramStreamMap), and those below it
+    /// start the other elements of a Program Stream, such as a pack header
     StreamId {
         /// The `stream_id` given
         stream_id: StreamId,
@@ -154,7 +155,7 @@ impl fmt::Display for Error {
         match self {
             Self::StreamId { stream_id } => write!(
                 formatter,
-                "stream_id {:#04x} is not that of a PES packet",
+                "stream_id {:#04x} is below 0xbd, which is not taken here",
                 stream_id.get()
             ),
             Self::LengthUnspecified { stream_id } => write!(

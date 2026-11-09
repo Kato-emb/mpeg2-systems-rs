@@ -79,16 +79,19 @@ impl PackWriter {
     /// PES packet, ISO/IEC 13818-1 §2.4.3.6
     ///
     /// The first packet has the optional header given, as it is; the ones
-    /// after it have the same header without its times (PTS, DTS and ESCR),
-    /// which belong to the start of the payload. The payloads of the packets
+    /// after it have the same header without its PTS and DTS, the
+    /// presentation and decoding times of an access unit, and its ESCR, the
+    /// time a byte of the packet is due at the input of the PES-STD
+    /// (§2.4.3.7). The payloads of the packets
     /// join back into `packet.payload` in order. An empty payload still
     /// writes one packet, so the timestamps can travel on their own. A write
     /// that fails leaves `out` as it was.
     ///
     /// # Errors
     ///
-    /// * [`StreamId`](Error::StreamId): the `stream_id` is below 0xBD, not
-    ///   that of a PES packet.
+    /// * [`StreamId`](Error::StreamId): the `stream_id` is below 0xBD, which
+    ///   this writer does not take: 0xBC, the `program_stream_map`, is
+    ///   written with [`write_program_stream_map`](Self::write_program_stream_map).
     /// * [`LengthUnspecified`](Error::LengthUnspecified): `length_unspecified`
     ///   is set.
     /// * [`PesPacket`](Error::PesPacket): [`PesPacket::write`] refuses a
@@ -134,8 +137,7 @@ impl PackWriter {
 
 /// The PES packets a payload is split into, each no longer than a length
 /// given: the first with the optional header of the packet, the ones after
-/// it with the same header without its times (PTS, DTS and ESCR), which
-/// belong to the start of the payload
+/// it with the same header without its PTS, DTS and ESCR
 ///
 /// An empty payload still gives one packet, and the payloads of the packets
 /// join back into the payload in order. How many packets, and how many
@@ -185,7 +187,7 @@ impl<'packet> PesPacketPieces<'packet> {
         }
         let mut continued = rest.clone();
         if let Some(header) = continued.optional_header.as_mut() {
-            clear_times(header);
+            clear_pts_dts_and_escr(header);
         }
         let continued_header = header_length(&continued);
         let count = after.div_ceil(capacity(self.longest_continued, continued_header));
@@ -217,8 +219,8 @@ fn capacity(longest: usize, header_length: usize) -> usize {
     longest.saturating_sub(header_length).max(1)
 }
 
-/// Takes the times, which belong to the start of the payload, off `header`
-fn clear_times(header: &mut OptionalHeader<'_>) {
+/// Takes the PTS, the DTS and the ESCR off `header`
+fn clear_pts_dts_and_escr(header: &mut OptionalHeader<'_>) {
     header.pts = None;
     header.dts = None;
     header.escr = None;
@@ -238,7 +240,7 @@ impl<'packet> Iterator for PesPacketPieces<'packet> {
         } else {
             rest.payload = after;
             if let Some(header) = rest.optional_header.as_mut() {
-                clear_times(header);
+                clear_pts_dts_and_escr(header);
             }
             self.longest = self.longest_continued;
         }

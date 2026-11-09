@@ -111,11 +111,12 @@ pub struct MuxerConfig {
     /// rate ISO/IEC 13818-1 §2.5.2.2 equation 2-21 gives, within the 0.7 s
     /// §2.7.1 allows from one SCR to the next, whatever `pack_size`.
     pub pack_size: usize,
-    /// How far the SCR of a pack runs behind the DTS of the PES packet it
-    /// carries, or its PTS when it has no DTS (0.7 s by default)
+    /// Offset subtracted from a PES packet's DTS, or its PTS when it has no
+    /// DTS, to obtain the desired SCR (0.7 s by default)
     ///
-    /// Any value is taken, 0 included: the SCR of the first pack is then the
-    /// DTS of its PES packet.
+    /// Delivery of preceding packs may require a later SCR. Any value is
+    /// taken, 0 included: the SCR of the first pack is then the DTS of its
+    /// PES packet.
     pub mux_delay: Duration,
     /// The most bytes the output held for [`Muxer::poll_output`] may grow to
     /// (4 MiB by default)
@@ -158,9 +159,10 @@ impl MuxerConfig {
 ///   long for one pack is
 ///   split into several, each in a pack of its own: the first has the
 ///   optional header given, the ones after it the same header without its
-///   times (PTS, DTS and ESCR).
-/// - The first pack has the system header and the program stream map after
-///   its pack header (ISO/IEC 13818-1 §2.7.8). The system header has
+///   PTS, DTS and ESCR.
+/// - The first pack has the system header immediately after its pack
+///   header (ISO/IEC 13818-1 §2.7.8); the muxer then writes the program
+///   stream map in that pack. The system header has
 ///   `rate_bound` [`MuxerConfig::program_mux_rate`], no flag set, an
 ///   `audio_bound` of the streams of `stream_type` 0x03 and 0x04, a
 ///   `video_bound` of the video streams, and the bound of each stream
@@ -322,8 +324,10 @@ impl Muxer {
     ///
     /// # Errors
     ///
-    /// * [`StreamId`](Error::StreamId): `stream_id` is below 0xBD, not that
-    ///   of a PES packet.
+    /// * [`StreamId`](Error::StreamId): `stream_id` is below 0xBD, which this
+    ///   entry point does not take: 0xBC, the `program_stream_map`, is written
+    ///   with [`ProgramStreamMap`](crate::ps::ProgramStreamMap), and those
+    ///   below it start the other elements of a Program Stream.
     /// * [`StreamIdExtension`](Error::StreamIdExtension):
     ///   `stream_id_extension` is given where `stream_id` is not 0xFD, or
     ///   none where it is.
