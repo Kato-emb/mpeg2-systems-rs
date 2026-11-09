@@ -53,7 +53,7 @@ impl ProgramDefinition {
         self.pcr_pid.or_else(|| {
             self.streams
                 .iter()
-                .find(|stream| is_video(stream.stream_type))
+                .find(|stream| stream.stream_type.is_video())
                 .or_else(|| self.streams.first())
                 .map(|stream| stream.pid)
         })
@@ -156,22 +156,4 @@ impl ProgramDefinition {
         pmt.write(&mut out)
             .map_err(|error| Error::TsProgramMapSection { error })
     }
-}
-
-/// Returns whether the muxer takes `stream_type` for video in choosing the
-/// PCR PID: a value Table 2-34 gives a video stream of a coding, whether or
-/// not the payload is a sub-bitstream
-const fn is_video(stream_type: StreamType) -> bool {
-    matches!(
-        stream_type,
-        StreamType::ISO_IEC_11172_2_VIDEO
-            | StreamType::ISO_IEC_13818_2_VIDEO
-            | StreamType::ISO_IEC_14496_2_VISUAL
-            | StreamType::AVC_VIDEO
-            | StreamType::ISO_IEC_15444_1_VIDEO
-            | StreamType::HEVC_VIDEO
-            | StreamType::JPEG_XS_VIDEO
-            | StreamType::VVC_VIDEO
-            | StreamType::EVC_VIDEO
-    )
 }
