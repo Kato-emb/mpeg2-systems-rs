@@ -241,7 +241,14 @@ jobs:
       - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
         timeout-minutes: 5
         with:
-          tool: cargo-fuzz
+          tool: cargo-binstall
+      # Not install-action's `tool: cargo-fuzz`: the action has no manifest for
+      # cargo-fuzz and hands it to cargo-binstall, which falls back to a
+      # third-party build from QuickInstall when the release download fails.
+      # Without that strategy the fallback is a build from the crates.io
+      # source.
+      - timeout-minutes: 10
+        run: cargo binstall --no-confirm --locked --disable-strategies quick-install cargo-fuzz
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: fuzz
@@ -258,8 +265,8 @@ jobs:
       - run: |
           mkdir -p "$RUNNER_TEMP/seeds" "$RUNNER_TEMP/corpus"
           cp fuzz/seeds/* "$RUNNER_TEMP/seeds/"
-      # The target is spelled out: the cargo-fuzz this action installs is a
-      # static musl binary, and defaults to the triple it was built for.
+      # The target is spelled out: the released cargo-fuzz is a static musl
+      # binary, and defaults to the triple it was built for.
       # LeakSanitizer rather than AddressSanitizer: unsafe code is forbidden in
       # every crate the targets reach, so AddressSanitizer's memory checks have
       # nothing to find and slow every run. Not no sanitizer at all: libFuzzer
