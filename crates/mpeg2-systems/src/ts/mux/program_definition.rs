@@ -15,7 +15,7 @@ use crate::ts::Pid;
 
 /// The program registered, and the streams registered with it
 ///
-/// Program definition, ISO/IEC 13818-1 §2.4.4.8
+/// Program definition, ISO/IEC 13818-1 §2.4.4.9
 #[derive(Debug, Clone)]
 pub(super) struct ProgramDefinition {
     pub(super) program_number: NonZeroU16,
@@ -158,7 +158,9 @@ impl ProgramDefinition {
     }
 }
 
-/// Returns whether `stream_type` is the base video of a coding
+/// Returns whether the muxer takes `stream_type` for video in choosing the
+/// PCR PID: a value Table 2-34 gives a video stream of a coding, whether or
+/// not the payload is a sub-bitstream
 const fn is_video(stream_type: StreamType) -> bool {
     matches!(
         stream_type,

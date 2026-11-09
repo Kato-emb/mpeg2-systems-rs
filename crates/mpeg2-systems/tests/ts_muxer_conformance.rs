@@ -189,7 +189,7 @@ mod tests {
     }
 
     /// The time of the 27 MHz clock at which the packet at `index` arrives,
-    /// from the PCRs on either side of it (ISO/IEC 13818-1 §2.4.2.2,
+    /// from the PCRs on either side of it (ISO/IEC 13818-1 §2.4.2.3,
     /// equation 2-4), `None` outside the first and the last PCR
     fn arrival(pcrs: &[(u64, u64)], index: u64) -> Option<u64> {
         let after = pcrs.iter().position(|&(at, _)| at > index)?;

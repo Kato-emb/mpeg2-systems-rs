@@ -177,8 +177,8 @@ pub enum Error {
         /// The `pcr_interval` set
         pcr_interval: Duration,
     },
-    /// The first PES packet of a stream has no PTS, which ISO/IEC 13818-1
-    /// §2.7.5 asks of it
+    /// The first PES packet supplied for a stream has no PTS, which this
+    /// muxer requires to initialize the stream's timeline
     MissingPts {
         /// The PID of the stream
         pid: Pid,
@@ -341,7 +341,7 @@ pub struct MuxerConfig {
     ///
     /// [`Muxer::new`] takes from one tick of the 27 MHz system clock to
     /// 0.1 s: no longer than §2.7.2 allows, and not so short that two PCRs
-    /// fall at one time, between which the rate of §2.4.2.2 equation 2-4 is
+    /// fall at one time, between which the rate of §2.4.2.3 equation 2-5 is
     /// not defined.
     pub pcr_interval: Duration,
     /// How far the PCR runs behind the DTS of the PES packet it is sent with,
@@ -405,14 +405,17 @@ impl MuxerConfig {
 ///   refused as [`TimestampGap`](Error::TimestampGap).
 /// - The PCR PID is the `pcr_pid` registered with the program. Without one,
 ///   it is the PID of the first video stream registered, or of the first
-///   stream when none is video. The video streams are those of `stream_type`
-///   0x01, 0x02, 0x10, 0x1B, 0x21, 0x24, 0x32, 0x33 and 0x35, the base
-///   video of each coding Table 2-34 lists, not a sub-bitstream, an
-///   additional view or an enhancement.
+///   stream when none is video. The muxer takes for video the streams of
+///   `stream_type` 0x01, 0x02, 0x10, 0x1B, 0x21, 0x24, 0x32, 0x33 and 0x35,
+///   the values Table 2-34 gives a video stream of each coding, and not
+///   those it gives only an additional view, an enhancement or another
+///   part of a video stream; the value does not tell whether the payload is
+///   a sub-bitstream.
 ///
 /// The muxer does not write null packets to keep a constant bit rate.
-/// It carries one program only: the PCRs of several programs cannot all keep
-/// to the times of their own streams at a variable bit rate.
+/// It carries one program only. A variable-rate Transport Stream containing
+/// programs with independent time bases cannot have a consistent T-STD
+/// delivery schedule (ISO/IEC 13818-1 §2.4.2.3).
 /// It does not guarantee that the stream fits the buffers of the T-STD.
 /// It does not pace the output in real time; the caller sends it at the pace
 /// its PCRs give.

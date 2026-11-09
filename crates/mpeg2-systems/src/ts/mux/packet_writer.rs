@@ -81,9 +81,10 @@ impl PacketWriter {
     /// `ps::mux::PackWriter::write_pes_packets` splits a payload into PES
     /// packets). The first has `payload_unit_start_indicator` set and, when
     /// `pcr` is given, the PCR in its adaptation field; the last is filled out
-    /// with stuffing bytes in its adaptation field. A video PES packet too
-    /// long for `PES_packet_length` is written with `length_unspecified` set,
-    /// as a Transport Stream allows.
+    /// with stuffing bytes in its adaptation field. For video PES packets too
+    /// long for `PES_packet_length`, the caller must set
+    /// `length_unspecified`, as a Transport Stream permits a zero
+    /// `PES_packet_length` for video (§2.4.3.7).
     ///
     /// # Errors
     ///
