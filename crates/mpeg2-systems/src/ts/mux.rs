@@ -254,7 +254,7 @@ impl fmt::Display for Error {
             ),
             Self::PcrInterval { pcr_interval } => write!(
                 formatter,
-                "pcr_interval {pcr_interval:?} is not from a tick of the system clock to 0.1 s"
+                "pcr_interval {pcr_interval:?} is outside one tick of the system clock to 0.1 s"
             ),
             Self::MissingPts { pid } => write!(
                 formatter,
@@ -328,6 +328,12 @@ pub struct MuxerConfig {
     pub transport_stream_id: u16,
     /// The time from one sending of the PAT and the PMT to the next
     /// (100 ms by default)
+    ///
+    /// Any value is taken, both ends included: 0 sends the PAT and the PMT
+    /// before every PES packet, and [`Duration::MAX`] only before the first.
+    /// The specification places no requirement on how often PSI sections
+    /// are sent (ISO/IEC 13818-1 Annex C.5); what an operation asks of it,
+    /// such as ETSI TR 101 290, is the caller's to choose.
     pub psi_interval: Duration,
     /// The time from one PCR to the next (40 ms by default, the threshold
     /// of the `PCR_repetition_error` of ETSI TR 101 290, shorter than the
@@ -534,6 +540,8 @@ impl Times {
     /// `clock` alone when `interval` is 0
     const fn due(sent_at: SystemTimeClock, clock: SystemTimeClock, interval: u64) -> Self {
         match clock.ticks_since(sent_at).checked_div(interval) {
+            // Why not no time for an interval of 0: every whole number of
+            // intervals after `sent_at` falls at `clock`, so it is due once.
             None => Self::once(clock),
             Some(count) => Self {
                 first: sent_at.add_ticks(interval),

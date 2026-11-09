@@ -829,3 +829,69 @@ fn the_shortest_pcr_interval_never_sends_two_pcrs_of_one_value() {
     });
     assert_eq!((pcrs.len(), rising), (301, true));
 }
+
+/// For each input given a muxer of `config`, how many PATs and PMTs its
+/// output carries, and whether they all come before the PES packet
+fn psi_of_each(config: MuxerConfig, inputs: &[(u16, u8, u64)]) -> Vec<(usize, usize, bool)> {
+    let mut muxer = muxer_of(config);
+    inputs
+        .iter()
+        .map(|&(stream_pid, stream_id, timestamp)| {
+            muxer
+                .handle_pes_packet(pid(stream_pid), &stamped(stream_id, timestamp))
+                .unwrap();
+            let mut out = Vec::new();
+            muxer.poll_output(&mut out);
+            let packets: Vec<TransportPacket<'_>> = out
+                .chunks(188)
+                .map(|chunk| TransportPacket::read(chunk).unwrap())
+                .collect();
+            let is_psi =
+                |packet: &TransportPacket<'_>| packet.pid == Pid::PAT || packet.pid == pid(PMT_PID);
+            let pes_start = packets
+                .iter()
+                .position(|packet| {
+                    packet.pid == pid(stream_pid) && packet.payload_unit_start_indicator
+                })
+                .unwrap();
+            (
+                packets
+                    .iter()
+                    .filter(|packet| packet.pid == Pid::PAT)
+                    .count(),
+                packets
+                    .iter()
+                    .filter(|packet| packet.pid == pid(PMT_PID))
+                    .count(),
+                packets.iter().skip(pes_start).all(|packet| !is_psi(packet)),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_psi_interval_of_0_sends_the_pat_and_the_pmt_before_every_pes_packet() {
+    let mut config = MuxerConfig::new();
+    config.psi_interval = Duration::ZERO;
+    let inputs = [
+        (VIDEO_PID, 0xe0, 90_000),
+        (AUDIO_PID, 0xc0, 90_000),
+        (VIDEO_PID, 0xe0, 91_800),
+        (VIDEO_PID, 0xe0, 181_800),
+    ];
+    assert_eq!(psi_of_each(config, &inputs), vec![(1, 1, true); 4]);
+}
+
+#[test]
+fn a_psi_interval_of_duration_max_sends_the_pat_and_the_pmt_before_the_first_pes_packet_only() {
+    let mut config = MuxerConfig::new();
+    config.psi_interval = Duration::MAX;
+    let inputs: Vec<(u16, u8, u64)> = (0..1_000)
+        .map(|index| (VIDEO_PID, 0xe0, 90_000 + index * 1_800))
+        .chain([(VIDEO_PID, 0xe0, 90_000 + 999 * 1_800 + 10 * 90_000)])
+        .collect();
+    let expected: Vec<(usize, usize, bool)> = core::iter::once((1, 1, true))
+        .chain(core::iter::repeat_n((0, 0, true), inputs.len() - 1))
+        .collect();
+    assert_eq!(psi_of_each(config, &inputs), expected);
+}
