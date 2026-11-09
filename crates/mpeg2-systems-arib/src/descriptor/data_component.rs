@@ -140,6 +140,7 @@ impl<'input> TryFrom<&RawDescriptor<'input>> for DataComponentDescriptor<'input>
 /// Coding of a data component, which a standardization organization assigns
 ///
 /// `data_component_id`, ARIB STD-B10 §6.2.20 and Annex J
+#[doc(alias = "data_component_id")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DataComponentId(u16);
 
