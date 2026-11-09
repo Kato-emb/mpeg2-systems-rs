@@ -110,10 +110,10 @@ use mpeg2_systems::stream_type::StreamType;
 use mpeg2_systems::time::{ClockReference, Timestamp};
 use mpeg2_systems::ts::Pid;
 use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event};
-use mpeg2_systems::ts::mux::Muxer;
+use mpeg2_systems::ts::mux::PacketWriter;
 
 let (pmt_pid, video_pid) = (Pid::try_from(0x1000)?, Pid::try_from(0x0100)?);
-let mut muxer = Muxer::new();
+let mut writer = PacketWriter::new();
 let mut stream = Vec::new();
 // The PAT and the PMT, built with their own types
 let mut programs = Vec::new();
@@ -123,7 +123,7 @@ ProgramLoop::write_from(
 )?;
 let mut pat = ProgramAssociationSection::new(1, VersionNumber::try_from(0)?);
 pat.programs = ProgramLoop::from(&programs[..]);
-muxer.write_program_association_section(&pat, &mut stream)?;
+writer.write_program_association_section(&pat, &mut stream)?;
 let mut streams = Vec::new();
 ElementaryStreamLoop::write_from(
     [ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, video_pid)],
@@ -132,15 +132,15 @@ ElementaryStreamLoop::write_from(
 let mut pmt = TsProgramMapSection::new(1, VersionNumber::try_from(0)?);
 pmt.pcr_pid = Some(video_pid);
 pmt.elementary_streams = ElementaryStreamLoop::from(&streams[..]);
-muxer.write_ts_program_map_section(pmt_pid, &pmt, &mut stream)?;
+writer.write_ts_program_map_section(pmt_pid, &pmt, &mut stream)?;
 // A PCR on its own, then an access unit in a PES packet
-muxer.write_program_clock_reference(video_pid, ClockReference::new(81_000, 0)?, &mut stream)?;
+writer.write_program_clock_reference(video_pid, ClockReference::new(81_000, 0)?, &mut stream)?;
 let access_unit = vec![0xaa; 1_000];
 let mut header = OptionalHeader::new();
 header.pts = Some(Timestamp::try_from(90_000)?);
 let mut packet = PesPacket::new(StreamId::from(0xe0), &access_unit);
 packet.optional_header = Some(header);
-muxer.write_pes_packet(video_pid, &packet, None, &mut stream)?;
+writer.write_pes_packet(video_pid, &packet, None, &mut stream)?;
 
 // Read back, the access unit is the payload of the one PES packet
 let mut demuxer = Demuxer::new(DemuxerConfig::default());

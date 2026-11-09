@@ -16,7 +16,7 @@ mod tests {
     use std::process::Command;
 
     use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
-    use mpeg2_systems::ps::mux::Muxer;
+    use mpeg2_systems::ps::mux::PackWriter;
     use mpeg2_systems::ps::psm::{ElementaryStream, ElementaryStreamLoop};
     use mpeg2_systems::ps::{PackHeader, ProgramStreamMap, demux as ps_demux};
     use mpeg2_systems::psi::VersionNumber;
@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     #[ignore = "runs ffprobe from FFmpeg"]
-    fn a_program_stream_the_muxer_writes_reads_in_ffprobe_as_written() {
+    fn a_program_stream_the_pack_writer_writes_reads_in_ffprobe_as_written() {
         const VIDEO: u8 = 0xE0;
         const AUDIO: u8 = 0xC0;
         let (mut video, audio) = pes_packets_of_188();
@@ -463,9 +463,9 @@ mod tests {
             (VIDEO, video[2].0, &video[2].1[..]),
         ];
 
-        let muxer = Muxer::new();
+        let writer = PackWriter::new();
         let mut written = Vec::new();
-        muxer
+        writer
             .write_pack_header(
                 &PackHeader::new(ClockReference::new(0, 0).unwrap(), 2_000),
                 &mut written,
@@ -482,18 +482,18 @@ mod tests {
         )
         .unwrap();
         map.elementary_streams = ElementaryStreamLoop::from(&streams[..]);
-        muxer.write_program_stream_map(&map, &mut written).unwrap();
+        writer.write_program_stream_map(&map, &mut written).unwrap();
         let mut expected: BTreeMap<u64, Vec<Timing>> = BTreeMap::new();
         let mut pes_packets = Vec::new();
         for (stream_id, (pts, dts), payload) in access_units {
             let packet = pes_packet(stream_id, (pts, dts), payload);
-            pes_packets.push(muxer.write_pes_packets(&packet, &mut written).unwrap());
+            pes_packets.push(writer.write_pes_packets(&packet, &mut written).unwrap());
             expected
                 .entry(program_stream_id(stream_id))
                 .or_default()
                 .push((pts, dts.or(pts)));
         }
-        muxer.write_program_end_code(&mut written);
+        writer.write_program_end_code(&mut written);
         assert!(
             pes_packets[0] > 1,
             "the first picture must be split to check splitting"
@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     #[ignore = "runs ffprobe from FFmpeg and tsanalyze from TSDuck"]
-    fn a_transport_stream_the_muxer_writes_reads_in_ffprobe_and_tsanalyze_as_written() {
+    fn a_transport_stream_the_packet_writer_writes_reads_in_ffprobe_and_tsanalyze_as_written() {
         const VIDEO_PID: u16 = 0x100;
         const AUDIO_PID: u16 = 0x101;
         let pid = |value: u16| Pid::try_from(value).unwrap();
@@ -524,7 +524,7 @@ mod tests {
         // start code (`next_start_code` in ISO/IEC 13818-2).
         video[0].1.resize(100_000, 0);
 
-        let mut muxer = ts_mux::Muxer::new();
+        let mut writer = ts_mux::PacketWriter::new();
         let mut written = Vec::new();
         let mut programs = Vec::new();
         ProgramLoop::write_from(
@@ -537,7 +537,7 @@ mod tests {
         .unwrap();
         let mut pat = ProgramAssociationSection::new(1, VersionNumber::try_from(0).unwrap());
         pat.programs = ProgramLoop::from(&programs[..]);
-        muxer
+        writer
             .write_program_association_section(&pat, &mut written)
             .unwrap();
         let mut streams = Vec::new();
@@ -552,7 +552,7 @@ mod tests {
         let mut pmt = TsProgramMapSection::new(1, VersionNumber::try_from(0).unwrap());
         pmt.pcr_pid = Some(pid(VIDEO_PID));
         pmt.elementary_streams = pmt::ElementaryStreamLoop::from(&streams[..]);
-        muxer
+        writer
             .write_ts_program_map_section(pid(0x1000), &pmt, &mut written)
             .unwrap();
         let mut expected: BTreeMap<u64, Vec<Timing>> = BTreeMap::new();
@@ -560,12 +560,12 @@ mod tests {
             let mut packet = pes_packet(0xE0, *timing, payload);
             packet.length_unspecified = true;
             let pcr = ClockReference::new(timing.1.unwrap() - 9_000, 0).unwrap();
-            muxer
+            writer
                 .write_pes_packet(pid(VIDEO_PID), &packet, Some(pcr), &mut written)
                 .unwrap();
             expected.entry(VIDEO_PID.into()).or_default().push(*timing);
             if let Some((timing, payload)) = audio.get(index) {
-                muxer
+                writer
                     .write_pes_packet(
                         pid(AUDIO_PID),
                         &pes_packet(0xC0, *timing, payload),
@@ -578,7 +578,7 @@ mod tests {
             // Why a PCR on its own as well as on each PES packet: tsanalyze
             // then checks that a packet without a payload keeps the
             // continuity counter of the packet before it (§2.4.3.3).
-            muxer
+            writer
                 .write_program_clock_reference(
                     pid(VIDEO_PID),
                     ClockReference::new(pcr.base() + 4_500, 0).unwrap(),

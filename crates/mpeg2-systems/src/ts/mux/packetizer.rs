@@ -3,7 +3,7 @@
 
 use alloc::vec::Vec;
 
-use super::{Error, Muxer};
+use super::{Error, PacketWriter};
 use crate::field::write_or_truncate;
 use crate::time::ClockReference;
 use crate::ts::adaptation_field::{AdaptationField, MAX_ADAPTATION_FIELD_LENGTH};
@@ -26,7 +26,7 @@ pub(super) enum Stuffing {
     Payload,
 }
 
-impl Muxer {
+impl PacketWriter {
     /// Appends a Transport Packet of `pid` that carries
     /// `program_clock_reference` in an adaptation field filling the packet,
     /// and no payload
@@ -99,7 +99,7 @@ impl Muxer {
         write_or_truncate(out, |out| {
             // Why write the unit into `out` and copy it out packet by packet,
             // then remove it: the packets need its bytes whole, and `out` is
-            // the one buffer that grows to fit without the muxer holding one
+            // the one buffer that grows to fit without the writer holding one
             // of its own.
             write_unit(out)?;
             let end = out.len();

@@ -2,13 +2,13 @@
 //! Packets
 //!
 //! A Transport Stream is written payload unit by payload unit into a buffer
-//! the caller owns. [`Muxer`] cuts each PES packet or section into the
-//! Transport Packets of a PID, and keeps the `continuity_counter` of each PID.
-//! What to write, and when, is up to the caller: the PAT and the PMT built
-//! with their own types and sent again as often as the caller chooses, the
-//! PCR taken from the caller's clock. The crate does not write null packets,
-//! keep a constant bit rate, check the T-STD, or put more than one section in
-//! a Transport Packet.
+//! the caller owns. [`PacketWriter`] cuts each PES packet or section into the
+//! Transport Packets of a PID, writes them in the order given, and keeps the
+//! `continuity_counter` of each PID. What to write, and when, is up to the
+//! caller: the PAT and the PMT built with their own types and sent again as
+//! often as the caller chooses, the PCR taken from the caller's clock. The
+//! crate does not write null packets, keep a constant bit rate, check the
+//! T-STD, or put more than one section in a Transport Packet.
 //!
 //! ```
 //! use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
@@ -19,10 +19,10 @@
 //! use mpeg2_systems::time::{ClockReference, Timestamp};
 //! use mpeg2_systems::ts::Pid;
 //! use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event};
-//! use mpeg2_systems::ts::mux::Muxer;
+//! use mpeg2_systems::ts::mux::PacketWriter;
 //!
 //! let (pmt_pid, video_pid) = (Pid::try_from(0x1000)?, Pid::try_from(0x0100)?);
-//! let mut muxer = Muxer::new();
+//! let mut writer = PacketWriter::new();
 //! let mut stream = Vec::new();
 //!
 //! // The PAT, naming program 1 and its PMT
@@ -36,7 +36,7 @@
 //! )?;
 //! let mut pat = ProgramAssociationSection::new(1, VersionNumber::try_from(0)?);
 //! pat.programs = ProgramLoop::from(&programs[..]);
-//! muxer.write_program_association_section(&pat, &mut stream)?;
+//! writer.write_program_association_section(&pat, &mut stream)?;
 //! // The PMT, its PCR on the video PID
 //! let mut streams = Vec::new();
 //! ElementaryStreamLoop::write_from(
@@ -46,7 +46,7 @@
 //! let mut pmt = TsProgramMapSection::new(1, VersionNumber::try_from(0)?);
 //! pmt.pcr_pid = Some(video_pid);
 //! pmt.elementary_streams = ElementaryStreamLoop::from(&streams[..]);
-//! muxer.write_ts_program_map_section(pmt_pid, &pmt, &mut stream)?;
+//! writer.write_ts_program_map_section(pmt_pid, &pmt, &mut stream)?;
 //! // An access unit, with the PCR of the program
 //! let access_unit = vec![0xaa; 1_000];
 //! let mut header = OptionalHeader::new();
@@ -54,7 +54,7 @@
 //! let mut packet = PesPacket::new(StreamId::from(0xe0), &access_unit);
 //! packet.optional_header = Some(header);
 //! let pcr = ClockReference::new(81_000, 0)?;
-//! assert_eq!(muxer.write_pes_packet(video_pid, &packet, Some(pcr), &mut stream)?, 6);
+//! assert_eq!(writer.write_pes_packet(video_pid, &packet, Some(pcr), &mut stream)?, 6);
 //!
 //! // Read back
 //! let mut demuxer = Demuxer::new(DemuxerConfig::default());
@@ -177,23 +177,25 @@ impl core::error::Error for Error {
     }
 }
 
-/// Transport Stream muxer, which cuts PES packets and sections into the
-/// Transport Packets of a PID, in a buffer the caller owns
+/// Writer of Transport Packets, which cuts each PES packet or section into
+/// the Transport Packets of a PID and appends them, in the order given, to a
+/// buffer the caller owns
 ///
-/// The muxer keeps the `continuity_counter` of each PID it has written, and
+/// The writer keeps the `continuity_counter` of each PID it has written, and
 /// nothing else; a write that fails leaves the buffer and the counters as
-/// they were. Which PIDs carry what, which packets carry a PCR, and when the
-/// PAT and the PMT are sent again are up to the caller.
+/// they were. It does not decide the order of the packets in the stream, the
+/// value of a PCR or how far apart PCRs are, how often the PAT and the PMT
+/// are sent, or which PID carries what.
 #[derive(Debug, Clone, Default)]
-pub struct Muxer {
+pub struct PacketWriter {
     /// The `continuity_counter` the next Transport Packet of each PID takes
     // Why not the counter of the last packet written: a PID not in the map
     // then starts at 0 without a second case.
     continuity_counters: BTreeMap<Pid, ContinuityCounter>,
 }
 
-impl Muxer {
-    /// Returns a muxer that has written nothing
+impl PacketWriter {
+    /// Returns a writer that has written nothing
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -237,12 +239,12 @@ impl Muxer {
     /// PES packet, ISO/IEC 13818-1 §2.4.3.6, carried as §2.4.3.3 lays out
     ///
     /// One PES packet goes into as many Transport Packets as it needs (where
-    /// the Program Stream muxer's `write_pes_packets` splits a payload into
-    /// PES packets). The first has `payload_unit_start_indicator` set and,
-    /// when `pcr` is given, the PCR in its adaptation field; the last is
-    /// filled out with stuffing bytes in its adaptation field. A video PES
-    /// packet too long for `PES_packet_length` is written with
-    /// `length_unspecified` set, as a Transport Stream allows.
+    /// `ps::mux::PackWriter::write_pes_packets` splits a payload into PES
+    /// packets). The first has `payload_unit_start_indicator` set and, when
+    /// `pcr` is given, the PCR in its adaptation field; the last is filled out
+    /// with stuffing bytes in its adaptation field. A video PES packet too
+    /// long for `PES_packet_length` is written with `length_unspecified` set,
+    /// as a Transport Stream allows.
     ///
     /// # Errors
     ///

@@ -69,7 +69,7 @@ fn packets(bytes: &[u8]) -> Vec<TransportPacket<'_>> {
         .collect()
 }
 
-/// A Transport Packet of `pid` as the muxer writes it
+/// A Transport Packet of `pid` as the writer writes it
 fn packet<'input>(
     pid: Pid,
     continuity_counter: u8,
@@ -98,7 +98,7 @@ fn a_pes_packet_shorter_than_a_payload_is_stuffed_in_the_adaptation_field() {
     let bytes = pes_bytes(&packet_to_write);
     let mut out = Vec::new();
 
-    let written = Muxer::new()
+    let written = PacketWriter::new()
         .write_pes_packet(pid(0x100), &packet_to_write, None, &mut out)
         .unwrap();
 
@@ -116,7 +116,7 @@ fn a_pes_packet_one_byte_short_of_a_payload_takes_an_empty_adaptation_field() {
     let bytes = pes_bytes(&packet_to_write);
     let mut out = Vec::new();
 
-    Muxer::new()
+    PacketWriter::new()
         .write_pes_packet(pid(0x100), &packet_to_write, None, &mut out)
         .unwrap();
 
@@ -133,7 +133,7 @@ fn a_pes_packet_of_a_payload_exactly_takes_no_adaptation_field() {
     let bytes = pes_bytes(&packet_to_write);
     let mut out = Vec::new();
 
-    Muxer::new()
+    PacketWriter::new()
         .write_pes_packet(pid(0x100), &packet_to_write, None, &mut out)
         .unwrap();
 
@@ -148,7 +148,7 @@ fn a_pes_packet_one_byte_past_a_payload_continues_into_a_stuffed_packet() {
     let (first, second) = bytes.split_at(184);
     let mut out = Vec::new();
 
-    let written = Muxer::new()
+    let written = PacketWriter::new()
         .write_pes_packet(pid(0x100), &packet_to_write, None, &mut out)
         .unwrap();
 
@@ -171,7 +171,7 @@ fn a_pcr_given_goes_in_the_adaptation_field_of_the_first_packet() {
     let pcr = ClockReference::new(123_456, 78).unwrap();
     let mut out = Vec::new();
 
-    Muxer::new()
+    PacketWriter::new()
         .write_pes_packet(pid(0x100), &packet_to_write, Some(pcr), &mut out)
         .unwrap();
 
@@ -194,7 +194,7 @@ fn a_pcr_on_a_short_pes_packet_shares_its_adaptation_field_with_the_stuffing() {
     let pcr = ClockReference::new(0, 0).unwrap();
     let mut out = Vec::new();
 
-    Muxer::new()
+    PacketWriter::new()
         .write_pes_packet(pid(0x100), &packet_to_write, Some(pcr), &mut out)
         .unwrap();
 
@@ -215,7 +215,7 @@ fn a_video_pes_packet_longer_than_its_length_field_is_written_unbounded() {
     let bytes = pes_bytes(&packet_to_write);
     let mut out = Vec::new();
 
-    let written = Muxer::new()
+    let written = PacketWriter::new()
         .write_pes_packet(pid(0x100), &packet_to_write, None, &mut out)
         .unwrap();
 
@@ -232,9 +232,9 @@ fn an_audio_pes_packet_longer_than_its_length_field_is_refused_leaving_out_as_it
     let payload = counting(70_000);
     let packet_to_write = pes_packet(AUDIO, &payload);
     let mut out = vec![0x47];
-    let mut muxer = Muxer::new();
+    let mut writer = PacketWriter::new();
 
-    let error = muxer
+    let error = writer
         .write_pes_packet(pid(0x101), &packet_to_write, None, &mut out)
         .unwrap_err();
 
@@ -254,13 +254,13 @@ fn an_audio_pes_packet_longer_than_its_length_field_is_refused_leaving_out_as_it
 fn a_refused_write_leaves_the_continuity_counter_where_it_was() {
     let too_long = counting(70_000);
     let short = counting(10);
-    let mut muxer = Muxer::new();
+    let mut writer = PacketWriter::new();
     let mut out = Vec::new();
 
-    muxer
+    writer
         .write_pes_packet(pid(0x101), &pes_packet(AUDIO, &too_long), None, &mut out)
         .unwrap_err();
-    muxer
+    writer
         .write_pes_packet(pid(0x101), &pes_packet(AUDIO, &short), None, &mut out)
         .unwrap();
 
@@ -276,7 +276,7 @@ fn a_pcr_with_an_extension_of_300_or_more_is_refused() {
     let payload = counting(10);
     let mut out = Vec::new();
 
-    let error = Muxer::new()
+    let error = PacketWriter::new()
         .write_pes_packet(
             pid(0x100),
             &pes_packet(VIDEO, &payload),
@@ -304,7 +304,7 @@ fn a_pes_packet_on_a_reserved_pid_is_refused() {
     let payload = counting(10);
     for refused in [Pid::PAT, Pid::CAT, pid(0x000F), Pid::NULL] {
         let mut out = Vec::new();
-        let error = Muxer::new()
+        let error = PacketWriter::new()
             .write_pes_packet(refused, &pes_packet(VIDEO, &payload), None, &mut out)
             .unwrap_err();
         assert_eq!(error, Error::Pid { pid: refused });
@@ -315,7 +315,7 @@ fn a_pes_packet_on_a_reserved_pid_is_refused() {
 #[test]
 fn a_stream_id_that_is_not_of_a_pes_packet_is_refused() {
     let mut out = Vec::new();
-    let error = Muxer::new()
+    let error = PacketWriter::new()
         .write_pes_packet(
             pid(0x100),
             &PesPacket::new(StreamId::from(0xBC), &[1]),
@@ -336,17 +336,17 @@ fn a_stream_id_that_is_not_of_a_pes_packet_is_refused() {
 #[test]
 fn the_continuity_counter_runs_on_per_pid_and_wraps_after_15() {
     let payload = counting(10);
-    let mut muxer = Muxer::new();
+    let mut writer = PacketWriter::new();
     let mut out = Vec::new();
     for _ in 0..17 {
-        muxer
+        writer
             .write_pes_packet(pid(0x100), &pes_packet(VIDEO, &payload), None, &mut out)
             .unwrap();
-        muxer
+        writer
             .write_pes_packet(pid(0x101), &pes_packet(AUDIO, &payload), None, &mut out)
             .unwrap();
     }
-    muxer
+    writer
         .write_pes_packet(pid(0x101), &pes_packet(AUDIO, &payload), None, &mut out)
         .unwrap();
 
@@ -371,7 +371,7 @@ fn a_section_starts_after_a_pointer_field_of_0_and_is_stuffed_with_0xff() {
     payload.resize(184, 0xFF);
     let mut out = Vec::new();
 
-    let written = Muxer::new()
+    let written = PacketWriter::new()
         .write_section(pid(0x1000), &section, &mut out)
         .unwrap();
 
@@ -394,7 +394,7 @@ fn a_section_longer_than_a_payload_continues_without_a_pointer_field() {
     second.resize(184, 0xFF);
     let mut out = Vec::new();
 
-    let written = Muxer::new()
+    let written = PacketWriter::new()
         .write_section(pid(0x1000), &section, &mut out)
         .unwrap();
 
@@ -413,7 +413,7 @@ fn a_section_on_the_pid_of_null_packets_is_refused() {
     let section = Section::new(TableId::from(0x80), &[]);
     let mut out = Vec::new();
 
-    let error = Muxer::new()
+    let error = PacketWriter::new()
         .write_section(Pid::NULL, &section, &mut out)
         .unwrap_err();
 
@@ -426,7 +426,7 @@ fn a_section_the_section_writer_refuses_is_refused_leaving_out_as_it_was() {
     let section = Section::new(TableId::FORBIDDEN, &[]);
     let mut out = vec![0x47];
 
-    let error = Muxer::new()
+    let error = PacketWriter::new()
         .write_section(Pid::PAT, &section, &mut out)
         .unwrap_err();
 
@@ -465,7 +465,7 @@ fn a_pat_goes_on_the_pat_pid_as_its_section() {
     let payload = section_payload(&bytes);
     let mut out = Vec::new();
 
-    let written = Muxer::new()
+    let written = PacketWriter::new()
         .write_program_association_section(&pat, &mut out)
         .unwrap();
 
@@ -482,7 +482,7 @@ fn a_pmt_goes_on_the_pid_given_as_its_section() {
     let payload = section_payload(&bytes);
     let mut out = Vec::new();
 
-    Muxer::new()
+    PacketWriter::new()
         .write_ts_program_map_section(pid(0x1000), &pmt, &mut out)
         .unwrap();
 
@@ -500,7 +500,9 @@ fn a_cat_goes_on_the_cat_pid_as_its_section() {
     let payload = section_payload(&bytes);
     let mut out = Vec::new();
 
-    Muxer::new().write_ca_section(&cat, &mut out).unwrap();
+    PacketWriter::new()
+        .write_ca_section(&cat, &mut out)
+        .unwrap();
 
     assert_eq!(packets(&out), [packet(Pid::CAT, 0, true, None, &payload)]);
 }
@@ -517,13 +519,13 @@ fn a_table_its_writer_refuses_is_refused_leaving_out_and_the_counter_as_they_wer
     pat.programs = ProgramLoop::from(&programs[..]);
     let mut pmt = TsProgramMapSection::new(1, VersionNumber::try_from(0).unwrap());
     pmt.pcr_pid = Some(pid(0x0005));
-    let mut muxer = Muxer::new();
+    let mut writer = PacketWriter::new();
     let mut out = vec![0x47];
 
     let errors = [
-        muxer.write_program_association_section(&pat, &mut out),
-        muxer.write_ts_program_map_section(pid(0x1000), &pmt, &mut out),
-        muxer.write_ts_program_map_section(
+        writer.write_program_association_section(&pat, &mut out),
+        writer.write_ts_program_map_section(pid(0x1000), &pmt, &mut out),
+        writer.write_ts_program_map_section(
             Pid::NULL,
             &TsProgramMapSection::new(1, VersionNumber::try_from(0).unwrap()),
             &mut out,
@@ -550,7 +552,7 @@ fn a_table_its_writer_refuses_is_refused_leaving_out_and_the_counter_as_they_wer
     pat.write(&mut bytes).unwrap();
     let payload = section_payload(&bytes);
     let mut written = Vec::new();
-    muxer
+    writer
         .write_program_association_section(&pat, &mut written)
         .unwrap();
     assert_eq!(
@@ -575,7 +577,7 @@ fn a_pcr_on_its_own_fills_a_packet_with_its_adaptation_field() {
     let pcr = ClockReference::new(27_000_000 / 300, 123).unwrap();
     let mut out = Vec::new();
 
-    Muxer::new()
+    PacketWriter::new()
         .write_program_clock_reference(pid(0x100), pcr, &mut out)
         .unwrap();
 
@@ -587,22 +589,22 @@ fn a_pcr_on_its_own_repeats_the_continuity_counter_of_the_packet_before_it() {
     let pcr = ClockReference::new(0, 0).unwrap();
     let payload = counting(10);
     let bytes = pes_bytes(&pes_packet(VIDEO, &payload));
-    let mut muxer = Muxer::new();
+    let mut writer = PacketWriter::new();
     let mut out = Vec::new();
 
-    muxer
+    writer
         .write_program_clock_reference(pid(0x100), pcr, &mut out)
         .unwrap();
-    muxer
+    writer
         .write_pes_packet(pid(0x100), &pes_packet(VIDEO, &payload), None, &mut out)
         .unwrap();
-    muxer
+    writer
         .write_program_clock_reference(pid(0x100), pcr, &mut out)
         .unwrap();
-    muxer
+    writer
         .write_program_clock_reference(Pid::PAT, pcr, &mut out)
         .unwrap();
-    muxer
+    writer
         .write_pes_packet(pid(0x100), &pes_packet(VIDEO, &payload), None, &mut out)
         .unwrap();
 
@@ -633,13 +635,13 @@ fn a_pcr_on_its_own_repeats_the_continuity_counter_of_the_packet_before_it() {
 #[test]
 fn a_pcr_on_a_pid_that_cannot_carry_one_or_beyond_its_fields_is_refused_leaving_out_as_it_was() {
     let pcr = ClockReference::new(0, 0).unwrap();
-    let mut muxer = Muxer::new();
+    let mut writer = PacketWriter::new();
     let mut out = vec![0x47];
 
     let errors = [
-        muxer.write_program_clock_reference(Pid::TSDT, pcr, &mut out),
-        muxer.write_program_clock_reference(Pid::NULL, pcr, &mut out),
-        muxer.write_program_clock_reference(
+        writer.write_program_clock_reference(Pid::TSDT, pcr, &mut out),
+        writer.write_program_clock_reference(Pid::NULL, pcr, &mut out),
+        writer.write_program_clock_reference(
             pid(0x100),
             ClockReference::new(0, 300).unwrap(),
             &mut out,

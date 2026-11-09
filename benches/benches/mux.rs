@@ -1,4 +1,5 @@
-//! Writing of PES packets as Transport Packets by the Transport Stream muxer
+//! Writing of PES packets as Transport Packets by the Transport Stream
+//! packet writer
 //!
 //! Before each measurement, the routine runs once more under an allocation
 //! count and must allocate nothing: once the output buffer has grown, writing
@@ -7,7 +8,7 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use mpeg2_systems::ts::mux::Muxer;
+use mpeg2_systems::ts::mux::PacketWriter;
 use mpeg2_systems_bench::{
     ACCESS_UNIT_LENGTH, CountingAllocator, PES_PACKETS, allocations_once_grown, mux_pes_packets,
 };
@@ -15,15 +16,15 @@ use mpeg2_systems_bench::{
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator::new();
 
-/// Measures the muxer writing video PES packets, each with a PCR
+/// Measures the packet writer writing video PES packets, each with a PCR
 fn mux_ts(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("mux_ts");
     let access_unit = vec![0xAA; ACCESS_UNIT_LENGTH];
-    let mut muxer = Muxer::new();
+    let mut writer = PacketWriter::new();
     let mut out = Vec::new();
     assert_eq!(
         allocations_once_grown(&ALLOCATOR, || {
-            mux_pes_packets(&mut muxer, &access_unit, &mut out);
+            mux_pes_packets(&mut writer, &access_unit, &mut out);
         }),
         0
     );
@@ -34,7 +35,7 @@ fn mux_ts(criterion: &mut Criterion) {
         BenchmarkId::from_parameter(format!("{PES_PACKETS} PES packets")),
         &access_unit,
         |bencher, access_unit| {
-            bencher.iter(|| mux_pes_packets(&mut muxer, black_box(access_unit), &mut out));
+            bencher.iter(|| mux_pes_packets(&mut writer, black_box(access_unit), &mut out));
         },
     );
     group.finish();

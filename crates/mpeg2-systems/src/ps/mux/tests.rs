@@ -70,7 +70,9 @@ fn video_packet(pts: Option<u64>, dts: Option<u64>, payload: &[u8]) -> PesPacket
 
 fn write(packet: &PesPacket<'_>) -> (usize, Vec<u8>) {
     let mut out = Vec::new();
-    let written = Muxer::new().write_pes_packets(packet, &mut out).unwrap();
+    let written = PackWriter::new()
+        .write_pes_packets(packet, &mut out)
+        .unwrap();
     (written, out)
 }
 
@@ -192,7 +194,7 @@ fn a_stream_without_an_optional_header_gets_its_payload_alone() {
 /// and what `out` holds after
 fn written_after_a_byte(packet: &PesPacket<'_>) -> (Result<usize, Error>, Vec<u8>) {
     let mut out = vec![0x47];
-    let result = Muxer::new().write_pes_packets(packet, &mut out);
+    let result = PackWriter::new().write_pes_packets(packet, &mut out);
     (result, out)
 }
 
@@ -283,7 +285,9 @@ fn a_system_header_is_written_as_it_reads_back() {
     header.stream_bounds = StreamBoundLoop::from(&stream_bounds[..]);
     let mut out = Vec::new();
 
-    Muxer::new().write_system_header(&header, &mut out).unwrap();
+    PackWriter::new()
+        .write_system_header(&header, &mut out)
+        .unwrap();
 
     assert_eq!(SystemHeader::read(&out), Ok(header));
 }
@@ -293,7 +297,7 @@ fn a_system_header_the_system_header_writer_refuses_is_refused_leaving_out_as_it
     let header = SystemHeader::new(0, 1, 1);
     let mut out = vec![0x00];
 
-    let error = Muxer::new().write_system_header(&header, &mut out);
+    let error = PackWriter::new().write_system_header(&header, &mut out);
 
     assert_eq!(
         error,

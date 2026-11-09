@@ -12,7 +12,7 @@ use mpeg2_systems::ps;
 use mpeg2_systems::time::{ClockReference, Timestamp};
 use mpeg2_systems::ts::Pid;
 use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig};
-use mpeg2_systems::ts::mux::Muxer;
+use mpeg2_systems::ts::mux::PacketWriter;
 
 /// Length of the inputs the demuxer is measured on
 pub const INPUT_LENGTH: usize = 10 << 20;
@@ -78,10 +78,10 @@ pub fn program_stream_events(
     events
 }
 
-/// PES packets the Transport Stream muxer writes in one pass
+/// PES packets the Transport Stream packet writer writes in one pass
 pub const PES_PACKETS: usize = 1_000;
 
-/// Length of the payload of each PES packet the muxer writes, which leaves
+/// Length of the payload of each PES packet the writer writes, which leaves
 /// the last Transport Packet of each short, so its stuffing is written too
 pub const ACCESS_UNIT_LENGTH: usize = 4_000;
 
@@ -90,8 +90,8 @@ pub const ACCESS_UNIT_LENGTH: usize = 4_000;
 ///
 /// # Panics
 ///
-/// Panics if the muxer refuses a packet, which a benchmark must not measure.
-pub fn mux_pes_packets(muxer: &mut Muxer, access_unit: &[u8], out: &mut Vec<u8>) -> usize {
+/// Panics if the writer refuses a packet, which a benchmark must not measure.
+pub fn mux_pes_packets(writer: &mut PacketWriter, access_unit: &[u8], out: &mut Vec<u8>) -> usize {
     out.clear();
     let pid = Pid::try_from(0x0100).expect("0x0100 is a PID");
     for index in 0..PES_PACKETS {
@@ -101,9 +101,9 @@ pub fn mux_pes_packets(muxer: &mut Muxer, access_unit: &[u8], out: &mut Vec<u8>)
         let mut packet = PesPacket::new(StreamId::from(0xE0), access_unit);
         packet.optional_header = Some(header);
         let pcr = ClockReference::new(ticks, 0).expect("a PCR fits its fields");
-        muxer
+        writer
             .write_pes_packet(pid, &packet, Some(pcr), out)
-            .expect("the muxer writes the packet");
+            .expect("the writer writes the packet");
     }
     out.len()
 }
