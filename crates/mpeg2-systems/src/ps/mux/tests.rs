@@ -939,3 +939,61 @@ fn a_stream_is_refused_whose_first_pack_would_not_arrive_within_0_7_s() {
         [Ok(()), Err(Error::PackLength { length: 71 })]
     );
 }
+
+#[test]
+fn a_p_std_buffer_size_past_the_bound_registered_is_refused_on_any_pes_packet() {
+    // A bound of 1 KiB, and PES packets whose own P-STD buffer is counted in
+    // units of 128 bytes
+    let with_buffer = |pts: u64, p_std_buffer: PStdBuffer| {
+        let mut packet = pes_packet(VIDEO, &[0xaa; 10], Some(pts));
+        let mut extension = PesExtension::new();
+        extension.p_std_buffer = Some(p_std_buffer);
+        packet.optional_header.as_mut().unwrap().pes_extension = Some(extension);
+        packet
+    };
+    let registered = || {
+        let mut muxer = Muxer::new(MuxerConfig::new(RATE)).unwrap();
+        muxer
+            .add_stream(
+                StreamId::from(VIDEO),
+                None,
+                StreamType::ISO_IEC_13818_2_VIDEO,
+                PStdBuffer::new(true, 1),
+                &[],
+            )
+            .unwrap();
+        muxer
+    };
+    let past = |p_std_buffer| Error::PStdBufferSize {
+        stream_id: StreamId::from(VIDEO),
+        stream_id_extension: None,
+        p_std_buffer,
+        bound: PStdBuffer::new(true, 1),
+    };
+    let mut muxer = registered();
+    let first = [
+        muxer.handle_pes_packet(&with_buffer(90_000, PStdBuffer::new(false, 9))),
+        muxer.handle_pes_packet(&with_buffer(90_000, PStdBuffer::new(false, 8))),
+    ];
+    let later = [
+        muxer.handle_pes_packet(&with_buffer(93_600, PStdBuffer::new(true, 2))),
+        muxer.handle_pes_packet(&with_buffer(93_600, PStdBuffer::new(true, 1))),
+    ];
+    let mut stream = Vec::new();
+    muxer.finish();
+    muxer.poll_output(&mut stream);
+    assert_eq!(
+        (first, later, stream),
+        (
+            [Err(past(PStdBuffer::new(false, 9))), Ok(())],
+            [Err(past(PStdBuffer::new(true, 2))), Ok(())],
+            multiplexed_by(
+                registered(),
+                &[
+                    with_buffer(90_000, PStdBuffer::new(false, 8)),
+                    with_buffer(93_600, PStdBuffer::new(true, 1)),
+                ]
+            )
+        )
+    );
+}

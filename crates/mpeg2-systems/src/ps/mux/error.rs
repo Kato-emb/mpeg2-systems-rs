@@ -3,6 +3,7 @@
 
 use core::fmt;
 
+use crate::pes::extension::PStdBuffer;
 use crate::pes::{self, StreamId};
 use crate::ps::{pack_header, psm, system_header};
 use crate::time::Timestamp;
@@ -105,6 +106,20 @@ pub enum Error {
         /// The `stream_id_extension` of the stream, if it has one
         stream_id_extension: Option<u8>,
     },
+    /// The P-STD buffer size a PES packet carries is larger than the bound
+    /// registered for its stream, which the system header gives as at least
+    /// the buffer of every PES packet of the stream (ISO/IEC 13818-1
+    /// §2.5.3.6, §2.4.3.7)
+    PStdBufferSize {
+        /// The `stream_id` of the stream
+        stream_id: StreamId,
+        /// The `stream_id_extension` of the stream, if it has one
+        stream_id_extension: Option<u8>,
+        /// The P-STD buffer size the PES packet carries
+        p_std_buffer: PStdBuffer,
+        /// The bound registered for the stream
+        bound: PStdBuffer,
+    },
     /// The DTS of a PES packet, or its PTS when it has none, is before that
     /// of the PES packet given before it on the same stream
     DecreasingTimestamp {
@@ -206,6 +221,19 @@ impl fmt::Display for Error {
                 stream_id.get(),
                 ExtensionOf(*stream_id_extension)
             ),
+            Self::PStdBufferSize {
+                stream_id,
+                stream_id_extension,
+                p_std_buffer,
+                bound,
+            } => write!(
+                formatter,
+                "a P-STD buffer of {} bytes on stream_id {:#04x}{} is past the {} bytes of its bound",
+                p_std_buffer.size_in_bytes(),
+                stream_id.get(),
+                ExtensionOf(*stream_id_extension),
+                bound.size_in_bytes()
+            ),
             Self::DecreasingTimestamp {
                 stream_id,
                 stream_id_extension,
@@ -262,6 +290,7 @@ impl core::error::Error for Error {
             | Self::AudioBound { .. }
             | Self::VideoBound { .. }
             | Self::MissingPts { .. }
+            | Self::PStdBufferSize { .. }
             | Self::DecreasingTimestamp { .. }
             | Self::TimestampGap { .. }
             | Self::BufferFull { .. } => None,

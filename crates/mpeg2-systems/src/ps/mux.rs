@@ -170,7 +170,9 @@ impl MuxerConfig {
 ///   0x21, 0x24, 0x32, 0x33 and 0x35.
 /// - The first PES packet of a stream that carries the optional header has
 ///   the P-STD buffer size registered in its PES extension, unless it has
-///   one of its own (§2.7.7). The PTS and the DTS are written as given.
+///   one of its own (§2.7.7). A P-STD buffer size a PES packet carries is
+///   written as given, and one larger in bytes than the bound registered is
+///   refused (§2.5.3.6, §2.4.3.7). The PTS and the DTS are written as given.
 /// - The time of the stream is the DTS of each PES packet (its PTS when it
 ///   has none), held from going back, and counted on past the wrap of the
 ///   33 bits; a PES packet without either does not move it. The SCR of a
@@ -314,7 +316,8 @@ impl Muxer {
     /// 0xFD, of `stream_id_extension`
     ///
     /// `p_std_buffer` is both the bound of the stream in the system header
-    /// and the P-STD buffer size of its first PES packet. `es_info` is the
+    /// and the P-STD buffer size of its first PES packet, and no PES packet
+    /// of the stream may carry a larger one. `es_info` is the
     /// descriptors of the stream as written, which the muxer copies.
     ///
     /// # Errors
@@ -443,6 +446,8 @@ impl Muxer {
     ///   ([`StreamId::carries_optional_header`]), or has no PTS or DTS and is
     ///   the first given to the muxer. The first PES packet of any other
     ///   stream needs neither.
+    /// * [`PStdBufferSize`](Error::PStdBufferSize): it carries a P-STD buffer
+    ///   size larger in bytes than the bound registered for its stream.
     /// * [`DecreasingTimestamp`](Error::DecreasingTimestamp): its DTS, or its
     ///   PTS when it has none, is before that of the PES packet given before
     ///   it on its stream.
@@ -534,16 +539,22 @@ impl Muxer {
                 previous: previous.to_timestamp(),
             });
         }
+        let given_p_std_buffer = header
+            .and_then(|header| header.pes_extension.as_ref())
+            .and_then(|extension| extension.p_std_buffer);
+        if let Some(p_std_buffer) = given_p_std_buffer
+            && p_std_buffer.size_in_bytes() > stream.p_std_buffer.size_in_bytes()
+        {
+            return Err(Error::PStdBufferSize {
+                stream_id,
+                stream_id_extension,
+                p_std_buffer,
+                bound: stream.p_std_buffer,
+            });
+        }
         let with_p_std_buffer;
         let packet = match header {
-            Some(header)
-                if first_of_stream
-                    && header
-                        .pes_extension
-                        .as_ref()
-                        .and_then(|extension| extension.p_std_buffer)
-                        .is_none() =>
-            {
+            Some(header) if first_of_stream && given_p_std_buffer.is_none() => {
                 let mut header = header.clone();
                 header
                     .pes_extension

@@ -58,6 +58,14 @@ impl PStdBuffer {
             p_std_buffer_size,
         }
     }
+
+    /// Returns the size in bytes: `p_std_buffer_size` units of 1024 bytes
+    /// when `p_std_buffer_scale` is set, of 128 when it is not
+    #[cfg(feature = "alloc")]
+    pub(crate) fn size_in_bytes(self) -> u32 {
+        let unit: u32 = if self.p_std_buffer_scale { 1024 } else { 128 };
+        u32::from(self.p_std_buffer_size).saturating_mul(unit)
+    }
 }
 
 /// PES extension: the optional fields `PES_extension_flag` announces
