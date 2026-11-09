@@ -81,8 +81,8 @@ pub enum Error {
         /// The bytes after `data_unit_loop_length`, or 0xFFFFFF when writing
         available_bytes: usize,
     },
-    /// The caption management data to write has more languages than the 255
-    /// `num_languages` counts
+    /// The caption management data to write has more languages than the 8
+    /// §9.3 allows
     NumLanguages {
         /// The languages given
         count: usize,
@@ -153,7 +153,7 @@ impl fmt::Display for Error {
             ),
             Self::NumLanguages { count } => write!(
                 formatter,
-                "{count} languages are more than num_languages counts"
+                "{count} languages are more than the 8 num_languages allows"
             ),
             Self::Forbidden { field, value } => {
                 write!(formatter, "{field} 0x{value:x} is reserved or not defined")

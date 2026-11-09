@@ -295,15 +295,40 @@ pub(super) fn read_loop(bytes: &[u8]) -> Result<DataUnitLoop<'_>, Error> {
     Ok(DataUnitLoop(units))
 }
 
-/// Returns the `data_unit_loop_length` of `units`, refusing a loop longer
-/// than it counts
+/// Walks `units` before they are written, refusing a data unit that cannot
+/// be read or whose `data_unit_parameter` `forbidden` names, and returns
+/// their `data_unit_loop_length`
 #[cfg(feature = "alloc")]
-pub(super) fn loop_length(units: DataUnitLoop<'_>) -> Result<[u8; 3], Error> {
-    let data_unit_loop_length = units.0.len();
+pub(super) fn check_loop(
+    units: DataUnitLoop<'_>,
+    forbidden: fn(DataUnitParameter) -> bool,
+) -> Result<[u8; 3], Error> {
+    let mut data_unit_loop_length = 0_usize;
+    for unit in units.iter() {
+        let unit = unit?;
+        let parameter = unit.data_unit_parameter;
+        if forbidden(parameter) {
+            return Err(Error::Forbidden {
+                field: "data_unit_parameter",
+                value: u64::from(parameter.get()),
+            });
+        }
+        data_unit_loop_length = data_unit_loop_length.saturating_add(unit.encoded_len());
+    }
     u24(data_unit_loop_length).ok_or(Error::DataUnitLoopLength {
         data_unit_loop_length,
         available_bytes: MAX_LENGTH,
     })
+}
+
+/// Appends each data unit of `units` to `out`, framed again from its fields
+#[cfg(feature = "alloc")]
+pub(super) fn write_units(units: DataUnitLoop<'_>, out: &mut Vec<u8>) -> Result<(), Error> {
+    for unit in units.iter() {
+        unit?.write(out)?;
+    }
+
+    Ok(())
 }
 
 /// Returns `length` as the 3 bytes of a 24-bit length, if it fits them

@@ -62,7 +62,7 @@ impl Language {
     /// Appends the entry to `out`, refusing reserved values and a `DC` that
     /// does not match the `DMF`
     #[cfg(feature = "alloc")]
-    fn write(self, out: &mut Vec<u8>) -> Result<(), Error> {
+    pub(super) fn write(self, out: &mut Vec<u8>) -> Result<(), Error> {
         let forbidden = |field, value: u8| Error::Forbidden {
             field,
             value: u64::from(value),

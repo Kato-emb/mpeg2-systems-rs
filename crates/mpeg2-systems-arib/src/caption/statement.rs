@@ -10,6 +10,8 @@ use super::Error;
 use super::data_group::DataGroup;
 use super::data_unit::{self, DataUnitLoop};
 use super::time::{self, BcdTime, Tmd};
+#[cfg(feature = "alloc")]
+use super::write_or_truncate;
 
 /// Whether caption statement data of `tmd` has an `STM`
 fn has_stm(tmd: Tmd) -> bool {
@@ -77,25 +79,32 @@ impl<'input> CaptionData<'input> {
     /// Appends the caption statement data to `out`, as the
     /// `data_group_data_byte` of a data group
     ///
-    /// A write that fails leaves `out` as it was.
+    /// Each data unit is written again from its fields. A write that fails
+    /// leaves `out` as it was.
     ///
     /// # Errors
     ///
     /// * [`Forbidden`](Error::Forbidden): `TMD` is `'11'`, reserved, or a
     ///   digit of `STM` is above 9.
     /// * [`Presence`](Error::Presence): `STM` is present with `TMD` `'00'`,
-    ///   or absent with `'01'` or `'10'`.
+    ///   or absent with `'01'` or `'10'`; or there is no data unit, of which
+    ///   §9.3.2 asks for at least one.
     /// * [`DataUnitLoopLength`](Error::DataUnitLoopLength): the data units
     ///   are longer than 0xFFFFFF bytes.
+    /// * The errors of [`DataUnitLoop::iter`], if the loop was made of bytes
+    ///   that cannot be read.
     #[cfg(feature = "alloc")]
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
         time::check_header(self.tmd, self.stm, "STM", has_stm)?;
-        let data_unit_loop_length = data_unit::loop_length(self.data_units)?;
-        time::write_header(out, self.tmd, self.stm);
-        out.extend_from_slice(&data_unit_loop_length);
-        out.extend_from_slice(self.data_units.as_bytes());
-
-        Ok(())
+        if self.data_units.is_empty() {
+            return Err(Error::Presence { field: "data_unit" });
+        }
+        let data_unit_loop_length = data_unit::check_loop(self.data_units, |_| false)?;
+        write_or_truncate(out, |out| {
+            time::write_header(out, self.tmd, self.stm);
+            out.extend_from_slice(&data_unit_loop_length);
+            data_unit::write_units(self.data_units, out)
+        })
     }
 }
 
@@ -152,8 +161,12 @@ mod tests {
 
     /// Built by hand from Table 9-10: TMD `'01'` and Reserved `'111111'`
     /// (0x7F), STM 00:00:01.500 and Reserved `'1111'` (0x00 0x00 0x01 0x50
-    /// 0x0F), `data_unit_loop_length` 0
-    const WITH_STM: [u8; 9] = [0x7f, 0x00, 0x00, 0x01, 0x50, 0x0f, 0x00, 0x00, 0x00];
+    /// 0x0F), `data_unit_loop_length` 7, and from Table 9-11 one data unit:
+    /// `unit_separator` 0x1F, statement body 0x20, `data_unit_size` 2, 0x24 0x22
+    const WITH_STM: [u8; 16] = [
+        0x7f, 0x00, 0x00, 0x01, 0x50, 0x0f, 0x00, 0x00, 0x07, 0x1f, 0x20, 0x00, 0x00, 0x02, 0x24,
+        0x22,
+    ];
 
     fn group(id: u8, bytes: &[u8]) -> DataGroup<'_> {
         DataGroup::new(DataGroupId::try_from(id).unwrap(), bytes)
@@ -161,7 +174,7 @@ mod tests {
 
     #[test]
     fn caption_statement_data_is_read_with_its_data_units() {
-        let mut with_stm = CaptionData::new(Tmd::REAL_TIME, DataUnitLoop::from(&[][..]));
+        let mut with_stm = CaptionData::new(Tmd::REAL_TIME, DataUnitLoop::from(&WITH_STM[9..]));
         with_stm.stm = Some(BcdTime::new(0, 0, 1, 500).unwrap());
 
         assert_eq!(
@@ -229,7 +242,10 @@ mod tests {
         let empty = |tmd| CaptionData::new(tmd, DataUnitLoop::from(&[][..]));
         let mut stm_without_time = empty(Tmd::FREE);
         stm_without_time.stm = Some(BcdTime::new(0, 0, 0, 0).unwrap());
-        let long = vec![0; 0x100_0000];
+        let mut long = vec![0; 0x100_0004];
+        long.get_mut(..5)
+            .unwrap()
+            .copy_from_slice(&[0x1f, 0x20, 0xff, 0xff, 0xff]);
 
         assert_eq!(
             [
@@ -237,6 +253,11 @@ mod tests {
                 empty(Tmd::REAL_TIME),
                 stm_without_time,
                 CaptionData::new(Tmd::FREE, DataUnitLoop::from(long.as_slice())),
+                empty(Tmd::FREE),
+                CaptionData::new(
+                    Tmd::FREE,
+                    DataUnitLoop::from(&[0x1f, 0x20, 0x00, 0x00, 0x05, 0x24][..])
+                ),
             ]
             .map(|data| {
                 let mut written = Vec::from([0x47]);
@@ -251,8 +272,13 @@ mod tests {
                 Err(Error::Presence { field: "STM" }),
                 Err(Error::Presence { field: "STM" }),
                 Err(Error::DataUnitLoopLength {
-                    data_unit_loop_length: 0x100_0000,
+                    data_unit_loop_length: 0x100_0004,
                     available_bytes: 0xff_ffff
+                }),
+                Err(Error::Presence { field: "data_unit" }),
+                Err(Error::DataUnitSize {
+                    data_unit_size: 5,
+                    available_bytes: 1
                 }),
             ]
             .map(|error| (error, vec![0x47]))

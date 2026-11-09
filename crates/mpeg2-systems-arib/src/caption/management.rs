@@ -8,8 +8,12 @@ use mpeg2_systems::field::FieldReader;
 
 use super::Error;
 use super::data_group::DataGroup;
+#[cfg(feature = "alloc")]
+use super::data_unit::DataUnitParameter;
 use super::data_unit::{self, DataUnitLoop};
 use super::time::{self, BcdTime, Tmd};
+#[cfg(feature = "alloc")]
+use super::write_or_truncate;
 
 mod language;
 mod language_field;
@@ -17,9 +21,25 @@ mod language_field;
 pub use language::{Language, LanguageIter, LanguageLoop};
 pub use language_field::{Dc, Format, LanguageTag, RollupMode, Tcs};
 
+/// Most languages caption management data names, §9.3
+#[cfg(feature = "alloc")]
+const MAX_LANGUAGES: u8 = 8;
+
 /// Whether caption management data of `tmd` has an `OTM`
 fn has_otm(tmd: Tmd) -> bool {
     tmd == Tmd::OFFSET_TIME
+}
+
+/// Whether Table 9-13 leaves a data unit of `parameter` out of caption
+/// management
+#[cfg(feature = "alloc")]
+fn not_for_management(parameter: DataUnitParameter) -> bool {
+    matches!(
+        parameter,
+        DataUnitParameter::GEOMETRIC
+            | DataUnitParameter::SYNTHESIZED_SOUND
+            | DataUnitParameter::BIT_MAP
+    )
 }
 
 /// Caption management data, the languages of the captions of an elementary
@@ -92,34 +112,45 @@ impl<'input> CaptionManagementData<'input> {
     /// Appends the caption management data to `out`, as the
     /// `data_group_data_byte` of a data group
     ///
-    /// A write that fails leaves `out` as it was.
+    /// Each language and data unit is written again from its fields, so the
+    /// reserved bits are `'1'` whatever the bytes of the loops hold. A write
+    /// that fails leaves `out` as it was.
     ///
     /// # Errors
     ///
-    /// * [`Forbidden`](Error::Forbidden): `TMD` is `'11'`, reserved, or a
-    ///   digit of `OTM` is above 9.
+    /// * [`Forbidden`](Error::Forbidden): `TMD` is `'11'`, reserved; a digit
+    ///   of `OTM` is above 9; a language has a value [`LanguageLoop::write_from`]
+    ///   refuses; or a data unit is geometric, synthesized sound or a bitmap,
+    ///   which Table 9-13 does not give to caption management.
     /// * [`Presence`](Error::Presence): `OTM` is present with another `TMD`
-    ///   than `'10'`, or absent with it.
-    /// * [`NumLanguages`](Error::NumLanguages): more than 255 languages.
+    ///   than `'10'`, or absent with it; or a language has a `DC` against its
+    ///   `DMF`.
+    /// * [`NumLanguages`](Error::NumLanguages): more than the 8 languages
+    ///   §9.3 allows.
     /// * [`DataUnitLoopLength`](Error::DataUnitLoopLength): the data units
     ///   are longer than 0xFFFFFF bytes.
-    /// * The errors of [`LanguageLoop::iter`], if the loop was made of bytes
-    ///   that cannot be read.
+    /// * The errors of [`LanguageLoop::iter`] and [`DataUnitLoop::iter`], if
+    ///   a loop was made of bytes that cannot be read.
     #[cfg(feature = "alloc")]
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
         time::check_header(self.tmd, self.otm, "OTM", has_otm)?;
         let count = self.languages.iter().try_fold(0_usize, |count, language| {
             language.map(|_| count.saturating_add(1))
         })?;
-        let num_languages = u8::try_from(count).map_err(|_| Error::NumLanguages { count })?;
-        let data_unit_loop_length = data_unit::loop_length(self.data_units)?;
-        time::write_header(out, self.tmd, self.otm);
-        out.push(num_languages);
-        out.extend_from_slice(self.languages.as_bytes());
-        out.extend_from_slice(&data_unit_loop_length);
-        out.extend_from_slice(self.data_units.as_bytes());
-
-        Ok(())
+        let num_languages = u8::try_from(count)
+            .ok()
+            .filter(|&count| count <= MAX_LANGUAGES)
+            .ok_or(Error::NumLanguages { count })?;
+        let data_unit_loop_length = data_unit::check_loop(self.data_units, not_for_management)?;
+        write_or_truncate(out, |out| {
+            time::write_header(out, self.tmd, self.otm);
+            out.push(num_languages);
+            for language in self.languages.iter() {
+                language?.write(out)?;
+            }
+            out.extend_from_slice(&data_unit_loop_length);
+            data_unit::write_units(self.data_units, out)
+        })
     }
 }
 
@@ -308,8 +339,8 @@ mod tests {
         .otm;
         let mut otm_without_offset = empty(Tmd::FREE);
         otm_without_offset.otm = Some(BcdTime::new(0, 0, 0, 0).unwrap());
-        let mut many = Vec::new();
-        LanguageLoop::write_from([japanese(0b1010); 256], &mut many).unwrap();
+        let mut nine = Vec::new();
+        LanguageLoop::write_from([japanese(0b1010); 9], &mut nine).unwrap();
 
         assert_eq!(
             [
@@ -319,7 +350,7 @@ mod tests {
                 not_bcd,
                 CaptionManagementData::new(
                     Tmd::FREE,
-                    LanguageLoop::from(many.as_slice()),
+                    LanguageLoop::from(nine.as_slice()),
                     DataUnitLoop::from(&[][..])
                 ),
             ]
@@ -339,9 +370,125 @@ mod tests {
                     field: "OTM",
                     value: 0x0_a234_5678
                 }),
-                Err(Error::NumLanguages { count: 256 }),
+                Err(Error::NumLanguages { count: 9 }),
             ]
             .map(|error| (error, vec![0x47]))
+        );
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn eight_languages_are_written() {
+        let mut eight = Vec::new();
+        LanguageLoop::write_from([japanese(0b1010); 8], &mut eight).unwrap();
+        let mut written = Vec::new();
+
+        assert_eq!(
+            CaptionManagementData::new(
+                Tmd::FREE,
+                LanguageLoop::from(eight.as_slice()),
+                DataUnitLoop::from(&[][..])
+            )
+            .write(&mut written),
+            Ok(())
+        );
+        assert_eq!(written.get(1), Some(&8));
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn languages_and_data_units_are_written_again_from_their_fields() {
+        let data = |languages: &'static [u8], data_units: &'static [u8]| {
+            CaptionManagementData::new(
+                Tmd::FREE,
+                LanguageLoop::from(languages),
+                DataUnitLoop::from(data_units),
+            )
+        };
+        let mut written = Vec::new();
+
+        // The reserved bit read as '0' is written '1'
+        assert_eq!(
+            data(
+                &[0x0a, 0x6a, 0x70, 0x6e, 0x80],
+                &[0x1f, 0x20, 0x00, 0x00, 0x00]
+            )
+            .write(&mut written),
+            Ok(())
+        );
+        assert_eq!(
+            written,
+            [
+                0x3f, 0x01, 0x1a, 0x6a, 0x70, 0x6e, 0x80, 0x00, 0x00, 0x05, 0x1f, 0x20, 0x00, 0x00,
+                0x00
+            ]
+        );
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn languages_or_data_units_that_cannot_be_written_are_refused_and_leave_the_output_as_it_was() {
+        let data = |languages: &'static [u8], data_units: &'static [u8]| {
+            CaptionManagementData::new(
+                Tmd::FREE,
+                LanguageLoop::from(languages),
+                DataUnitLoop::from(data_units),
+            )
+        };
+        let spike = &[0x1a, 0x6a, 0x70, 0x6e, 0x80][..];
+
+        assert_eq!(
+            [
+                data(
+                    &[0x1a, 0x6a, 0x70, 0x6e, 0x80, 0x1a, 0x6a, 0x70, 0x6e, 0x50],
+                    &[]
+                ),
+                data(&[0x1a, 0x6a], &[]),
+                data(spike, &[0x1e, 0x20, 0x00, 0x00, 0x00]),
+                data(
+                    spike,
+                    &[0x1f, 0x20, 0x00, 0x00, 0x00, 0x1f, 0x28, 0x00, 0x00, 0x00]
+                ),
+                data(spike, &[0x1f, 0x2c, 0x00, 0x00, 0x00]),
+                data(spike, &[0x1f, 0x35, 0x00, 0x00, 0x00]),
+            ]
+            .map(|data| {
+                let mut written = Vec::from([0x47]);
+                let result = data.write(&mut written);
+                (result, written)
+            }),
+            [
+                Err(Error::Forbidden {
+                    field: "Format",
+                    value: 0b0101
+                }),
+                Err(Error::Field {
+                    field: "ISO_639_language_code",
+                    error: mpeg2_systems::field::Error::Truncated {
+                        required_bits: 24,
+                        remaining_bits: 8
+                    }
+                }),
+                Err(Error::UnitSeparator { found: 0x1e }),
+                Err(Error::Forbidden {
+                    field: "data_unit_parameter",
+                    value: 0x28
+                }),
+                Err(Error::Forbidden {
+                    field: "data_unit_parameter",
+                    value: 0x2c
+                }),
+                Err(Error::Forbidden {
+                    field: "data_unit_parameter",
+                    value: 0x35
+                }),
+            ]
+            .map(|error| (error, vec![0x47]))
+        );
+        let mut written = Vec::new();
+        assert_eq!(
+            data(spike, &[0x1f, 0x99, 0x00, 0x00, 0x00]).write(&mut written),
+            Ok(())
         );
     }
 }
