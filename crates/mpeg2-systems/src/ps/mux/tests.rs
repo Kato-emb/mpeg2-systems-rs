@@ -873,3 +873,41 @@ fn after_finish_poll_output_gives_what_is_held_and_the_end_code_once() {
         )
     );
 }
+
+#[test]
+fn a_stream_is_taken_whose_descriptors_fill_the_map_and_refused_one_byte_past_it() {
+    // A map of video and audio: 10 bytes besides its loop, two entries of
+    // 4, and 4 for the stream added, leave 996 bytes of descriptors
+    let descriptors = |length: usize| {
+        let mut bytes = Vec::new();
+        let mut rest = length;
+        while rest > 0 {
+            let body = (rest - 2).min(255);
+            bytes.extend([0x80, u8::try_from(body).unwrap()]);
+            bytes.extend(core::iter::repeat_n(0xaa, body));
+            rest -= 2 + body;
+        }
+        bytes
+    };
+    let add = |es_info: &[u8]| {
+        muxer().add_stream(
+            StreamId::PRIVATE_STREAM_1,
+            None,
+            StreamType::ISO_IEC_13818_1_PES_PRIVATE_DATA,
+            PStdBuffer::new(false, 8),
+            es_info,
+        )
+    };
+    assert_eq!(
+        [add(&descriptors(996)), add(&descriptors(997))],
+        [
+            Ok(()),
+            Err(Error::ProgramStreamMap {
+                error: psm::Error::ProgramStreamMapLength {
+                    program_stream_map_length: 1_019,
+                    limit: 1_018
+                }
+            })
+        ]
+    );
+}

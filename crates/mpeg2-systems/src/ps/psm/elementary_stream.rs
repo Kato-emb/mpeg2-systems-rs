@@ -16,6 +16,10 @@ use crate::stream_type::StreamType;
 /// an `elementary_stream_id_extension`
 const PSEUDO_DESCRIPTOR: [u8; 2] = [0x01, 0x01];
 
+/// Bytes of an entry from `stream_type` to `elementary_stream_info_length`
+#[cfg(feature = "alloc")]
+const ENTRY_PREFIX_LENGTH: usize = 4;
+
 /// Entry of the elementary stream loop of a
 /// [`ProgramStreamMap`](super::ProgramStreamMap): an elementary stream and
 /// the `stream_id` of the PES packets that carry it
@@ -49,6 +53,21 @@ impl ElementaryStream<'_> {
             elementary_stream_id_extension: None,
             elementary_stream_info: DescriptorLoop(&[]),
         }
+    }
+
+    /// Returns `elementary_stream_info_length`: the descriptors, and the
+    /// pseudo descriptor of `elementary_stream_id_extension` if it has one
+    #[cfg(feature = "alloc")]
+    fn elementary_stream_info_length(&self) -> usize {
+        self.elementary_stream_id_extension
+            .map_or(0, |_| PSEUDO_DESCRIPTOR.len().saturating_add(1))
+            .saturating_add(self.elementary_stream_info.0.len())
+    }
+
+    /// Returns the bytes the entry takes in the elementary stream loop
+    #[cfg(feature = "alloc")]
+    pub(crate) fn encoded_len(&self) -> usize {
+        ENTRY_PREFIX_LENGTH.saturating_add(self.elementary_stream_info_length())
     }
 }
 
@@ -157,10 +176,7 @@ impl<'input> ElementaryStreamLoop<'input> {
                         elementary_stream_id,
                     });
                 }
-                let length = stream
-                    .elementary_stream_id_extension
-                    .map_or(0, |_| PSEUDO_DESCRIPTOR.len().saturating_add(1))
-                    .saturating_add(stream.elementary_stream_info.0.len());
+                let length = stream.elementary_stream_info_length();
                 let elementary_stream_info_length = u16::try_from(length)
                     .map_err(|_| Error::ElementaryStreamInfoLength { length })?;
 

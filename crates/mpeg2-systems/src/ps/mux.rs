@@ -59,9 +59,11 @@
 use alloc::vec::Vec;
 use core::time::Duration;
 
+use crate::descriptor::DescriptorLoop;
 use crate::field::write_or_truncate;
 use crate::pes::extension::{PStdBuffer, PesExtension};
 use crate::pes::{self, PesPacket, StreamId};
+use crate::ps::psm::ElementaryStream;
 use crate::ps::{PackHeader, pack_header, system_header};
 use crate::stream_type::StreamType;
 use crate::time::SystemTimeClock;
@@ -334,7 +336,8 @@ impl Muxer {
     ///   [`ProgramStreamMap::write`](crate::ps::ProgramStreamMap::write)
     ///   refuses the map with the stream, as it does `es_info` that is not
     ///   whole descriptors, a `stream_type` carried in sections, or a map
-    ///   past its longest.
+    ///   past the 1018 bytes of `program_stream_map_length`, which is
+    ///   refused before `es_info` is copied.
     /// * [`PackLength`](Error::PackLength): the first pack, with the system
     ///   header and the program stream map, could not carry a PES packet in
     ///   [`MuxerConfig::pack_size`].
@@ -370,6 +373,10 @@ impl Muxer {
                 stream_id_extension,
             });
         }
+        let mut entry = ElementaryStream::new(stream_type, stream_id);
+        entry.elementary_stream_id_extension = stream_id_extension;
+        entry.elementary_stream_info = DescriptorLoop::from(es_info);
+        stream_definition::check_map_length(&self.streams, &entry)?;
         let stream = Stream {
             stream_id,
             stream_id_extension,

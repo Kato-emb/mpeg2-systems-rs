@@ -424,13 +424,8 @@ impl<'input> ProgramStreamMap<'input> {
     /// ```
     #[cfg(feature = "alloc")]
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
+        check_encoded_len(self.encoded_len())?;
         let length = self.encoded_len().saturating_sub(PREFIX_LENGTH);
-        if length > usize::from(MAX_PROGRAM_STREAM_MAP_LENGTH) {
-            return Err(Error::ProgramStreamMapLength {
-                program_stream_map_length: length,
-                limit: MAX_PROGRAM_STREAM_MAP_LENGTH,
-            });
-        }
         // Why not an error: the loops are part of `length`, at most 1018 by
         // the check above. Why not the bytes the loops are written as: an
         // entry is written as long as it was read.
@@ -488,6 +483,20 @@ impl<'input> ProgramStreamMap<'input> {
             Ok(())
         })
     }
+}
+
+/// Refuses a map of `encoded_len` bytes, its `program_stream_map_length`
+/// larger than 1018
+#[cfg(feature = "alloc")]
+pub(crate) fn check_encoded_len(encoded_len: usize) -> Result<(), Error> {
+    let length = encoded_len.saturating_sub(PREFIX_LENGTH);
+    if length > usize::from(MAX_PROGRAM_STREAM_MAP_LENGTH) {
+        return Err(Error::ProgramStreamMapLength {
+            program_stream_map_length: length,
+            limit: MAX_PROGRAM_STREAM_MAP_LENGTH,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

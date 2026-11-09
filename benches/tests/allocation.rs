@@ -9,10 +9,15 @@
 //! packets, or PCRs on their own, again reuses the output buffer and the
 //! continuity counters of the PIDs written before, and multiplexing PES
 //! packets with either muxer reuses its output held and its scratch buffer.
+//! A stream whose descriptors could not fit the program stream map is
+//! refused before they are copied.
 
 #[cfg(test)]
 mod tests {
+    use mpeg2_systems::pes::StreamId;
+    use mpeg2_systems::pes::extension::PStdBuffer;
     use mpeg2_systems::ps;
+    use mpeg2_systems::stream_type::StreamType;
     use mpeg2_systems::time::ClockReference;
     use mpeg2_systems::ts::Pid;
     use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig};
@@ -99,6 +104,21 @@ mod tests {
         });
         allocations.push(("pes packets", ACCESS_UNIT_LENGTH, "ps muxer", counted));
         none.push(("pes packets", ACCESS_UNIT_LENGTH, "ps muxer", 0));
+        let es_info = vec![0x80; 8 << 20];
+        let mut muxer = registered_program_stream_muxer();
+        let counted = allocations_once_grown(&ALLOCATOR, || {
+            muxer
+                .add_stream(
+                    StreamId::from(0xC0),
+                    None,
+                    StreamType::ISO_IEC_11172_3_AUDIO,
+                    PStdBuffer::new(false, 32),
+                    &es_info,
+                )
+                .unwrap_err();
+        });
+        allocations.push(("es_info past the map", es_info.len(), "ps muxer", counted));
+        none.push(("es_info past the map", es_info.len(), "ps muxer", 0));
         assert_eq!(allocations, none);
     }
 }

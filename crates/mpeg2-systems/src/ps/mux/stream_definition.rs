@@ -7,7 +7,7 @@ use super::{Error, PackWriter};
 use crate::descriptor::DescriptorLoop;
 use crate::pes::StreamId;
 use crate::pes::extension::PStdBuffer;
-use crate::ps::psm::{ElementaryStream, ElementaryStreamLoop};
+use crate::ps::psm::{self, ElementaryStream, ElementaryStreamLoop};
 use crate::ps::{ProgramStreamMap, StreamBound, StreamBoundLoop, SystemHeader};
 use crate::psi::VersionNumber;
 use crate::stream_type::StreamType;
@@ -76,6 +76,24 @@ pub(super) fn bounds(streams: &[Stream]) -> (usize, usize) {
             .filter(|stream| stream.stream_type.is_video())
             .count(),
     )
+}
+
+/// Refuses `entry` where the program stream map of `streams` with it would
+/// be longer than its syntax allows, before anything of the entry is copied
+pub(super) fn check_map_length(
+    streams: &[Stream],
+    entry: &ElementaryStream<'_>,
+) -> Result<(), Error> {
+    let length = streams
+        .iter()
+        .map(|stream| stream.elementary_stream().encoded_len())
+        .fold(
+            ProgramStreamMap::new(VersionNumber(0))
+                .encoded_len()
+                .saturating_add(entry.encoded_len()),
+            usize::saturating_add,
+        );
+    psm::check_encoded_len(length).map_err(|error| Error::ProgramStreamMap { error })
 }
 
 /// Appends the system header and the program stream map of `streams` to
