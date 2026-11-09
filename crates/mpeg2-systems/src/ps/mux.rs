@@ -575,7 +575,7 @@ impl Muxer {
         if length > config.pack_size {
             return Err(Error::PackLength { length });
         }
-        let pieces = || PesPacketPieces::new(packet, longest, longest_continued);
+        let pieces = PesPacketPieces::new(packet, longest, longest_continued);
         let leap = schedule.zip(time);
         let filling = leap
             .and_then(|(schedule, time)| Filling::across(schedule, time, config.program_mux_rate));
@@ -591,15 +591,10 @@ impl Muxer {
                 }),
             });
         }
-        let length = pieces()
-            .fold(
-                filling_length.saturating_add(headers.len()),
-                |length, piece| {
-                    length
-                        .saturating_add(pack_header_length)
-                        .saturating_add(piece.encoded_len())
-                },
-            )
+        let length = filling_length
+            .saturating_add(headers.len())
+            .saturating_add(pieces.len().saturating_mul(pack_header_length))
+            .saturating_add(pieces.encoded_len())
             .saturating_add(pending.len());
         if length > config.buffer_limit {
             return Err(Error::BufferFull { length });
@@ -621,7 +616,7 @@ impl Muxer {
                     length: pack_header_length,
                 });
             }
-            for (index, piece) in pieces().enumerate() {
+            for (index, piece) in pieces.enumerate() {
                 let arrived = last_pack.map(|pack| pack.arrived(program_mux_rate));
                 let due = if index == 0 { time } else { None };
                 // Why not `None` as the earliest: before the first pack there

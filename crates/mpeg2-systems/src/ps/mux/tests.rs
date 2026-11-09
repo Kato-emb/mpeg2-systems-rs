@@ -911,3 +911,20 @@ fn a_stream_is_taken_whose_descriptors_fill_the_map_and_refused_one_byte_past_it
         ]
     );
 }
+
+#[test]
+fn a_pes_packet_too_long_for_the_buffer_limit_is_refused_with_the_bytes_of_all_its_packs() {
+    let mut config = MuxerConfig::new(RATE);
+    config.pack_size = 128;
+    config.buffer_limit = 128;
+    let payload = vec![0xaa; 8 << 20];
+    // The first pack: 14 + 18 + 24, and a PES packet header of 6 + 3 + 5 of
+    // PTS + 3 of P-STD buffer, leaving 55 bytes of payload; the ones after
+    // it: 14 and a header of 6 + 3 + 3, leaving 102. 82 241 packs follow
+    // the first.
+    let length = 42 + 82_242 * 14 + 17 + (8 << 20) + 82_241 * 12;
+    assert_eq!(
+        muxer_of(config).handle_pes_packet(&pes_packet(VIDEO, &payload, Some(90_000))),
+        Err(Error::BufferFull { length })
+    );
+}

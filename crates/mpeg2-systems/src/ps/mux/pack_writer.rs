@@ -138,7 +138,8 @@ impl PackWriter {
 /// belong to the start of the payload
 ///
 /// An empty payload still gives one packet, and the payloads of the packets
-/// join back into the payload in order.
+/// join back into the payload in order. How many packets, and how many
+/// bytes, are known before they are cut.
 #[derive(Debug, Clone)]
 pub(crate) struct PesPacketPieces<'packet> {
     /// The header of the next packet and the payload left, `None` once the
@@ -164,6 +165,63 @@ impl<'packet> PesPacketPieces<'packet> {
             longest_continued,
         }
     }
+
+    /// Returns the bytes of all the packets left
+    pub(crate) fn encoded_len(&self) -> usize {
+        self.shape().1
+    }
+
+    /// Returns how many packets are left, and their bytes, from the lengths
+    /// of the headers and the payload alone
+    fn shape(&self) -> (usize, usize) {
+        let Some(rest) = &self.rest else {
+            return (0, 0);
+        };
+        let first_header = header_length(rest);
+        let payload = rest.payload.len();
+        let after = payload.saturating_sub(capacity(self.longest, first_header));
+        if after == 0 {
+            return (1, first_header.saturating_add(payload));
+        }
+        let mut continued = rest.clone();
+        if let Some(header) = continued.optional_header.as_mut() {
+            clear_times(header);
+        }
+        let continued_header = header_length(&continued);
+        let count = after.div_ceil(capacity(self.longest_continued, continued_header));
+        (
+            count.saturating_add(1),
+            first_header
+                .saturating_add(payload)
+                .saturating_add(count.saturating_mul(continued_header)),
+        )
+    }
+}
+
+/// Returns the bytes of the header of `packet`, up to its payload
+fn header_length(packet: &PesPacket<'_>) -> usize {
+    pes::PREFIX_LENGTH.saturating_add(
+        packet
+            .optional_header
+            .as_ref()
+            .map_or(0, OptionalHeader::encoded_len),
+    )
+}
+
+/// Returns the payload a packet of at most `longest` bytes holds after a
+/// header of `header_length`
+fn capacity(longest: usize, header_length: usize) -> usize {
+    // Why not a capacity of 0 when the header takes all the length: the
+    // payload would never shrink. The caller gives lengths longer than the
+    // headers, so the floor of 1 is never reached.
+    longest.saturating_sub(header_length).max(1)
+}
+
+/// Takes the times, which belong to the start of the payload, off `header`
+fn clear_times(header: &mut OptionalHeader<'_>) {
+    header.pts = None;
+    header.dts = None;
+    header.escr = None;
 }
 
 impl<'packet> Iterator for PesPacketPieces<'packet> {
@@ -171,15 +229,7 @@ impl<'packet> Iterator for PesPacketPieces<'packet> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let rest = self.rest.as_mut()?;
-        let header_length = pes::PREFIX_LENGTH.saturating_add(
-            rest.optional_header
-                .as_ref()
-                .map_or(0, OptionalHeader::encoded_len),
-        );
-        // Why not a capacity of 0 when the header takes all the length: the
-        // payload would never shrink. The caller gives lengths longer than
-        // the headers, so the floor of 1 is never reached.
-        let capacity = self.longest.saturating_sub(header_length).max(1);
+        let capacity = capacity(self.longest, header_length(rest));
         let (chunk, after) = rest.payload.split_at(rest.payload.len().min(capacity));
         let mut piece = rest.clone();
         piece.payload = chunk;
@@ -188,15 +238,20 @@ impl<'packet> Iterator for PesPacketPieces<'packet> {
         } else {
             rest.payload = after;
             if let Some(header) = rest.optional_header.as_mut() {
-                header.pts = None;
-                header.dts = None;
-                header.escr = None;
+                clear_times(header);
             }
             self.longest = self.longest_continued;
         }
         Some(piece)
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let count = self.shape().0;
+        (count, Some(count))
+    }
 }
+
+impl ExactSizeIterator for PesPacketPieces<'_> {}
 
 #[cfg(test)]
 mod tests;
