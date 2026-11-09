@@ -243,9 +243,12 @@ impl AdditionalAribCaptionInfo {
     ///
     /// # Errors
     ///
-    /// [`Forbidden`](Error::Forbidden): `Timing` is `'11'`, which Table 9-16
-    /// does not define, or the playback half of `DMF` is `'11'`, which
-    /// Table 9-5 reserves, in a `DMF` other than `'0011'` and `'1111'`.
+    /// [`Forbidden`](Error::Forbidden):
+    /// * `Timing` is `'11'`, which Table 9-16 does not define.
+    /// * `DMF` is not one of `'0011'`, `'0101'`, `'0110'`, `'1001'`,
+    ///   `'1010'`, `'1101'`, `'1110'` and `'1111'`: Table 9-5 reserves
+    ///   `'11'` in the playback half, and §9.6.1 lets this descriptor carry
+    ///   `'00'` in a half only as `'0011'`.
     #[cfg(feature = "alloc")]
     #[expect(
         clippy::trivially_copy_pass_by_ref,
@@ -259,7 +262,10 @@ impl AdditionalAribCaptionInfo {
             });
         }
         let dmf = self.dmf.get();
-        if dmf & 0b11 == 0b11 && dmf != 0b0011 && dmf != 0b1111 {
+        if !matches!(
+            dmf,
+            0b0011 | 0b0101 | 0b0110 | 0b1001 | 0b1010 | 0b1101 | 0b1110 | 0b1111
+        ) {
             return Err(Error::Forbidden {
                 field: "DMF",
                 value: u32::from(dmf),
@@ -444,6 +450,39 @@ mod tests {
             ]
         );
         assert_eq!(written, [0x47, 0x3d, 0xfc]);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn only_the_eight_permitted_dmf_values_are_written() {
+        let refused = [
+            0b0000, 0b0001, 0b0010, 0b0100, 0b0111, 0b1000, 0b1011, 0b1100,
+        ];
+        let permitted = [
+            0b0011, 0b0101, 0b0110, 0b1001, 0b1010, 0b1101, 0b1110, 0b1111,
+        ];
+        let write = |dmf| {
+            let mut written = Vec::from([0x47]);
+            let result =
+                AdditionalAribCaptionInfo::new(Dmf::try_from(dmf).unwrap(), Timing::ASYNCHRONOUS)
+                    .write(&mut written);
+            (result, written)
+        };
+
+        assert_eq!(
+            refused.map(write),
+            refused.map(|dmf| (
+                Err(Error::Forbidden {
+                    field: "DMF",
+                    value: u32::from(dmf)
+                }),
+                Vec::from([0x47])
+            ))
+        );
+        assert_eq!(
+            permitted.map(write),
+            permitted.map(|dmf| (Ok(()), Vec::from([0x47, dmf << 4 | 0b1100])))
+        );
     }
 
     #[cfg(feature = "alloc")]
