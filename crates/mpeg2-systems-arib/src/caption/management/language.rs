@@ -13,6 +13,9 @@ use crate::caption::{Dmf, Error};
 /// Entry of the caption management data: a language and how its captions
 /// are shown
 ///
+/// The language loop of `caption_management_data`, ARIB STD-B24 Volume 1
+/// Part 3 §9.3.1, Table 9-3
+///
 /// The 1 `reserved` bit after `language_tag` is not kept: it is written
 /// `'1'`. `dc` is present exactly when `dmf` is `'1100'`, `'1101'` or
 /// `'1110'`, the display modes that depend on a condition.
