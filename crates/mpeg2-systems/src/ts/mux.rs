@@ -13,9 +13,7 @@
 //!   again as often as the caller chooses, the PCR taken from the caller's
 //!   clock, sections the crate does not interpret.
 //!
-//! The crate does not write null packets, keep a constant bit rate, check
-//! the T-STD, or put more than one section in a Transport Packet. The
-//! example writes through [`PacketWriter`]; [`Muxer`] has its own.
+//! The example writes through [`PacketWriter`]; [`Muxer`] has its own.
 //!
 //! ```
 //! use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
@@ -378,8 +376,7 @@ impl MuxerConfig {
 /// of their DTS (their PTS when they have none) across the streams, and the
 /// Transport Packets are taken with [`poll_output`](Self::poll_output). The
 /// output may be held until `poll_output` is called; after
-/// [`finish`](Self::finish), `poll_output` gives all that is held. Every
-/// Transport Packet is written through a [`PacketWriter`].
+/// [`finish`](Self::finish), `poll_output` gives all that is held.
 ///
 /// - The time of the stream is the DTS of each PES packet (its PTS when it
 ///   has none), held from going back, and counted on past the wrap of the
@@ -395,10 +392,6 @@ impl MuxerConfig {
 ///   first Transport Packet, and any other in a Transport Packet of its own
 ///   on the PCR PID, before the PES packet. A leap of the time stamps is
 ///   filled with PCRs, and with PATs and PMTs, at their intervals.
-/// - The longest leap that can be filled is set by
-///   [`MuxerConfig::buffer_limit`] and [`MuxerConfig::pcr_interval`]: a PES
-///   packet whose leap needs more PCRs and tables than the limit holds is
-///   refused as [`TimestampGap`](Error::TimestampGap).
 /// - The PCR PID is the `pcr_pid` registered with the program. Without one,
 ///   it is the PID of the first video stream registered, or of the first
 ///   stream when none is video. The muxer takes for video the streams of
@@ -505,8 +498,6 @@ struct Schedule {
     // it back.
     clock: SystemTimeClock,
     psi_sent_at: SystemTimeClock,
-    // Why not psi_sent_at: the PSI and the PCR are sent at intervals of
-    // their own.
     pcr_sent_at: SystemTimeClock,
     /// Whether more than one PCR has been sent
     // Why not compare pcr_sent_at with the time of the first PCR: that time
@@ -712,7 +703,7 @@ impl Muxer {
     ///   stream and has no PTS.
     /// * [`DecreasingTimestamp`](Error::DecreasingTimestamp): its DTS, or its
     ///   PTS when it has none, is before that of the PES packet given before
-    ///   it on its stream. The order across the streams is not checked.
+    ///   it on its stream.
     /// * [`TimestampGap`](Error::TimestampGap): the PCRs and the tables to
     ///   send since the PES packet before do not fit
     ///   [`MuxerConfig::buffer_limit`], however much `poll_output` takes.
