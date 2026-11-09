@@ -412,14 +412,17 @@ pub struct Muxer {
     // held for reordering once that is added, and only `handle_pes_packet`
     // can fail.
     pending: Vec<u8>,
-    /// The bytes of the PES packet, the program loop and the elementary
-    /// stream loop being written, cleared on each input
+    /// The bytes of the PES packet being written, cleared on each input
+    /// once the bytes it writes are known to fit `buffer_limit`
     // Why not keep the PAT and the PMT encoded: they are made again from the
     // registration each time, and a reused buffer allocates nothing.
     scratch: Vec<u8>,
     /// The bodies of the PAT and the PMT being written, cleared on each
     /// input that sends them
     // Why not `write` the PAT and the PMT: it allocates a body of its own.
+    // Why not `scratch`: the bodies are written before the bytes of an input
+    // are known to fit, and they are bounded by what is registered, not by
+    // the input.
     section_bodies: Vec<u8>,
     finished: bool,
 }
@@ -612,11 +615,7 @@ impl Muxer {
             section_bodies,
             ..
         } = self;
-        scratch.clear();
-        packet
-            .write(scratch)
-            .map_err(|error| Error::PesPacket { error })?;
-        let pes_length = scratch.len();
+        let pes_length = packet.encoded_len();
 
         let at = packet
             .optional_header
@@ -671,20 +670,12 @@ impl Muxer {
 
         section_bodies.clear();
         let sections = if send_psi {
-            let pat_loop_length = program.write_loops(scratch)?;
-            let (pat_loop, pmt_loop) = scratch.split_at(pes_length).1.split_at(pat_loop_length);
-            let (pat, pmt) = program.sections(config.transport_stream_id, pat_loop, pmt_loop);
-            pat.write_body(section_bodies)
-                .map_err(|error| Error::ProgramAssociationSection { error })?;
-            let pat_body_length = section_bodies.len();
-            pmt.write_body(section_bodies)
-                .map_err(|error| Error::TsProgramMapSection { error })?;
+            let pat_body_length = program.write_bodies(section_bodies)?;
             let (pat_body, pmt_body) = section_bodies.split_at(pat_body_length);
-            Some((pat.section(pat_body), pmt.section(pmt_body)))
+            Some(program.sections_of(config.transport_stream_id, pat_body, pmt_body))
         } else {
             None
         };
-        let pes_bytes = scratch.split_at(pes_length).0;
 
         let length = sections
             .as_ref()
@@ -710,6 +701,10 @@ impl Muxer {
         if length > config.buffer_limit {
             return Err(Error::BufferFull { length });
         }
+        scratch.clear();
+        packet
+            .write(scratch)
+            .map_err(|error| Error::PesPacket { error })?;
 
         if let Some((pat, pmt)) = &sections {
             writer.write_section(Pid::PAT, pat, pending)?;
@@ -721,7 +716,7 @@ impl Muxer {
         writer.write_payload_unit(
             pid,
             |out| {
-                out.extend_from_slice(pes_bytes);
+                out.extend_from_slice(scratch);
                 Ok(())
             },
             adaptation_field,

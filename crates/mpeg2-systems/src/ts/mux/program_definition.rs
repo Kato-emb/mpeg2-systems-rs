@@ -8,6 +8,7 @@ use super::Error;
 use crate::psi::VersionNumber;
 use crate::psi::pat::{Program, ProgramAssociationSection, ProgramLoop};
 use crate::psi::pmt::{ElementaryStream, ElementaryStreamLoop, TsProgramMapSection};
+use crate::psi::section::Section;
 use crate::stream_type::StreamType;
 use crate::ts::Pid;
 
@@ -55,26 +56,63 @@ impl ProgramDefinition {
     /// Appends the program loop of the PAT and the elementary stream loop
     /// of the PMT to `scratch`, and returns the length of the program loop
     pub(super) fn write_loops(&self, scratch: &mut Vec<u8>) -> Result<usize, Error> {
-        let start = scratch.len();
+        let pat_loop_length = self.write_loops_of_pat(scratch)?;
+        ElementaryStreamLoop::write_from(self.elementary_streams(), scratch)
+            .map_err(|error| Error::TsProgramMapSection { error })?;
+        Ok(pat_loop_length)
+    }
+
+    /// Appends the program loop of the PAT to `out`, and returns its length
+    fn write_loops_of_pat(&self, out: &mut Vec<u8>) -> Result<usize, Error> {
+        let start = out.len();
         ProgramLoop::write_from(
             [Program::ProgramMap {
                 program_number: self.program_number,
                 program_map_pid: self.program_map_pid,
             }],
-            scratch,
+            out,
         )
         .map_err(|error| Error::ProgramAssociationSection { error })?;
-        let pat_loop_length = scratch.len().saturating_sub(start);
-        ElementaryStreamLoop::write_from(
-            self.streams.iter().map(|stream| {
-                let mut entry = ElementaryStream::new(stream.stream_type, stream.pid);
-                entry.es_info = stream.es_info.as_slice().into();
-                entry
-            }),
-            scratch,
+        Ok(out.len().saturating_sub(start))
+    }
+
+    /// Appends the body of the PAT, its program loop, and the body of the
+    /// PMT to `bodies`, and returns the length of the body of the PAT
+    pub(super) fn write_bodies(&self, bodies: &mut Vec<u8>) -> Result<usize, Error> {
+        let pat_body_length = self.write_loops_of_pat(bodies)?;
+        TsProgramMapSection::write_body_with(
+            self.pcr_pid(),
+            self.program_info.as_slice().into(),
+            bodies,
+            |body| ElementaryStreamLoop::write_from(self.elementary_streams(), body),
         )
         .map_err(|error| Error::TsProgramMapSection { error })?;
-        Ok(pat_loop_length)
+        Ok(pat_body_length)
+    }
+
+    /// Returns the PAT of `transport_stream_id` and the PMT, `version_number`
+    /// 0, as sections that carry `pat_body` and `pmt_body`, as
+    /// [`write_bodies`](Self::write_bodies) writes them
+    pub(super) fn sections_of<'body>(
+        &self,
+        transport_stream_id: u16,
+        pat_body: &'body [u8],
+        pmt_body: &'body [u8],
+    ) -> (Section<'body>, Section<'body>) {
+        let version_number = VersionNumber(0);
+        (
+            ProgramAssociationSection::new(transport_stream_id, version_number).section(pat_body),
+            TsProgramMapSection::new(self.program_number.get(), version_number).section(pmt_body),
+        )
+    }
+
+    /// Returns the entry of the elementary stream loop of each stream
+    fn elementary_streams(&self) -> impl Iterator<Item = ElementaryStream<'_>> {
+        self.streams.iter().map(|stream| {
+            let mut entry = ElementaryStream::new(stream.stream_type, stream.pid);
+            entry.es_info = stream.es_info.as_slice().into();
+            entry
+        })
     }
 
     /// Returns the PAT of `transport_stream_id` and the PMT, `version_number`

@@ -580,3 +580,14 @@ fn time_stamps_across_the_wrap_of_33_bits_keep_the_pcr_and_the_pat_and_the_pmt_c
     let stream = multiplexed((0..=100).map(|index| Timestamp::MODULUS - 45_000 + index * 1_800));
     assert_eq!(timing_of(&stream), (51, PCR_INTERVAL, 21));
 }
+
+#[test]
+fn a_pes_packet_past_the_buffer_limit_is_refused_before_it_is_copied() {
+    let mut config = MuxerConfig::new();
+    config.buffer_limit = 3 * 188;
+    let mut muxer = muxer_of(config);
+    let payload = vec![0x77; 10_000];
+    let refused =
+        muxer.handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &payload, Some(90_000)));
+    assert_eq!((refused.is_err(), muxer.scratch.capacity()), (true, 0));
+}
