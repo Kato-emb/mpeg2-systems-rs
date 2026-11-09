@@ -62,124 +62,86 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// `writer`, and returns how many PES packets it left out
 fn convert(mut reader: impl BufRead, mut writer: impl Write) -> Result<usize, Box<dyn Error>> {
     let mut demuxer = Demuxer::new();
-    let mut conversion = Conversion {
-        muxer: Muxer::new(MuxerConfig::new())?,
-        streams: Streams::Announced {
-            mapped: None,
-            bounded: None,
-        },
-        left_out: 0,
-    };
+    let mut muxer = Muxer::new(MuxerConfig::new())?;
+    let mut mapped: Option<Vec<(StreamId, StreamType)>> = None;
+    let mut bounded: Option<Vec<(StreamId, StreamType)>> = None;
+    // Why not take an empty `pids` for a program not yet registered: one
+    // registered from a map or a header that names no stream is empty too.
+    let mut registered = false;
+    let mut pids: Vec<(StreamId, Pid)> = Vec::new();
+    let mut left_out: usize = 0;
     let mut out = Vec::new();
 
     loop {
         let chunk = reader.fill_buf()?;
-        if chunk.is_empty() {
+        let length = chunk.len();
+        if length == 0 {
+            demuxer.finish();
+        } else {
+            demuxer.handle_input(chunk);
+        }
+        reader.consume(length);
+        while let Some(event) = demuxer.poll_event() {
+            if let Event::ProgramStreamMap(map) = &event
+                && !registered
+            {
+                let mut streams = Vec::new();
+                for stream in map.elementary_streams.iter() {
+                    let stream = stream?;
+                    if stream.elementary_stream_id_extension.is_none()
+                        && stream.elementary_stream_id != StreamId::PADDING_STREAM
+                    {
+                        streams.push((stream.elementary_stream_id, stream.stream_type));
+                    }
+                }
+                mapped = Some(streams);
+            } else if let Event::SystemHeader(header) = &event
+                && !registered
+            {
+                let mut streams = Vec::new();
+                for bound in header.stream_bounds.iter() {
+                    let stream_id = bound?.stream_id;
+                    if let Some(stream_type) = guessed_stream_type(stream_id) {
+                        streams.push((stream_id, stream_type));
+                    }
+                }
+                bounded = Some(streams);
+            } else if let Event::PesPacket(packet) = &event {
+                if !registered {
+                    registered = true;
+                    muxer.add_program(
+                        PROGRAM_NUMBER,
+                        Pid::try_from(PROGRAM_MAP_PID)?,
+                        None,
+                        &[],
+                    )?;
+                    let streams = mapped.take().or_else(|| bounded.take()).unwrap_or_default();
+                    for (pid, (stream_id, stream_type)) in (FIRST_ELEMENTARY_PID..).zip(streams) {
+                        let pid = Pid::try_from(pid)?;
+                        muxer.add_stream(PROGRAM_NUMBER, pid, stream_type, &[])?;
+                        pids.push((stream_id, pid));
+                    }
+                }
+                match pids.iter().find(|(id, _)| *id == packet.stream_id) {
+                    Some(&(_, pid)) => {
+                        muxer.handle_pes_packet(pid, packet)?;
+                        muxer.poll_output(&mut out);
+                    }
+                    None => left_out = left_out.saturating_add(1),
+                }
+            }
+        }
+        if length == 0 {
             break;
         }
-        let length = chunk.len();
-        demuxer.handle_input(chunk);
-        reader.consume(length);
-        conversion.take_events(&mut demuxer, &mut out)?;
         writer.write_all(&out)?;
         out.clear();
     }
 
-    demuxer.finish();
-    conversion.take_events(&mut demuxer, &mut out)?;
-    conversion.muxer.finish();
-    conversion.muxer.poll_output(&mut out);
+    muxer.finish();
+    muxer.poll_output(&mut out);
     writer.write_all(&out)?;
-    Ok(conversion.left_out)
-}
-
-/// The muxer, the streams of its program, and the PES packets left out
-struct Conversion {
-    muxer: Muxer,
-    streams: Streams,
-    /// PES packets of the streams not registered
-    left_out: usize,
-}
-
-/// The streams of the program, announced before the first PES packet and
-/// registered from it on
-enum Streams {
-    /// The streams of the last program stream map read, and those of the
-    /// last system header
-    Announced {
-        mapped: Option<Vec<(StreamId, StreamType)>>,
-        bounded: Option<Vec<(StreamId, StreamType)>>,
-    },
-    /// The PID of each stream registered
-    Registered(Vec<(StreamId, Pid)>),
-}
-
-impl Conversion {
-    /// Multiplexes the PES packets of each event the demuxer has into `out`
-    fn take_events(
-        &mut self,
-        demuxer: &mut Demuxer,
-        out: &mut Vec<u8>,
-    ) -> Result<(), Box<dyn Error>> {
-        while let Some(event) = demuxer.poll_event() {
-            if let Event::PesPacket(_) = &event
-                && let Streams::Announced { mapped, bounded } = &mut self.streams
-            {
-                let announced = mapped.take().or_else(|| bounded.take());
-                self.muxer.add_program(
-                    PROGRAM_NUMBER,
-                    Pid::try_from(PROGRAM_MAP_PID)?,
-                    None,
-                    &[],
-                )?;
-                let mut pids = Vec::new();
-                for (pid, (stream_id, stream_type)) in
-                    (FIRST_ELEMENTARY_PID..).zip(announced.unwrap_or_default())
-                {
-                    let pid = Pid::try_from(pid)?;
-                    self.muxer
-                        .add_stream(PROGRAM_NUMBER, pid, stream_type, &[])?;
-                    pids.push((stream_id, pid));
-                }
-                self.streams = Streams::Registered(pids);
-            }
-            match (&mut self.streams, &event) {
-                (Streams::Announced { mapped, .. }, Event::ProgramStreamMap(map)) => {
-                    let mut streams = Vec::new();
-                    for stream in map.elementary_streams.iter() {
-                        let stream = stream?;
-                        if stream.elementary_stream_id_extension.is_none()
-                            && stream.elementary_stream_id != StreamId::PADDING_STREAM
-                        {
-                            streams.push((stream.elementary_stream_id, stream.stream_type));
-                        }
-                    }
-                    *mapped = Some(streams);
-                }
-                (Streams::Announced { bounded, .. }, Event::SystemHeader(header)) => {
-                    let mut streams = Vec::new();
-                    for bound in header.stream_bounds.iter() {
-                        let stream_id = bound?.stream_id;
-                        if let Some(stream_type) = guessed_stream_type(stream_id) {
-                            streams.push((stream_id, stream_type));
-                        }
-                    }
-                    *bounded = Some(streams);
-                }
-                (Streams::Registered(pids), Event::PesPacket(packet)) => {
-                    match pids.iter().find(|(id, _)| *id == packet.stream_id) {
-                        Some(&(_, pid)) => {
-                            self.muxer.handle_pes_packet(pid, packet)?;
-                            self.muxer.poll_output(out);
-                        }
-                        None => self.left_out = self.left_out.saturating_add(1),
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
+    Ok(left_out)
 }
 
 /// The `stream_type` of a stream the system header bounds, guessed from its

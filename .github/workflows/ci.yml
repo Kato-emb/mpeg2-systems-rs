@@ -40,10 +40,6 @@ jobs:
       - run: cargo fmt --manifest-path benches/Cargo.toml --check
       - run: cargo fmt --manifest-path fuzz/Cargo.toml --check
       - uses: crate-ci/typos@4c8b7f51ca60df14e3c5ca82770dfbbe6c3dae85 # v1.52.0
-      # The README's examples are not run themselves; the crate doc runs the
-      # same code as doctests, so the two must not drift apart.
-      - name: Keep the README's examples those of the crate doc
-        run: scripts/check-readme-examples.sh
       # A TODO/FIXME must carry an issue link or owner: `TODO(#12):`, `TODO(name):`, or a URL.
       - name: Forbid bare TODO/FIXME markers
         run: |

@@ -21,8 +21,9 @@ Every change to `main` goes through a pull request. Name a branch
 
 The jobs of `.github/workflows/ci.yml` are the checks a pull request must
 pass; each runs a command you can run locally before opening one.
-The examples of `README.md` are the doctests of the crate doc in `lib.rs`; change
-both together, as `scripts/check-readme-examples.sh` checks they match.
+The Rust examples of `README.md` run as doctests of `mpeg2-systems`
+(`cargo test --doc -p mpeg2-systems`), from `crates/mpeg2-systems`, where the
+fixtures they read are.
 
 ### Fuzzing
 

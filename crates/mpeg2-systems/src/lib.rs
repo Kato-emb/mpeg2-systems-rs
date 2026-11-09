@@ -307,3 +307,8 @@ pub mod psi;
 pub mod stream_type;
 pub mod time;
 pub mod ts;
+
+/// The Rust examples of the workspace's `README.md`, run as doctests
+#[cfg(all(doctest, feature = "alloc"))]
+#[doc = include_str!("../../../README.md")]
+struct ReadmeDoctests;
