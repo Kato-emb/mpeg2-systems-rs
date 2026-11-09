@@ -1,10 +1,22 @@
 //! ARIB STD-B24 captions: the syntax of caption and superimpose data
 
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
 use core::fmt;
 
 use mpeg2_systems::field::{self, FourBitFieldOutOfRange};
 
+use self::data_group::DataGroupId;
+
 pub mod data_group;
+pub mod data_unit;
+pub mod management;
+mod range;
+pub mod statement;
+mod time;
+
+pub use range::{SixBitFieldOutOfRange, ThreeBitFieldOutOfRange};
+pub use time::{BcdTime, BcdTimeOutOfRange, Tmd};
 
 /// Failure to read or write caption data
 #[non_exhaustive]
@@ -37,6 +49,57 @@ pub enum Error {
         /// The CRC computed over the data group
         computed: u16,
     },
+    /// The caption data is read from a data group of another kind
+    DataGroupId {
+        /// The `data_group_id` of the data group
+        found: DataGroupId,
+    },
+    /// `unit_separator` is not 0x1F
+    UnitSeparator {
+        /// The `unit_separator` read
+        found: u8,
+    },
+    /// `data_unit_size` runs past the end of the data unit loop
+    DataUnitSize {
+        /// The `data_unit_size` read
+        data_unit_size: u32,
+        /// The bytes left in the loop after `data_unit_size`
+        available_bytes: usize,
+    },
+    /// The data unit to write has more `data_unit_data_byte` than the
+    /// 0xFFFFFF `data_unit_size` counts
+    DataUnitDataLength {
+        /// The bytes of data given
+        length: usize,
+    },
+    /// `data_unit_loop_length` does not match the bytes after it, or the
+    /// loop to write is longer than the 0xFFFFFF bytes it counts
+    DataUnitLoopLength {
+        /// The `data_unit_loop_length` read, or the bytes of the loop to
+        /// write
+        data_unit_loop_length: usize,
+        /// The bytes after `data_unit_loop_length`, or 0xFFFFFF when writing
+        available_bytes: usize,
+    },
+    /// The caption management data to write has more languages than the 8
+    /// §9.3 allows
+    NumLanguages {
+        /// The languages given
+        count: usize,
+    },
+    /// A field to write has a value its table reserves or does not define
+    Forbidden {
+        /// The name of the field in the syntax table
+        field: &'static str,
+        /// The value given
+        value: u64,
+    },
+    /// A field to write is present where its condition leaves it out, or
+    /// absent where its condition asks for it
+    Presence {
+        /// The name of the field in the syntax table
+        field: &'static str,
+    },
 }
 
 impl fmt::Display for Error {
@@ -61,6 +124,44 @@ impl fmt::Display for Error {
                 formatter,
                 "CRC_16 0x{crc_16:04x} does not match the 0x{computed:04x} computed"
             ),
+            Self::DataGroupId { found } => write!(
+                formatter,
+                "data_group_id 0x{:02x} does not carry this caption data",
+                found.get()
+            ),
+            Self::UnitSeparator { found } => {
+                write!(formatter, "unit_separator 0x{found:02x} is not 0x1f")
+            }
+            Self::DataUnitSize {
+                data_unit_size,
+                available_bytes,
+            } => write!(
+                formatter,
+                "data_unit_size {data_unit_size} runs past the {available_bytes} bytes left"
+            ),
+            Self::DataUnitDataLength { length } => write!(
+                formatter,
+                "data_unit_data_byte of {length} bytes is longer than data_unit_size counts"
+            ),
+            Self::DataUnitLoopLength {
+                data_unit_loop_length,
+                available_bytes,
+            } => write!(
+                formatter,
+                "data_unit_loop_length {data_unit_loop_length} does not match the \
+                 {available_bytes} bytes given"
+            ),
+            Self::NumLanguages { count } => write!(
+                formatter,
+                "{count} languages are more than the 8 num_languages allows"
+            ),
+            Self::Forbidden { field, value } => {
+                write!(formatter, "{field} 0x{value:x} is reserved or not defined")
+            }
+            Self::Presence { field } => write!(
+                formatter,
+                "{field} is present or absent against its condition"
+            ),
         }
     }
 }
@@ -69,63 +170,35 @@ impl core::error::Error for Error {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Field { error, .. } => Some(error),
-            Self::DataGroupSize { .. } | Self::DataGroupDataLength { .. } | Self::Crc16 { .. } => {
-                None
-            }
+            Self::DataGroupSize { .. }
+            | Self::DataGroupDataLength { .. }
+            | Self::Crc16 { .. }
+            | Self::DataGroupId { .. }
+            | Self::UnitSeparator { .. }
+            | Self::DataUnitSize { .. }
+            | Self::DataUnitDataLength { .. }
+            | Self::DataUnitLoopLength { .. }
+            | Self::NumLanguages { .. }
+            | Self::Forbidden { .. }
+            | Self::Presence { .. } => None,
         }
     }
 }
 
-/// Failure to make the value of a 6-bit field of a value 6 bits cannot carry
-///
-/// The value types of 6-bit fields, such as `data_group_id`, share it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SixBitFieldOutOfRange {
-    value: u8,
-}
-
-impl SixBitFieldOutOfRange {
-    /// Returns the value given, 64 or more
-    #[must_use]
-    pub const fn value(self) -> u8 {
-        self.value
+/// Runs `write` on `out`, cutting off what it appended if `write` fails
+#[cfg(feature = "alloc")]
+fn write_or_truncate<E>(
+    out: &mut Vec<u8>,
+    write: impl FnOnce(&mut Vec<u8>) -> Result<(), E>,
+) -> Result<(), E> {
+    let start = out.len();
+    let written = write(out);
+    if written.is_err() {
+        out.truncate(start);
     }
 
-    /// Returns `value` if 6 bits carry it
-    ///
-    /// Use it in the `TryFrom<u8>` of the value type of a 6-bit field, in
-    /// this crate or another, so the conversion returns this error.
-    ///
-    /// # Errors
-    ///
-    /// [`SixBitFieldOutOfRange`]: `value` is 64 or more.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use mpeg2_systems_arib::caption::SixBitFieldOutOfRange;
-    ///
-    /// assert_eq!(SixBitFieldOutOfRange::check(63), Ok(63));
-    /// // 6 bits cannot carry 64
-    /// let error = SixBitFieldOutOfRange::check(64).unwrap_err();
-    /// assert_eq!(error.value(), 64);
-    /// ```
-    pub const fn check(value: u8) -> Result<u8, Self> {
-        if value < 64 {
-            Ok(value)
-        } else {
-            Err(Self { value })
-        }
-    }
+    written
 }
-
-impl fmt::Display for SixBitFieldOutOfRange {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "value {} does not fit in 6 bits", self.value)
-    }
-}
-
-impl core::error::Error for SixBitFieldOutOfRange {}
 
 /// Returns the `CRC_16` of `bytes`, ARIB STD-B24 Volume 1 Part 3 §9.2
 ///
@@ -193,18 +266,10 @@ impl TryFrom<u8> for Dmf {
 
 #[cfg(test)]
 mod tests {
-    use super::{SixBitFieldOutOfRange, crc_16};
+    use super::crc_16;
 
     #[test]
     fn crc_16_is_the_crc_16_xmodem_of_the_crc_catalog() {
         assert_eq!(crc_16(b"123456789"), 0x31c3);
-    }
-
-    #[test]
-    fn six_bits_carry_values_below_64() {
-        assert_eq!(
-            [63, 64].map(SixBitFieldOutOfRange::check),
-            [Ok(63), Err(SixBitFieldOutOfRange { value: 64 })]
-        );
     }
 }
