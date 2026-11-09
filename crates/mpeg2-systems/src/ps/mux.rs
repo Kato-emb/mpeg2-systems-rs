@@ -376,7 +376,7 @@ impl Muxer {
         let mut entry = ElementaryStream::new(stream_type, stream_id);
         entry.elementary_stream_id_extension = stream_id_extension;
         entry.elementary_stream_info = DescriptorLoop::from(es_info);
-        stream_definition::check_map_length(&self.streams, &entry)?;
+        stream_definition::check_map_length(&self.streams, entry)?;
         let stream = Stream {
             stream_id,
             stream_id_extension,

@@ -82,18 +82,15 @@ pub(super) fn bounds(streams: &[Stream]) -> (usize, usize) {
 /// be longer than its syntax allows, before anything of the entry is copied
 pub(super) fn check_map_length(
     streams: &[Stream],
-    entry: &ElementaryStream<'_>,
+    entry: ElementaryStream<'_>,
 ) -> Result<(), Error> {
-    let length = streams
-        .iter()
-        .map(|stream| stream.elementary_stream().encoded_len())
-        .fold(
-            ProgramStreamMap::new(VersionNumber(0))
-                .encoded_len()
-                .saturating_add(entry.encoded_len()),
-            usize::saturating_add,
-        );
-    psm::check_encoded_len(length).map_err(|error| Error::ProgramStreamMap { error })
+    psm::check_elementary_streams(
+        streams
+            .iter()
+            .map(Stream::elementary_stream)
+            .chain(core::iter::once(entry)),
+    )
+    .map_err(|error| Error::ProgramStreamMap { error })
 }
 
 /// Appends the system header and the program stream map of `streams` to
