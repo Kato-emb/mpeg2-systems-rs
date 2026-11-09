@@ -181,7 +181,7 @@ impl fmt::Display for FourBitFieldOutOfRange {
 
 impl core::error::Error for FourBitFieldOutOfRange {}
 
-/// Runs `write` on `out`, leaving `out` as it was if `write` fails
+/// Runs `write` on `out`, cutting off what it appended if `write` fails
 ///
 /// What `write` appends after the bytes `out` already holds is cut off
 /// again when it fails; bytes it changes or removes among those already
