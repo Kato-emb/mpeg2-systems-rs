@@ -1,4 +1,4 @@
-//! A Program Stream written with the crate's writers, read back by the
+//! A Program Stream written with `PackWriter`, read back by the
 //! Program Stream demuxer and by the PES packet reader
 
 #[cfg(test)]
@@ -10,7 +10,7 @@
 mod tests {
     use mpeg2_systems::pes::{self, EncodedLen, OptionalHeader, PesPacket, StreamId};
     use mpeg2_systems::ps::demux::{Demuxer, Event};
-    use mpeg2_systems::ps::mux::Muxer;
+    use mpeg2_systems::ps::mux::PackWriter;
     use mpeg2_systems::ps::psm::ElementaryStreamLoop;
     use mpeg2_systems::ps::{
         PackHeader, ProgramStreamMap, StreamBound, StreamBoundLoop, SystemHeader,
@@ -81,15 +81,19 @@ mod tests {
         let video_packet = pes_packet(0xE0, Some(93_600), Some(90_000), &video);
         let audio_packet = pes_packet(0xC0, Some(91_800), None, &audio);
 
-        let muxer = Muxer::new();
+        let writer = PackWriter::new();
         let mut stream = Vec::new();
-        muxer.write_pack_header(&pack_header, &mut stream).unwrap();
-        muxer.write_program_stream_map(&map, &mut stream).unwrap();
+        writer.write_pack_header(&pack_header, &mut stream).unwrap();
+        writer.write_program_stream_map(&map, &mut stream).unwrap();
         let pes_start = stream.len();
-        muxer.write_pes_packets(&video_packet, &mut stream).unwrap();
-        muxer.write_pes_packets(&audio_packet, &mut stream).unwrap();
+        writer
+            .write_pes_packets(&video_packet, &mut stream)
+            .unwrap();
+        writer
+            .write_pes_packets(&audio_packet, &mut stream)
+            .unwrap();
         let pes_end = stream.len();
-        muxer.write_program_end_code(&mut stream);
+        writer.write_program_end_code(&mut stream);
 
         let hand_cut = cut_by_hand(&stream[pes_start..pes_end]);
         assert_eq!(
@@ -113,16 +117,16 @@ mod tests {
         let payload: Vec<u8> = (0..200_000_u32)
             .map(|index| index.to_be_bytes()[3])
             .collect();
-        let muxer = Muxer::new();
+        let writer = PackWriter::new();
         let mut stream = Vec::new();
-        muxer
+        writer
             .write_pack_header(
                 &PackHeader::new(ClockReference::new(0, 0).unwrap(), 2_000),
                 &mut stream,
             )
             .unwrap();
         let pes_start = stream.len();
-        let written = muxer
+        let written = writer
             .write_pes_packets(&pes_packet(0xE0, Some(90_000), None, &payload), &mut stream)
             .unwrap();
         let packets = cut_by_hand(&stream[pes_start..]);
@@ -157,7 +161,7 @@ mod tests {
             (1 << 22) - 1,
         );
         let mut stream = Vec::new();
-        Muxer::new()
+        PackWriter::new()
             .write_pack_header(&pack_header, &mut stream)
             .unwrap();
         assert_eq!(
@@ -172,15 +176,15 @@ mod tests {
     #[test]
     fn a_map_naming_no_streams_reads_back() {
         let map = ProgramStreamMap::new(VersionNumber::try_from(31).unwrap());
-        let muxer = Muxer::new();
+        let writer = PackWriter::new();
         let mut stream = Vec::new();
-        muxer
+        writer
             .write_pack_header(
                 &PackHeader::new(ClockReference::new(0, 0).unwrap(), 2_000),
                 &mut stream,
             )
             .unwrap();
-        muxer.write_program_stream_map(&map, &mut stream).unwrap();
+        writer.write_program_stream_map(&map, &mut stream).unwrap();
         assert_eq!(
             demuxed(&stream)[2..],
             [described(&Event::ProgramStreamMap(map))]
@@ -204,14 +208,16 @@ mod tests {
         let video = vec![0xAA; 100];
         let video_packet = pes_packet(0xE0, Some(3_600), None, &video);
 
-        let muxer = Muxer::new();
+        let writer = PackWriter::new();
         let mut stream = Vec::new();
-        muxer.write_pack_header(&pack_header, &mut stream).unwrap();
-        muxer
+        writer.write_pack_header(&pack_header, &mut stream).unwrap();
+        writer
             .write_system_header(&system_header, &mut stream)
             .unwrap();
-        muxer.write_pes_packets(&video_packet, &mut stream).unwrap();
-        muxer.write_program_end_code(&mut stream);
+        writer
+            .write_pes_packets(&video_packet, &mut stream)
+            .unwrap();
+        writer.write_program_end_code(&mut stream);
 
         assert_eq!(
             demuxed(&stream),

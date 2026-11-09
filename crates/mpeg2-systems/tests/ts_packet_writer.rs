@@ -1,4 +1,4 @@
-//! A Transport Stream written with the crate's muxer, read back by the
+//! A Transport Stream written with `PacketWriter`, read back by the
 //! Transport Stream demuxer
 
 #[cfg(test)]
@@ -27,7 +27,7 @@ mod tests {
     use mpeg2_systems::time::{ClockReference, Timestamp};
     use mpeg2_systems::ts::Pid;
     use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event};
-    use mpeg2_systems::ts::mux::Muxer;
+    use mpeg2_systems::ts::mux::PacketWriter;
     use mpeg2_systems::ts::packet::TransportPacket;
 
     use crate::support::{STANDARD_188, Seen, pat, pmt, program, seen_event};
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn a_written_program_reads_back_with_its_tables_pcrs_and_pes_packets() {
-        let mut muxer = Muxer::new();
+        let mut writer = PacketWriter::new();
         let mut stream = Vec::new();
         let mut programs = Vec::new();
         ProgramLoop::write_from([program(1, PMT_PID)], &mut programs).unwrap();
@@ -137,10 +137,10 @@ mod tests {
         let mut pmt_section = TsProgramMapSection::new(1, VersionNumber::try_from(0).unwrap());
         pmt_section.pcr_pid = Some(pid(VIDEO_PID));
         pmt_section.elementary_streams = ElementaryStreamLoop::from(&streams[..]);
-        muxer
+        writer
             .write_program_association_section(&pat_section, &mut stream)
             .unwrap();
-        muxer
+        writer
             .write_ts_program_map_section(pid(PMT_PID), &pmt_section, &mut stream)
             .unwrap();
 
@@ -156,12 +156,12 @@ mod tests {
             let pts = 90_000 + 3_600 * u64::try_from(index).unwrap();
             let mut packet = pes_packet(0xE0, pts, Some(pts - 3_600), payload);
             packet.length_unspecified = true;
-            muxer
+            writer
                 .write_pes_packet(pid(VIDEO_PID), &packet, Some(pcr), &mut stream)
                 .unwrap();
             if let Some(payload) = audio.get(index) {
                 let packet = pes_packet(0xC0, pts + 100, None, payload);
-                muxer
+                writer
                     .write_pes_packet(pid(AUDIO_PID), &packet, None, &mut stream)
                     .unwrap();
             }
@@ -209,7 +209,7 @@ mod tests {
         demuxer.subscribe_pes(pid(AUDIO_PID));
         demuxer.handle_input(STANDARD_188);
         demuxer.finish();
-        let mut muxer = Muxer::new();
+        let mut writer = PacketWriter::new();
         let mut stream = Vec::new();
         // Why queue the PCRs rather than keep the last: the demuxer gives a
         // PES packet when it ends, after the PCRs of the packets it spans,
@@ -217,11 +217,11 @@ mod tests {
         let mut pcrs = VecDeque::new();
         while let Some(event) = demuxer.poll_event() {
             if let Event::ProgramAssociationSection(pat) = &event {
-                muxer
+                writer
                     .write_program_association_section(pat, &mut stream)
                     .unwrap();
             } else if let Event::TsProgramMapSection { pid, section: pmt } = &event {
-                muxer
+                writer
                     .write_ts_program_map_section(*pid, pmt, &mut stream)
                     .unwrap();
             } else if let Event::ProgramClockReference {
@@ -232,7 +232,7 @@ mod tests {
                 pcrs.push_back(*program_clock_reference);
             } else if let Event::PesPacket { pid, packet, .. } = &event {
                 let pcr = (pid.get() == VIDEO_PID).then(|| pcrs.pop_front()).flatten();
-                muxer
+                writer
                     .write_pes_packet(*pid, packet, pcr, &mut stream)
                     .unwrap();
             }
@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn pcrs_written_on_their_own_between_pes_packets_read_back_in_order_without_a_discontinuity() {
-        let mut muxer = Muxer::new();
+        let mut writer = PacketWriter::new();
         let mut stream = Vec::new();
         let mut programs = Vec::new();
         ProgramLoop::write_from([program(1, PMT_PID)], &mut programs).unwrap();
@@ -262,20 +262,20 @@ mod tests {
         let mut pmt_section = TsProgramMapSection::new(1, VersionNumber::try_from(0).unwrap());
         pmt_section.pcr_pid = Some(pid(VIDEO_PID));
         pmt_section.elementary_streams = ElementaryStreamLoop::from(&streams[..]);
-        muxer
+        writer
             .write_program_association_section(&pat_section, &mut stream)
             .unwrap();
-        muxer
+        writer
             .write_ts_program_map_section(pid(PMT_PID), &pmt_section, &mut stream)
             .unwrap();
         let pcr = |base: u64| ClockReference::new(base, 0).unwrap();
         let video = [counting(5_000), counting(400)];
         let audio = counting(300);
 
-        muxer
+        writer
             .write_program_clock_reference(pid(VIDEO_PID), pcr(0), &mut stream)
             .unwrap();
-        muxer
+        writer
             .write_pes_packet(
                 pid(VIDEO_PID),
                 &pes_packet(0xE0, 9_000, None, &video[0]),
@@ -283,10 +283,10 @@ mod tests {
                 &mut stream,
             )
             .unwrap();
-        muxer
+        writer
             .write_program_clock_reference(pid(VIDEO_PID), pcr(2_700), &mut stream)
             .unwrap();
-        muxer
+        writer
             .write_pes_packet(
                 pid(AUDIO_PID),
                 &pes_packet(0xC0, 9_100, None, &audio),
@@ -294,10 +294,10 @@ mod tests {
                 &mut stream,
             )
             .unwrap();
-        muxer
+        writer
             .write_program_clock_reference(pid(VIDEO_PID), pcr(5_400), &mut stream)
             .unwrap();
-        muxer
+        writer
             .write_pes_packet(
                 pid(VIDEO_PID),
                 &pes_packet(0xE0, 12_600, None, &video[1]),

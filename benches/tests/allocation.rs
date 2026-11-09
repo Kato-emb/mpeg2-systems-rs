@@ -1,5 +1,5 @@
-//! The demuxers and the Transport Stream muxer allocate nothing once their
-//! buffers have grown
+//! The demuxers and the Transport Stream packet writer allocate nothing once
+//! their buffers have grown
 //!
 //! After passes over an input, one more pass over the same input allocates
 //! nothing: handing over input copies it into the buffer the passes before
@@ -15,7 +15,7 @@ mod tests {
     use mpeg2_systems::time::ClockReference;
     use mpeg2_systems::ts::Pid;
     use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig};
-    use mpeg2_systems::ts::mux::Muxer;
+    use mpeg2_systems::ts::mux::PacketWriter;
     use mpeg2_systems_bench::{
         ACCESS_UNIT_LENGTH, CountingAllocator, PROGRAM, STREAMS, allocations_once_grown,
         demux_events, mux_pes_packets, program_stream_events, subscribed_demuxer,
@@ -61,10 +61,10 @@ mod tests {
             }
         }
         let access_unit = vec![0xAA; ACCESS_UNIT_LENGTH];
-        let mut muxer = Muxer::new();
+        let mut writer = PacketWriter::new();
         let mut out = Vec::new();
         let counted = allocations_once_grown(&ALLOCATOR, || {
-            mux_pes_packets(&mut muxer, &access_unit, &mut out);
+            mux_pes_packets(&mut writer, &access_unit, &mut out);
         });
         allocations.push(("pes packets", ACCESS_UNIT_LENGTH, "ts mux", counted));
         none.push(("pes packets", ACCESS_UNIT_LENGTH, "ts mux", 0));
@@ -73,7 +73,7 @@ mod tests {
             out.clear();
             for base in 0..1_000 {
                 let pcr = ClockReference::new(base, 0).unwrap();
-                muxer
+                writer
                     .write_program_clock_reference(pid, pcr, &mut out)
                     .unwrap();
             }

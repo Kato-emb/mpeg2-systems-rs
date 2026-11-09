@@ -4,39 +4,37 @@
 //! A Program Stream is written element by element into a buffer the caller
 //! owns, in the order ISO/IEC 13818-1 §2.5.3 lays out: a pack header, then
 //! the program stream map and the PES packets of the pack, then the next pack
-//! header, and so on, and `MPEG_program_end_code` at the end. [`Muxer`]
-//! writes each element. It holds no state, and is a type so that a Program
-//! Stream is written the way a Transport Stream is, through
-//! `ts::mux::Muxer`, which keeps the continuity counters, as the two
-//! demuxers are driven by methods of the same names. Where a pack starts is
-//! up to the caller. The crate writes a system header the caller has built
-//! but does not work out its bounds, and does not write a program stream
+//! header, and so on, and `MPEG_program_end_code` at the end. [`PackWriter`]
+//! writes each element in the order given, splitting a payload too long for
+//! one PES packet into several, and holds no state. Where a pack starts is up
+//! to the caller. The crate writes a system header the caller has built but
+//! does not work out its bounds, and does not write a program stream
 //! directory, padding or pack stuffing.
 //!
 //! ```
 //! use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
 //! use mpeg2_systems::ps::demux::{Demuxer, Event};
-//! use mpeg2_systems::ps::mux::Muxer;
+//! use mpeg2_systems::ps::mux::PackWriter;
 //! use mpeg2_systems::ps::{PackHeader, ProgramStreamMap};
 //! use mpeg2_systems::psi::VersionNumber;
 //! use mpeg2_systems::time::{ClockReference, Timestamp};
 //!
-//! let muxer = Muxer::new();
+//! let writer = PackWriter::new();
 //! let mut stream = Vec::new();
 //! // A pack: its header, the program stream map, and an access unit too long
 //! // for one PES packet
 //! let pack_header = PackHeader::new(ClockReference::new(0, 0)?, 2_000);
-//! muxer.write_pack_header(&pack_header, &mut stream)?;
+//! writer.write_pack_header(&pack_header, &mut stream)?;
 //! let map = ProgramStreamMap::new(VersionNumber::try_from(0)?);
-//! muxer.write_program_stream_map(&map, &mut stream)?;
+//! writer.write_program_stream_map(&map, &mut stream)?;
 //! let access_unit = vec![0xaa; 100_000];
 //! let mut header = OptionalHeader::new();
 //! header.pts = Some(Timestamp::try_from(90_000)?);
 //! let mut packet = PesPacket::new(StreamId::from(0xe0), &access_unit);
 //! packet.optional_header = Some(header);
-//! assert_eq!(muxer.write_pes_packets(&packet, &mut stream)?, 2);
+//! assert_eq!(writer.write_pes_packets(&packet, &mut stream)?, 2);
 //! // The end of the Program Stream
-//! muxer.write_program_end_code(&mut stream);
+//! writer.write_program_end_code(&mut stream);
 //!
 //! // Read back, the payloads of the PES packets join into the access unit
 //! let mut demuxer = Demuxer::new();
@@ -137,19 +135,20 @@ impl core::error::Error for Error {
     }
 }
 
-/// Program Stream muxer, which writes the elements of a Program Stream into
-/// a buffer the caller owns
+/// Writer of the elements of a Program Stream, which appends each pack
+/// header, system header, program stream map, PES packet or end code, in the
+/// order given, to a buffer the caller owns
 ///
 /// Each method appends one element, or the PES packets of one payload, and a
-/// write that fails leaves the buffer as it was. The muxer does not decide
-/// where a pack starts, nor work out the bounds of a system header; those
-/// are up to the caller.
+/// write that fails leaves the buffer as it was. The writer does not decide
+/// where a pack starts, the SCR or the multiplex rate, or the bounds of a
+/// system header.
 #[non_exhaustive]
 #[derive(Debug, Clone, Default)]
-pub struct Muxer;
+pub struct PackWriter;
 
-impl Muxer {
-    /// Returns a muxer
+impl PackWriter {
+    /// Returns a writer
     #[must_use]
     pub const fn new() -> Self {
         Self
@@ -169,7 +168,7 @@ impl Muxer {
 
     /// Appends `header`, as the caller has built it, to `out`
     ///
-    /// The muxer does not work out the bounds the header states (`rate_bound`,
+    /// The writer does not work out the bounds the header states (`rate_bound`,
     /// `audio_bound`, the buffer size of each stream); they are the caller's.
     ///
     /// # Errors
