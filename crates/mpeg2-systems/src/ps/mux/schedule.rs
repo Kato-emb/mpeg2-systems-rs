@@ -7,11 +7,11 @@ use core::time::Duration;
 use crate::time::SystemTimeClock;
 
 /// Bytes per second in a unit of `program_mux_rate`, ISO/IEC 13818-1 §2.5.3.4
-pub(super) const PROGRAM_MUX_RATE_UNIT: u64 = 50;
+const PROGRAM_MUX_RATE_UNIT: u64 = 50;
 
 /// The longest time from one SCR to the next, in milliseconds, ISO/IEC
 /// 13818-1 §2.7.1
-pub(super) const LONGEST_SCR_INTERVAL_MILLIS: u64 = 700;
+const LONGEST_SCR_INTERVAL_MILLIS: u64 = 700;
 
 /// The longest time from one SCR to the next, ISO/IEC 13818-1 §2.7.1
 const LONGEST_SCR_INTERVAL: Duration = Duration::from_millis(LONGEST_SCR_INTERVAL_MILLIS);
@@ -25,6 +25,21 @@ const LONGEST_SCR_INTERVAL: Duration = Duration::from_millis(LONGEST_SCR_INTERVA
 // less than this step to arrive at any program_mux_rate of 1 or more, so the
 // next one is never due before the step is over.
 const FILLING_PACK_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Returns the most bytes that arrive within [`LONGEST_SCR_INTERVAL`] at
+/// `program_mux_rate` (§2.5.2.2 equation 2-21), the longest pack after which
+/// the next SCR can follow within it (§2.7.1)
+pub(super) fn bytes_within_longest_scr_interval(program_mux_rate: u32) -> usize {
+    // Why not the ticks the bytes take, rounded up as `Pack::arrived` does:
+    // in whole units of program_mux_rate and of a millisecond the count is
+    // exact, and that many bytes, rounded up to a tick, still arrive within
+    // the interval.
+    let bytes = u64::from(program_mux_rate)
+        .saturating_mul(PROGRAM_MUX_RATE_UNIT)
+        .saturating_mul(LONGEST_SCR_INTERVAL_MILLIS)
+        / 1_000;
+    usize::try_from(bytes).unwrap_or(usize::MAX)
+}
 
 /// A pack written: the time of the STC its SCR samples, before
 /// [`MuxerConfig::mux_delay`] is taken off, and its bytes

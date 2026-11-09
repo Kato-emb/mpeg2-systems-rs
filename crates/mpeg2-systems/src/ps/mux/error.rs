@@ -52,14 +52,14 @@ pub enum Error {
         program_mux_rate: u32,
     },
     /// The `pack_size` set cannot hold a pack header, the shortest PES packet
-    /// header and a byte of payload, or is longer than a pack that arrives
-    /// within 0.7 s at the `program_mux_rate` set
+    /// header and a byte of payload
     PackSize {
         /// The `pack_size` set
         pack_size: usize,
     },
     /// The shortest pack that can carry what is given is longer than
-    /// [`MuxerConfig::pack_size`](super::MuxerConfig::pack_size)
+    /// [`MuxerConfig::pack_size`](super::MuxerConfig::pack_size), or than
+    /// the bytes that arrive within 0.7 s at the `program_mux_rate` set
     PackLength {
         /// The bytes of the shortest pack
         length: usize,
@@ -158,12 +158,12 @@ impl fmt::Display for Error {
             ),
             Self::PackSize { pack_size } => write!(
                 formatter,
-                "pack_size {pack_size} is shorter than the shortest pack, or longer than \
-                 program_mux_rate delivers in 0.7 s"
+                "pack_size {pack_size} is shorter than the shortest pack"
             ),
             Self::PackLength { length } => write!(
                 formatter,
-                "the shortest pack to write takes {length} bytes, past pack_size"
+                "the shortest pack to write takes {length} bytes, past pack_size or what \
+                 program_mux_rate delivers in 0.7 s"
             ),
             Self::StreamInUse {
                 stream_id,

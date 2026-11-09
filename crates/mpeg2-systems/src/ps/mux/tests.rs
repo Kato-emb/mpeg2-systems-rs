@@ -175,30 +175,16 @@ fn a_program_mux_rate_of_0_or_past_22_bits_is_refused() {
 }
 
 #[test]
-fn a_pack_size_is_taken_from_the_shortest_pack_to_what_arrives_in_0_7_s() {
-    let new = |program_mux_rate, pack_size| {
-        let mut config = MuxerConfig::new(program_mux_rate);
+fn a_pack_size_is_taken_from_the_shortest_pack_up() {
+    let new = |pack_size| {
+        let mut config = MuxerConfig::new(RATE);
         config.pack_size = pack_size;
         Muxer::new(config).map(|_| ())
     };
     // A pack header of 14 bytes, a PES packet header of 6, and a byte
     assert_eq!(
-        [
-            new(RATE, 20),
-            new(RATE, 21),
-            new(100, 3_500),
-            new(100, 3_501),
-            new(59, 2048),
-            new(58, 2048),
-        ],
-        [
-            Err(Error::PackSize { pack_size: 20 }),
-            Ok(()),
-            Ok(()),
-            Err(Error::PackSize { pack_size: 3_501 }),
-            Ok(()),
-            Err(Error::PackSize { pack_size: 2048 }),
-        ]
+        [new(20), new(21), new(usize::MAX)],
+        [Err(Error::PackSize { pack_size: 20 }), Ok(()), Ok(())]
     );
 }
 
@@ -926,5 +912,30 @@ fn a_pes_packet_too_long_for_the_buffer_limit_is_refused_with_the_bytes_of_all_i
     assert_eq!(
         muxer_of(config).handle_pes_packet(&pes_packet(VIDEO, &payload, Some(90_000))),
         Err(Error::BufferFull { length })
+    );
+}
+
+#[test]
+fn a_stream_is_refused_whose_first_pack_would_not_arrive_within_0_7_s() {
+    // 100 bytes a second: 70 bytes arrive in 0.7 s. A first pack of 14 +
+    // 15 of system header + 20 of map with the descriptors + 6 + 1 is 56
+    // bytes, and 70 with 14 bytes of descriptors
+    let add = |es_info: &[u8]| {
+        Muxer::new(MuxerConfig::new(2)).unwrap().add_stream(
+            StreamId::from(VIDEO),
+            None,
+            StreamType::ISO_IEC_13818_2_VIDEO,
+            VIDEO_BUFFER,
+            es_info,
+        )
+    };
+    let descriptor = |length: u8| {
+        let mut bytes = vec![0x80, length - 2];
+        bytes.extend(core::iter::repeat_n(0xaa, usize::from(length - 2)));
+        bytes
+    };
+    assert_eq!(
+        [add(&descriptor(14)), add(&descriptor(15))],
+        [Ok(()), Err(Error::PackLength { length: 71 })]
     );
 }

@@ -352,6 +352,18 @@ mod tests {
     }
 
     #[test]
+    fn at_a_low_rate_every_pack_arrives_within_0_7_s_whatever_pack_size() {
+        // 500 bytes a second: 350 bytes arrive in 0.7 s, less than the
+        // default pack_size of 2048
+        let (packs, _) = packs(&multiplex(MuxerConfig::new(10), &stepped(90_000, 180_000)));
+        let (kept, _) = scr_steps(&packs, 10);
+        assert_eq!(
+            (packs.iter().all(|pack| pack.length <= 350), kept),
+            (true, true)
+        );
+    }
+
+    #[test]
     fn the_same_input_gives_the_same_stream() {
         let inputs = stepped(Timestamp::MODULUS - 50 * 1_800, 180_000);
         assert_eq!(

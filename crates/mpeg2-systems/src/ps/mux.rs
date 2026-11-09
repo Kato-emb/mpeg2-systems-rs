@@ -68,7 +68,7 @@ use crate::ps::{PackHeader, pack_header, system_header};
 use crate::stream_type::StreamType;
 use crate::time::SystemTimeClock;
 use pack_writer::PesPacketPieces;
-use schedule::{Filling, LONGEST_SCR_INTERVAL_MILLIS, PROGRAM_MUX_RATE_UNIT, Pack};
+use schedule::{Filling, Pack, bytes_within_longest_scr_interval};
 use stream_definition::Stream;
 
 mod error;
@@ -105,11 +105,11 @@ pub struct MuxerConfig {
     pub program_mux_rate: u32,
     /// The most bytes of a pack (2048 by default)
     ///
-    /// [`Muxer::new`] takes from the bytes of a pack header, the shortest PES
-    /// packet header and one byte of payload, to `program_mux_rate` × 35
-    /// bytes: the most that arrive in the 0.7 s ISO/IEC 13818-1 §2.7.1
-    /// allows from one SCR to the next, at the rate §2.5.2.2 equation 2-21
-    /// gives.
+    /// [`Muxer::new`] takes any value from the bytes of a pack header, the
+    /// shortest PES packet header and one byte of payload upward. A pack is
+    /// never longer than the bytes that arrive at `program_mux_rate`, at the
+    /// rate ISO/IEC 13818-1 §2.5.2.2 equation 2-21 gives, within the 0.7 s
+    /// §2.7.1 allows from one SCR to the next, whatever `pack_size`.
     pub pack_size: usize,
     /// How far the SCR of a pack runs behind the DTS of the PES packet it
     /// carries, or its PTS when it has no DTS (0.7 s by default)
@@ -153,7 +153,9 @@ impl MuxerConfig {
 /// `poll_output` gives all that is held, then `MPEG_program_end_code`.
 ///
 /// - A pack is a pack header and one PES packet, at most
-///   [`MuxerConfig::pack_size`] bytes. A PES packet too long for one pack is
+///   [`MuxerConfig::pack_size`] bytes and at most the bytes that arrive
+///   within 0.7 s at [`MuxerConfig::program_mux_rate`]. A PES packet too
+///   long for one pack is
 ///   split into several, each in a pack of its own: the first has the
 ///   optional header given, the ones after it the same header without its
 ///   times (PTS, DTS and ESCR).
@@ -259,6 +261,14 @@ enum End {
     Ended,
 }
 
+/// Returns the most bytes of a pack: [`MuxerConfig::pack_size`], or fewer
+/// where fewer arrive at [`MuxerConfig::program_mux_rate`] within 0.7 s
+fn largest_pack(config: &MuxerConfig) -> usize {
+    config
+        .pack_size
+        .min(bytes_within_longest_scr_interval(config.program_mux_rate))
+}
+
 /// Returns the bytes of the shortest pack: a pack header, `headers` bytes of
 /// the system header and the program stream map, the shortest PES packet
 /// header and a byte of payload
@@ -279,23 +289,16 @@ impl Muxer {
     ///   (§2.5.3.4).
     /// * [`PackSize`](Error::PackSize): [`MuxerConfig::pack_size`] cannot
     ///   hold a pack header, the shortest PES packet header and a byte of
-    ///   payload, or is more than `program_mux_rate` × 35 bytes, which take
-    ///   longer than 0.7 s to arrive (§2.7.1, §2.5.2.2 equation 2-21).
+    ///   payload.
     pub fn new(config: MuxerConfig) -> Result<Self, Error> {
         let program_mux_rate = config.program_mux_rate;
         if program_mux_rate == 0 || program_mux_rate >= PROGRAM_MUX_RATE_LIMIT {
             return Err(Error::ProgramMuxRate { program_mux_rate });
         }
         let pack_size = config.pack_size;
-        // Why not compare times: pack_size ≤ program_mux_rate × 50 × 0.7 is
-        // exact in integers, where a time in ticks is rounded.
-        let arrives_in_time = u64::try_from(pack_size)
-            .unwrap_or(u64::MAX)
-            .saturating_mul(1_000)
-            <= u64::from(program_mux_rate)
-                .saturating_mul(PROGRAM_MUX_RATE_UNIT)
-                .saturating_mul(LONGEST_SCR_INTERVAL_MILLIS);
-        if pack_size < shortest_pack(0) || !arrives_in_time {
+        // Why not refuse a program_mux_rate the shortest pack does not arrive
+        // at within 0.7 s: it is shorter than what arrives at a rate of 1.
+        if pack_size < shortest_pack(0) {
             return Err(Error::PackSize { pack_size });
         }
         Ok(Self {
@@ -338,7 +341,8 @@ impl Muxer {
     ///   refused before `es_info` is copied.
     /// * [`PackLength`](Error::PackLength): the first pack, with the system
     ///   header and the program stream map, could not carry a PES packet in
-    ///   [`MuxerConfig::pack_size`].
+    ///   [`MuxerConfig::pack_size`], or in the bytes that arrive within 0.7 s
+    ///   at [`MuxerConfig::program_mux_rate`] (§2.7.1).
     ///
     /// # Panics
     ///
@@ -399,7 +403,7 @@ impl Muxer {
         stream_definition::write_headers(&self.streams, self.config.program_mux_rate, &mut headers)
             .and_then(|()| {
                 let length = shortest_pack(headers.len());
-                if length > self.config.pack_size {
+                if length > largest_pack(&self.config) {
                     return Err(Error::PackLength { length });
                 }
                 Ok(())
@@ -442,7 +446,8 @@ impl Muxer {
     ///   it on its stream.
     /// * [`PackLength`](Error::PackLength): a pack cannot carry the header
     ///   of the PES packet and a byte of its payload in
-    ///   [`MuxerConfig::pack_size`].
+    ///   [`MuxerConfig::pack_size`], or in the bytes that arrive within 0.7 s
+    ///   at [`MuxerConfig::program_mux_rate`].
     /// * [`TimestampGap`](Error::TimestampGap): the packs that fill the leap
     ///   since the PES packet before do not fit
     ///   [`MuxerConfig::buffer_limit`], however much `poll_output` takes.
@@ -559,7 +564,8 @@ impl Muxer {
             stream_definition::write_headers(streams, config.program_mux_rate, &mut headers)?;
         }
         let pack_header_length = pack_header::FIXED_LENGTH;
-        let room = config.pack_size.saturating_sub(pack_header_length);
+        let largest_pack = largest_pack(config);
+        let room = largest_pack.saturating_sub(pack_header_length);
         let longest_continued = room.min(pes::LONGEST_PES_PACKET);
         let longest = room
             .saturating_sub(headers.len())
@@ -568,7 +574,7 @@ impl Muxer {
             .saturating_add(headers.len())
             .saturating_add(packet.encoded_len().saturating_sub(packet.payload.len()))
             .saturating_add(packet.payload.len().min(1));
-        if length > config.pack_size {
+        if length > largest_pack {
             return Err(Error::PackLength { length });
         }
         let pieces = PesPacketPieces::new(packet, longest, longest_continued);
