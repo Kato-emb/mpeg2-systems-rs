@@ -917,7 +917,13 @@ impl Muxer {
 /// [`MuxerConfig::mux_delay`] and round the circle of
 /// [`ClockReference::MODULUS`]
 fn pcr_at(config: &MuxerConfig, at: u64) -> ClockReference {
-    ClockReference::from_ticks(at.wrapping_sub(ticks(config.mux_delay)))
+    // Why not `at - mux_delay` wrapping: it wraps at 2^64, which is not a
+    // multiple of the modulus, so both are taken modulo it first.
+    ClockReference::from_ticks(
+        (at % ClockReference::MODULUS)
+            .wrapping_add(ClockReference::MODULUS)
+            .wrapping_sub(ticks(config.mux_delay) % ClockReference::MODULUS),
+    )
 }
 
 /// Returns `duration` in ticks of the 27 MHz system clock

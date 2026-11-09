@@ -738,3 +738,29 @@ fn a_stream_of_one_pcr_ends_with_a_second_one_pcr_interval_on_and_a_longer_one_w
         ]
     );
 }
+
+#[test]
+fn a_mux_delay_longer_than_the_time_stamp_gives_the_pcr_round_the_circle() {
+    let mut config = MuxerConfig::new();
+    config.mux_delay = Duration::from_secs(96_000);
+    let mut muxer = muxer_of(config);
+    let mut header = OptionalHeader::new();
+    header.pts = Some(Timestamp::try_from(0).unwrap());
+    let mut packet = PesPacket::new(StreamId::from(0xe0), &[1]);
+    packet.optional_header = Some(header);
+    muxer.handle_pes_packet(pid(VIDEO_PID), &packet).unwrap();
+    let mut out = Vec::new();
+    muxer.poll_output(&mut out);
+    let pcrs: Vec<u64> = out
+        .chunks(188)
+        .filter_map(|chunk| {
+            TransportPacket::read(chunk)
+                .unwrap()
+                .adaptation_field
+                .and_then(|field| field.program_clock_reference)
+                .map(ClockReference::ticks)
+        })
+        .collect();
+    let delay = 96_000 * 27_000_000 % ClockReference::MODULUS;
+    assert_eq!(pcrs, [ClockReference::MODULUS - delay]);
+}
