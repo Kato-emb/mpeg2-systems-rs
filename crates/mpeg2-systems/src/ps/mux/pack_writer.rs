@@ -144,7 +144,6 @@ pub(crate) struct PesPacketPieces<'packet> {
     /// The header of the next packet and the payload left, `None` once the
     /// last packet is given
     rest: Option<PesPacket<'packet>>,
-    continued_header: Option<OptionalHeader<'packet>>,
     /// The most bytes the next packet may take
     longest: usize,
     /// The most bytes each packet after the first may take
@@ -159,15 +158,8 @@ impl<'packet> PesPacketPieces<'packet> {
         longest: usize,
         longest_continued: usize,
     ) -> Self {
-        let continued_header = packet.optional_header.clone().map(|mut header| {
-            header.pts = None;
-            header.dts = None;
-            header.escr = None;
-            header
-        });
         Self {
             rest: Some(packet.clone()),
-            continued_header,
             longest,
             longest_continued,
         }
@@ -195,7 +187,11 @@ impl<'packet> Iterator for PesPacketPieces<'packet> {
             self.rest = None;
         } else {
             rest.payload = after;
-            rest.optional_header.clone_from(&self.continued_header);
+            if let Some(header) = rest.optional_header.as_mut() {
+                header.pts = None;
+                header.dts = None;
+                header.escr = None;
+            }
             self.longest = self.longest_continued;
         }
         Some(piece)
