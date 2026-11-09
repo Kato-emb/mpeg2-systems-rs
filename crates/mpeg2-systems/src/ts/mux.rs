@@ -89,7 +89,7 @@ use crate::psi::pat;
 use crate::psi::pmt;
 use crate::psi::section;
 use crate::stream_type::StreamType;
-use crate::time::{ClockReference, unwrap_timestamp};
+use crate::time::{ClockReference, Timestamp, unwrap_timestamp};
 use crate::ts::Pid;
 use crate::ts::adaptation_field::AdaptationField;
 use crate::ts::packet::{self, PACKET_LENGTH};
@@ -175,6 +175,22 @@ pub enum Error {
         /// The PID given
         pid: Pid,
     },
+    /// The first PES packet of a stream has no PTS, which ISO/IEC 13818-1
+    /// §2.7.5 asks of it
+    MissingPts {
+        /// The PID of the stream
+        pid: Pid,
+    },
+    /// The DTS of a PES packet, or its PTS when it has none, is before that
+    /// of the PES packet given before it on the same stream
+    DecreasingTimestamp {
+        /// The PID of the stream
+        pid: Pid,
+        /// The DTS, or the PTS, given
+        timestamp: Timestamp,
+        /// The DTS, or the PTS, of the PES packet before it
+        previous: Timestamp,
+    },
     /// The time stamp of the input leaps so far past the one before it that
     /// the PCRs, and the PATs and PMTs, to send in the leap do not fit
     /// [`MuxerConfig::buffer_limit`] even with nothing held
@@ -234,6 +250,22 @@ impl fmt::Display for Error {
                 "PID {:#06x} carries no registered stream",
                 pid.get()
             ),
+            Self::MissingPts { pid } => write!(
+                formatter,
+                "the first PES packet on PID {:#06x} has no PTS",
+                pid.get()
+            ),
+            Self::DecreasingTimestamp {
+                pid,
+                timestamp,
+                previous,
+            } => write!(
+                formatter,
+                "time stamp {} on PID {:#06x} is before {} of the PES packet before it",
+                timestamp.get(),
+                pid.get(),
+                previous.get()
+            ),
             Self::TimestampGap { gap } => write!(
                 formatter,
                 "a leap of {gap} ticks in the time stamps needs more PCRs and tables than buffer_limit holds"
@@ -261,6 +293,8 @@ impl core::error::Error for Error {
             | Self::UnregisteredProgram { .. }
             | Self::PidInUse { .. }
             | Self::UnregisteredPid { .. }
+            | Self::MissingPts { .. }
+            | Self::DecreasingTimestamp { .. }
             | Self::TimestampGap { .. }
             | Self::BufferFull { .. } => None,
         }
@@ -625,6 +659,7 @@ impl Muxer {
             pid,
             stream_type,
             es_info: es_info.to_vec(),
+            last_timestamp: None,
         });
         program.check(transport_stream_id).inspect_err(|_| {
             program.streams.pop();
@@ -644,6 +679,11 @@ impl Muxer {
     ///   that of a PES packet.
     /// * [`PesPacket`](Error::PesPacket): [`PesPacket::write`] refuses the
     ///   packet.
+    /// * [`MissingPts`](Error::MissingPts): the PES packet is the first of its
+    ///   stream and has no PTS.
+    /// * [`DecreasingTimestamp`](Error::DecreasingTimestamp): its DTS, or its
+    ///   PTS when it has none, is before that of the PES packet given before
+    ///   it on its stream. The order across the streams is not checked.
     /// * [`TimestampGap`](Error::TimestampGap): the PCRs and the tables to
     ///   send since the PES packet before do not fit
     ///   [`MuxerConfig::buffer_limit`], however much `poll_output` takes.
@@ -660,10 +700,10 @@ impl Muxer {
     )]
     pub fn handle_pes_packet(&mut self, pid: Pid, packet: &PesPacket<'_>) -> Result<(), Error> {
         assert!(!self.finished, "a PES packet is given after finish");
-        let Some(program) = self
+        let Some((program, stream)) = self
             .program
             .as_ref()
-            .filter(|program| program.stream(pid).is_some())
+            .and_then(|program| Some((program, program.stream(pid)?)))
         else {
             return Err(Error::UnregisteredPid { pid });
         };
@@ -682,17 +722,28 @@ impl Muxer {
         } = self;
         let pes_length = packet.encoded_len();
 
-        let at = packet
-            .optional_header
-            .as_ref()
-            .and_then(|header| header.dts.or(header.pts))
-            .map(|timestamp| {
-                unwrap_timestamp(
-                    schedule.map(|schedule| schedule.clock / TICKS_PER_TIMESTAMP_TICK),
-                    timestamp,
-                )
-                .saturating_mul(TICKS_PER_TIMESTAMP_TICK)
+        let header = packet.optional_header.as_ref();
+        if stream.last_timestamp.is_none() && header.and_then(|header| header.pts).is_none() {
+            return Err(Error::MissingPts { pid });
+        }
+        let timestamp = header.and_then(|header| header.dts.or(header.pts));
+        let unwrapped = timestamp.map(|timestamp| {
+            unwrap_timestamp(
+                schedule.map(|schedule| schedule.clock / TICKS_PER_TIMESTAMP_TICK),
+                timestamp,
+            )
+        });
+        if let (Some(timestamp), Some(unwrapped), Some(previous)) =
+            (timestamp, unwrapped, stream.last_timestamp)
+            && unwrapped < previous
+        {
+            return Err(Error::DecreasingTimestamp {
+                pid,
+                timestamp,
+                previous: Timestamp::from_33_bits(previous),
             });
+        }
+        let at = unwrapped.map(|unwrapped| unwrapped.saturating_mul(TICKS_PER_TIMESTAMP_TICK));
         let interval = |duration| ticks(duration);
         let (clock, psi_times, pcr_times) = match *schedule {
             None => {
@@ -804,6 +855,14 @@ impl Muxer {
                 .unwrap_or_else(|| schedule.map_or(clock, |schedule| schedule.pcr_sent_at)),
         };
         *schedule = Some(next);
+        if let Some(stream) = self
+            .program
+            .as_mut()
+            .and_then(|program| program.stream_mut(pid))
+            && unwrapped.is_some()
+        {
+            stream.last_timestamp = unwrapped;
+        }
         Ok(())
     }
 

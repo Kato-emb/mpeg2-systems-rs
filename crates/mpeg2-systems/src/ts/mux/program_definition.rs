@@ -33,12 +33,23 @@ pub(super) struct Stream {
     pub(super) pid: Pid,
     pub(super) stream_type: StreamType,
     pub(super) es_info: Vec<u8>,
+    /// The DTS (the PTS without one) of the last PES packet given on the
+    /// stream, on the line [`unwrap_timestamp`](crate::time::unwrap_timestamp)
+    /// places it on, `None` before the first
+    // Why not the clock of the muxer: the clock follows every stream, and a
+    // stream may run behind another.
+    pub(super) last_timestamp: Option<u64>,
 }
 
 impl ProgramDefinition {
     /// Returns the stream registered on `pid`
     pub(super) fn stream(&self, pid: Pid) -> Option<&Stream> {
         self.streams.iter().find(|stream| stream.pid == pid)
+    }
+
+    /// Returns the stream registered on `pid`, to change
+    pub(super) fn stream_mut(&mut self, pid: Pid) -> Option<&mut Stream> {
+        self.streams.iter_mut().find(|stream| stream.pid == pid)
     }
 
     /// Returns the PID the PCR goes on: the `pcr_pid` registered, or else

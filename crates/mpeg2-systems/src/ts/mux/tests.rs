@@ -486,9 +486,14 @@ fn the_pcr_is_the_dts_less_the_mux_delay_and_never_goes_back() {
     config.pcr_interval = Duration::ZERO;
     let mut muxer = muxer_of(config);
     let mut pcrs = Vec::new();
-    for dts in [90_000, 99_000, 95_000, 108_000] {
+    for (stream_pid, dts) in [
+        (VIDEO_PID, 90_000),
+        (VIDEO_PID, 99_000),
+        (AUDIO_PID, 95_000),
+        (VIDEO_PID, 108_000),
+    ] {
         muxer
-            .handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &[0], Some(dts)))
+            .handle_pes_packet(pid(stream_pid), &pes_packet(0xe0, &[0], Some(dts)))
             .unwrap();
         let mut out = Vec::new();
         muxer.poll_output(&mut out);
@@ -624,4 +629,71 @@ fn a_leap_too_long_to_fill_within_the_buffer_limit_is_refused_however_much_is_ta
     }
     let gap = Err(Error::TimestampGap { gap: 10 * 90_000 });
     assert_eq!((refused, refused_again, out), (gap, gap, expected));
+}
+
+/// A PES packet of `stream_id` without a PTS or a DTS
+fn unstamped(stream_id: u8) -> PesPacket<'static> {
+    let mut packet = PesPacket::new(StreamId::from(stream_id), &[0x5a; 10]);
+    packet.optional_header = Some(OptionalHeader::new());
+    packet
+}
+
+#[test]
+fn a_stream_whose_first_pes_packet_has_no_pts_or_whose_dts_goes_back_is_refused() {
+    let mut muxer = muxer_of(MuxerConfig::new());
+    let results = [
+        muxer.handle_pes_packet(pid(VIDEO_PID), &unstamped(0xe0)),
+        muxer.handle_pes_packet(pid(VIDEO_PID), &stamped(0xe0, 180_000)),
+        muxer.handle_pes_packet(pid(AUDIO_PID), &unstamped(0xc0)),
+        muxer.handle_pes_packet(pid(VIDEO_PID), &stamped(0xe0, 90_000)),
+        muxer.handle_pes_packet(pid(AUDIO_PID), &stamped(0xc0, 90_000)),
+        muxer.handle_pes_packet(pid(VIDEO_PID), &unstamped(0xe0)),
+        muxer.handle_pes_packet(pid(VIDEO_PID), &stamped(0xe0, 181_800)),
+    ];
+    let mut out = Vec::new();
+    muxer.poll_output(&mut out);
+
+    let mut fresh = muxer_of(MuxerConfig::new());
+    let mut expected = Vec::new();
+    for (stream_pid, packet) in [
+        (VIDEO_PID, stamped(0xe0, 180_000)),
+        (AUDIO_PID, stamped(0xc0, 90_000)),
+        (VIDEO_PID, unstamped(0xe0)),
+        (VIDEO_PID, stamped(0xe0, 181_800)),
+    ] {
+        fresh.handle_pes_packet(pid(stream_pid), &packet).unwrap();
+    }
+    fresh.poll_output(&mut expected);
+    let timestamp = |value| Timestamp::try_from(value).unwrap();
+    assert_eq!(
+        (results, out),
+        (
+            [
+                Err(Error::MissingPts {
+                    pid: pid(VIDEO_PID)
+                }),
+                Ok(()),
+                Err(Error::MissingPts {
+                    pid: pid(AUDIO_PID)
+                }),
+                Err(Error::DecreasingTimestamp {
+                    pid: pid(VIDEO_PID),
+                    timestamp: timestamp(90_000),
+                    previous: timestamp(180_000),
+                }),
+                Ok(()),
+                Ok(()),
+                Ok(()),
+            ],
+            expected
+        )
+    );
+}
+
+#[test]
+fn a_dts_past_the_wrap_of_33_bits_does_not_go_back() {
+    let mut muxer = muxer_of(MuxerConfig::new());
+    let results = [Timestamp::MODULUS - 1_800, Timestamp::MODULUS + 1_800]
+        .map(|timestamp| muxer.handle_pes_packet(pid(VIDEO_PID), &stamped(0xe0, timestamp)));
+    assert_eq!(results, [Ok(()), Ok(())]);
 }
