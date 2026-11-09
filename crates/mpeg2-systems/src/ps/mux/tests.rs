@@ -368,6 +368,7 @@ fn a_stream_is_refused_for_its_stream_id_its_extension_a_bound_or_its_descriptor
     let mut muxer = muxer();
     assert_eq!(
         [
+            add(&mut muxer, 0xbb, None, &[]),
             add(&mut muxer, 0xbc, None, &[]),
             add(&mut muxer, 0xfd, None, &[]),
             add(&mut muxer, 0xbd, Some(0x55), &[]),
@@ -382,6 +383,9 @@ fn a_stream_is_refused_for_its_stream_id_its_extension_a_bound_or_its_descriptor
             ),
         ],
         [
+            Err(Error::StreamId {
+                stream_id: StreamId::from(0xbb)
+            }),
             Err(Error::StreamId {
                 stream_id: StreamId::from(0xbc)
             }),

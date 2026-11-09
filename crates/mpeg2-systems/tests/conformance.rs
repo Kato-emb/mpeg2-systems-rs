@@ -298,6 +298,37 @@ mod tests {
         assert_eq!((expected_streams, expected), (streams, probed));
     }
 
+    /// Writes the PAT naming program 1 on PMT PID 0x1000, then its PMT
+    /// naming `streams` and `pcr_pid`
+    fn write_program_tables<'stream>(
+        writer: &mut ts_mux::PacketWriter,
+        streams: impl IntoIterator<Item = pmt::ElementaryStream<'stream>>,
+        pcr_pid: Option<Pid>,
+        out: &mut Vec<u8>,
+    ) {
+        let pmt_pid = Pid::try_from(0x1000).unwrap();
+        let mut programs = Vec::new();
+        ProgramLoop::write_from(
+            [Program::ProgramMap {
+                program_number: 1.try_into().unwrap(),
+                program_map_pid: pmt_pid,
+            }],
+            &mut programs,
+        )
+        .unwrap();
+        let mut pat = ProgramAssociationSection::new(1, VersionNumber::try_from(0).unwrap());
+        pat.programs = ProgramLoop::from(&programs[..]);
+        writer.write_program_association_section(&pat, out).unwrap();
+        let mut entries = Vec::new();
+        pmt::ElementaryStreamLoop::write_from(streams, &mut entries).unwrap();
+        let mut pmt = TsProgramMapSection::new(1, VersionNumber::try_from(0).unwrap());
+        pmt.pcr_pid = pcr_pid;
+        pmt.elementary_streams = pmt::ElementaryStreamLoop::from(&entries[..]);
+        writer
+            .write_ts_program_map_section(pmt_pid, &pmt, out)
+            .unwrap();
+    }
+
     #[test]
     #[ignore = "runs ffprobe from FFmpeg and tsanalyze from TSDuck"]
     fn a_transport_stream_the_packet_writer_writes_reads_in_ffprobe_and_tsanalyze_as_written() {
@@ -312,35 +343,15 @@ mod tests {
 
         let mut writer = ts_mux::PacketWriter::new();
         let mut written = Vec::new();
-        let mut programs = Vec::new();
-        ProgramLoop::write_from(
-            [Program::ProgramMap {
-                program_number: 1.try_into().unwrap(),
-                program_map_pid: pid(0x1000),
-            }],
-            &mut programs,
-        )
-        .unwrap();
-        let mut pat = ProgramAssociationSection::new(1, VersionNumber::try_from(0).unwrap());
-        pat.programs = ProgramLoop::from(&programs[..]);
-        writer
-            .write_program_association_section(&pat, &mut written)
-            .unwrap();
-        let mut streams = Vec::new();
-        pmt::ElementaryStreamLoop::write_from(
+        write_program_tables(
+            &mut writer,
             [
                 pmt::ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, pid(VIDEO_PID)),
                 pmt::ElementaryStream::new(StreamType::ISO_IEC_11172_3_AUDIO, pid(AUDIO_PID)),
             ],
-            &mut streams,
-        )
-        .unwrap();
-        let mut pmt = TsProgramMapSection::new(1, VersionNumber::try_from(0).unwrap());
-        pmt.pcr_pid = Some(pid(VIDEO_PID));
-        pmt.elementary_streams = pmt::ElementaryStreamLoop::from(&streams[..]);
-        writer
-            .write_ts_program_map_section(pid(0x1000), &pmt, &mut written)
-            .unwrap();
+            Some(pid(VIDEO_PID)),
+            &mut written,
+        );
         let mut expected: BTreeMap<u64, Vec<Timing>> = BTreeMap::new();
         for (index, (timing, payload)) in video.iter().enumerate() {
             let mut packet = pes_packet(0xE0, *timing, payload);
@@ -422,5 +433,100 @@ mod tests {
             (AUDIO_PID.into(), (u64::try_from(audio.len()).unwrap(), 0)),
         ]);
         assert_eq!((errors, starts), (no_errors, written_starts));
+    }
+
+    #[test]
+    #[ignore = "runs ffprobe from FFmpeg and tsanalyze from TSDuck"]
+    fn a_program_stream_map_the_packet_writer_writes_reads_in_ffprobe_and_tsanalyze_as_given() {
+        const PSM_PID: u16 = 0x100;
+        const COUNT: usize = 5;
+        let pid = |value: u16| Pid::try_from(value).unwrap();
+        let mut writer = ts_mux::PacketWriter::new();
+        let mut written = Vec::new();
+        let mut entries = Vec::new();
+        ElementaryStreamLoop::write_from(
+            [ElementaryStream::new(
+                StreamType::ISO_IEC_13818_2_VIDEO,
+                StreamId::from(0xE0),
+            )],
+            &mut entries,
+        )
+        .unwrap();
+        let mut map = ProgramStreamMap::new(VersionNumber::try_from(0).unwrap());
+        map.elementary_streams = ElementaryStreamLoop::from(&entries[..]);
+        let mut map_bytes = Vec::new();
+        map.write(&mut map_bytes).unwrap();
+        let body = &map_bytes[6..];
+        let packet = mpeg2_systems::pes::PesPacket::new(StreamId::PROGRAM_STREAM_MAP, body);
+        for _ in 0..COUNT {
+            write_program_tables(
+                &mut writer,
+                [pmt::ElementaryStream::new(
+                    StreamType::ISO_IEC_13818_1_PES_PRIVATE_DATA,
+                    pid(PSM_PID),
+                )],
+                None,
+                &mut written,
+            );
+            writer
+                .write_pes_packet(pid(PSM_PID), &packet, None, &mut written)
+                .unwrap();
+        }
+        let path = format!("{}/program_stream_map.ts", env!("CARGO_TARGET_TMPDIR"));
+        std::fs::write(&path, &written).unwrap();
+
+        let probed = run(
+            "ffprobe",
+            &[
+                "-v",
+                "error",
+                "-of",
+                "json",
+                "-show_packets",
+                "-show_data",
+                &path,
+            ],
+        );
+        let payloads: Vec<_> = probed["packets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|packet| {
+                let stream_id = integer(&packet["side_data_list"][0], "id");
+                let data = packet["data"].as_str().unwrap();
+                let hex: String = data
+                    .lines()
+                    .filter_map(|line| line.split_once(": "))
+                    .flat_map(|(_, rest)| rest.split("  ").next().unwrap().split(' '))
+                    .collect();
+                let bytes: Vec<u8> = hex
+                    .as_bytes()
+                    .chunks(2)
+                    .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                    .collect();
+                (stream_id, bytes)
+            })
+            .collect();
+        assert_eq!(payloads, vec![(0xBC, body.to_vec()); COUNT]);
+
+        let analyzed = run("tsanalyze", &["--json", &path]);
+        let analyzed_pid = analyzed["pids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|analyzed_pid| integer(analyzed_pid, "id") == u64::from(PSM_PID))
+            .unwrap();
+        let packets = &analyzed_pid["packets"];
+        assert_eq!(
+            [
+                integer(&analyzed["ts"]["packets"], "invalid-syncs"),
+                integer(&analyzed["ts"]["packets"], "transport-errors"),
+                integer(packets, "discontinuities"),
+                integer(analyzed_pid, "invalid-pes-prefix"),
+                integer(analyzed_pid, "pes"),
+                integer(analyzed_pid, "pes-stream-id"),
+            ],
+            [0, 0, 0, 0, u64::try_from(COUNT).unwrap(), 0xBC]
+        );
     }
 }

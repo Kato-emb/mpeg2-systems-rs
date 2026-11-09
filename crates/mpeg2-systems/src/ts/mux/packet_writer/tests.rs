@@ -346,23 +346,41 @@ fn a_pes_packet_on_a_reserved_pid_is_refused() {
 
 #[test]
 fn a_stream_id_that_is_not_of_a_pes_packet_is_refused() {
-    let mut out = Vec::new();
-    let error = PacketWriter::new()
-        .write_pes_packet(
-            pid(0x100),
-            &PesPacket::new(StreamId::from(0xBC), &[1]),
-            None,
-            &mut out,
-        )
-        .unwrap_err();
+    for value in [0x00, 0xB9, 0xBA, 0xBB] {
+        let stream_id = StreamId::from(value);
+        let mut out = Vec::new();
+        let error = PacketWriter::new()
+            .write_pes_packet(pid(0x100), &PesPacket::new(stream_id, &[1]), None, &mut out)
+            .unwrap_err();
 
-    assert_eq!(
-        error,
-        Error::StreamId {
-            stream_id: StreamId::from(0xBC)
-        }
-    );
-    assert!(out.is_empty());
+        assert_eq!(
+            (error, out),
+            (Error::StreamId { stream_id }, Vec::new()),
+            "{value:#04x}"
+        );
+    }
+}
+
+#[test]
+fn the_stream_id_of_the_program_stream_map_and_those_above_it_are_taken() {
+    for packet in [
+        PesPacket::new(StreamId::PROGRAM_STREAM_MAP, &[1]),
+        pes_packet(0xBD, &[1]),
+        PesPacket::new(StreamId::PROGRAM_STREAM_DIRECTORY, &[1]),
+    ] {
+        let mut out = Vec::new();
+        let written = PacketWriter::new().write_pes_packet(pid(0x100), &packet, None, &mut out);
+
+        assert_eq!(
+            (
+                written,
+                packets(&out).first().and_then(|packet| packet.payload)
+            ),
+            (Ok(1), Some(&pes_bytes(&packet)[..])),
+            "{:#04x}",
+            packet.stream_id.get()
+        );
+    }
 }
 
 #[test]

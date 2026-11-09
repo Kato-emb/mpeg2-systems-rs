@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use super::Error;
 use crate::field::write_or_truncate;
-use crate::pes::{self, OptionalHeader, PesPacket};
+use crate::pes::{self, OptionalHeader, PesPacket, StreamId};
 use crate::ps::{MPEG_PROGRAM_END_CODE, PackHeader, ProgramStreamMap, SystemHeader};
 
 /// Writer of the elements of a Program Stream, which appends each pack
@@ -104,7 +104,7 @@ impl PackWriter {
         out: &mut Vec<u8>,
     ) -> Result<usize, Error> {
         let stream_id = packet.stream_id;
-        if !stream_id.is_pes_packet() {
+        if !stream_id.is_pes_packet() || stream_id == StreamId::PROGRAM_STREAM_MAP {
             return Err(Error::StreamId { stream_id });
         }
         // Why not split a packet of an unspecified length into more of the

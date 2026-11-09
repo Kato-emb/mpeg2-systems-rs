@@ -741,6 +741,7 @@ mod tests {
             [
                 on(0x05, 0xe0),
                 on(0x02, 0xb0),
+                on(0x02, 0xbb),
                 on(0x02, 0xbc),
                 on(0x02, 0xbe),
                 on(0x02, 0xff),
@@ -756,6 +757,10 @@ mod tests {
                 Err(Error::Forbidden {
                     field: "elementary_stream_id",
                     value: 0xb0
+                }),
+                Err(Error::Forbidden {
+                    field: "elementary_stream_id",
+                    value: 0xbb
                 }),
                 Err(Error::Forbidden {
                     field: "elementary_stream_id",

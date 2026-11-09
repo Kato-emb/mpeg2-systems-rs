@@ -113,7 +113,7 @@ pub enum Error {
         /// The PID given
         pid: Pid,
     },
-    /// The `stream_id` given is not that of a PES packet
+    /// The `stream_id` given is one this entry point does not take
     StreamId {
         /// The `stream_id` given
         stream_id: StreamId,
@@ -218,7 +218,7 @@ impl fmt::Display for Error {
             ),
             Self::StreamId { stream_id } => write!(
                 formatter,
-                "stream_id {:#04x} is not that of a PES packet",
+                "stream_id {:#04x} is not taken here",
                 stream_id.get()
             ),
             Self::PesPacket { .. } => write!(formatter, "a PES packet could not be written"),
@@ -708,8 +708,9 @@ impl Muxer {
     ///
     /// * [`UnregisteredPid`](Error::UnregisteredPid): no stream is
     ///   registered on `pid`.
-    /// * [`StreamId`](Error::StreamId): the `stream_id` is below 0xBD, not
-    ///   that of a PES packet.
+    /// * [`StreamId`](Error::StreamId): the `stream_id` is below 0xBD, which
+    ///   this entry point does not take: 0xBC is the `program_stream_map`,
+    ///   and those below it are not PES packets.
     /// * [`PesPacket`](Error::PesPacket): [`PesPacket::write`] refuses the
     ///   packet.
     /// * [`MissingPts`](Error::MissingPts): the PES packet has no PTS and is
@@ -750,7 +751,7 @@ impl Muxer {
             .get(stream_index)
             .and_then(|stream| stream.last_timestamp);
         let stream_id = packet.stream_id;
-        if !stream_id.is_pes_packet() {
+        if !stream_id.is_pes_packet() || stream_id == StreamId::PROGRAM_STREAM_MAP {
             return Err(Error::StreamId { stream_id });
         }
         let Self {

@@ -330,6 +330,7 @@ fn a_refused_pes_packet_leaves_the_muxer_as_it_was() {
     let too_long_error = too_long.write(&mut Vec::new()).unwrap_err();
     let results = [
         muxer.handle_pes_packet(pid(0x0200), &pes_packet(0xe0, &[], Some(90_000))),
+        muxer.handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xbb, &[], Some(90_000))),
         muxer.handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xbc, &[], Some(90_000))),
         muxer.handle_pes_packet(pid(AUDIO_PID), &too_long),
     ];
@@ -347,6 +348,9 @@ fn a_refused_pes_packet_leaves_the_muxer_as_it_was() {
         (
             [
                 Err(Error::UnregisteredPid { pid: pid(0x0200) }),
+                Err(Error::StreamId {
+                    stream_id: StreamId::from(0xbb)
+                }),
                 Err(Error::StreamId {
                     stream_id: StreamId::from(0xbc)
                 }),
