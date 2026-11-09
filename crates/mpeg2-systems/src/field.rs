@@ -182,8 +182,40 @@ impl fmt::Display for FourBitFieldOutOfRange {
 impl core::error::Error for FourBitFieldOutOfRange {}
 
 /// Runs `write` on `out`, leaving `out` as it was if `write` fails
+///
+/// What `write` appends after the bytes `out` already holds is cut off
+/// again when it fails; bytes it changes or removes among those already
+/// held are not restored. The syntax types of this crate write their fields
+/// and loops through it, and a crate of its own syntax types can too.
+///
+/// # Errors
+///
+/// `write` fails: its error is returned unchanged.
+///
+/// # Examples
+///
+/// ```
+/// use mpeg2_systems::field::write_or_truncate;
+///
+/// let mut out = vec![0x47];
+/// // A write that appends two bytes, then fails
+/// let failed = write_or_truncate(&mut out, |out| {
+///     out.extend_from_slice(&[0x01, 0x02]);
+///     Err("the third field does not fit")
+/// });
+/// assert_eq!(failed, Err("the third field does not fit"));
+/// assert_eq!(out, [0x47]);
+///
+/// // A write that succeeds keeps what it appended
+/// write_or_truncate(&mut out, |out| {
+///     out.push(0x01);
+///     Ok::<(), &str>(())
+/// })?;
+/// assert_eq!(out, [0x47, 0x01]);
+/// # Ok::<(), &str>(())
+/// ```
 #[cfg(feature = "alloc")]
-pub(crate) fn write_or_truncate<E>(
+pub fn write_or_truncate<E>(
     out: &mut Vec<u8>,
     write: impl FnOnce(&mut Vec<u8>) -> Result<(), E>,
 ) -> Result<(), E> {
