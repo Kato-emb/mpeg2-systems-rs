@@ -540,8 +540,8 @@ impl Times {
     /// `clock` alone when `interval` is 0
     const fn due(sent_at: SystemTimeClock, clock: SystemTimeClock, interval: u64) -> Self {
         match clock.ticks_since(sent_at).checked_div(interval) {
-            // Why not no time for an interval of 0: every whole number of
-            // intervals after `sent_at` falls at `clock`, so it is due once.
+            // Why not skip sending at an interval of 0: the API promises PSI
+            // before every PES packet, including when the clock has not advanced.
             None => Self::once(clock),
             Some(count) => Self {
                 first: sent_at.add_ticks(interval),
