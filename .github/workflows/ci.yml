@@ -19,9 +19,15 @@ env:
 
 # Every rust-cache step saves only on main: a cache saved on a PR branch is
 # invisible to other PRs and would only evict main's.
+#
+# Every job is bounded, and so is every install-action step: the action
+# retries a download that GitHub answers with a 504 for hours, and a run that
+# waits for it has to be re-run anyway. The step takes seconds when GitHub
+# answers.
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -54,6 +60,7 @@ jobs:
   # features compiles is linted as well, the alloc-free one among them.
   clippy:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -63,6 +70,7 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        timeout-minutes: 5
         with:
           tool: cargo-hack
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -79,6 +87,7 @@ jobs:
   # without stating any behavior.
   coverage:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -88,6 +97,7 @@ jobs:
           toolchain: stable
           components: llvm-tools-preview
       - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        timeout-minutes: 5
         with:
           tool: nextest,cargo-llvm-cov
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -122,6 +132,7 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -130,6 +141,7 @@ jobs:
         with:
           toolchain: stable
       - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        timeout-minutes: 5
         with:
           tool: nextest
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -142,6 +154,7 @@ jobs:
   # drift from it.
   msrv:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -161,6 +174,7 @@ jobs:
   # needs std — fails only on a target that ships no std.
   no-std:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -179,6 +193,7 @@ jobs:
   # (that needs a nightly toolchain), and the code behaves the same on every host.
   docs:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -213,6 +228,7 @@ jobs:
       matrix:
         target: [ts_demux, ps_demux]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       TARGET: ${{ matrix.target }}
     steps:
@@ -223,6 +239,7 @@ jobs:
         with:
           toolchain: nightly-2026-10-13
       - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        timeout-minutes: 5
         with:
           tool: cargo-fuzz
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -256,6 +273,7 @@ jobs:
     # Not ubuntu-latest: the TSDuck package is built for Ubuntu 24.04, and the
     # libraries it links to are taken from the runner's release.
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -292,11 +310,13 @@ jobs:
   # Advisories, license policy, banned crates and sources, per deny.toml.
   deny:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        timeout-minutes: 5
         with:
           tool: cargo-deny
       - run: cargo deny check
@@ -312,6 +332,7 @@ jobs:
     if: always()
     needs: [lint, clippy, coverage, test, msrv, no-std, docs, fuzz, conformance, deny]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: exit 1
