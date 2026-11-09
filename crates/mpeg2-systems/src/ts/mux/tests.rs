@@ -591,3 +591,37 @@ fn a_pes_packet_past_the_buffer_limit_is_refused_before_it_is_copied() {
         muxer.handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &payload, Some(90_000)));
     assert_eq!((refused.is_err(), muxer.scratch.capacity()), (true, 0));
 }
+
+#[test]
+fn a_leap_of_the_time_stamps_is_filled_with_pcrs_and_the_pat_and_the_pmt_at_their_intervals() {
+    let stream = multiplexed([90_000, 180_000]);
+    assert_eq!(timing_of(&stream), (26, PCR_INTERVAL, 11));
+}
+
+#[test]
+fn a_leap_too_long_to_fill_within_the_buffer_limit_is_refused_however_much_is_taken() {
+    let mut config = MuxerConfig::new();
+    config.buffer_limit = 100 * 188;
+    let mut muxer = muxer_of(config);
+    muxer
+        .handle_pes_packet(pid(VIDEO_PID), &stamped(0xe0, 90_000))
+        .unwrap();
+    let mut out = Vec::new();
+    muxer.poll_output(&mut out);
+    let leap = stamped(0xe0, 90_000 + 10 * 90_000);
+    let refused = muxer.handle_pes_packet(pid(VIDEO_PID), &leap);
+    muxer.poll_output(&mut out);
+    let refused_again = muxer.handle_pes_packet(pid(VIDEO_PID), &leap);
+    let next = stamped(0xe0, 91_800);
+    muxer.handle_pes_packet(pid(VIDEO_PID), &next).unwrap();
+    muxer.poll_output(&mut out);
+
+    let mut expected = Vec::new();
+    let mut fresh = muxer_of(config);
+    for packet in [stamped(0xe0, 90_000), next] {
+        fresh.handle_pes_packet(pid(VIDEO_PID), &packet).unwrap();
+        fresh.poll_output(&mut expected);
+    }
+    let gap = Err(Error::TimestampGap { gap: 10 * 90_000 });
+    assert_eq!((refused, refused_again, out), (gap, gap, expected));
+}

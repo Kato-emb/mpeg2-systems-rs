@@ -175,6 +175,13 @@ pub enum Error {
         /// The PID given
         pid: Pid,
     },
+    /// The time stamp of the input leaps so far past the one before it that
+    /// the PCRs, and the PATs and PMTs, to send in the leap do not fit
+    /// [`MuxerConfig::buffer_limit`] even with nothing held
+    TimestampGap {
+        /// The leap, in ticks of the 90 kHz clock of PTS and DTS
+        gap: u64,
+    },
     /// The input would grow the output held for
     /// [`Muxer::poll_output`] past [`MuxerConfig::buffer_limit`]
     BufferFull {
@@ -227,6 +234,10 @@ impl fmt::Display for Error {
                 "PID {:#06x} carries no registered stream",
                 pid.get()
             ),
+            Self::TimestampGap { gap } => write!(
+                formatter,
+                "a leap of {gap} ticks in the time stamps needs more PCRs and tables than buffer_limit holds"
+            ),
             Self::BufferFull { length } => write!(
                 formatter,
                 "the output held would grow to {length} bytes, past buffer_limit"
@@ -250,6 +261,7 @@ impl core::error::Error for Error {
             | Self::UnregisteredProgram { .. }
             | Self::PidInUse { .. }
             | Self::UnregisteredPid { .. }
+            | Self::TimestampGap { .. }
             | Self::BufferFull { .. } => None,
         }
     }
@@ -321,18 +333,24 @@ impl MuxerConfig {
 /// [`finish`](Self::finish), `poll_output` gives all that is held. Every
 /// Transport Packet is written through a [`PacketWriter`].
 ///
+/// - The time of the stream is the DTS of each PES packet (its PTS when it
+///   has none), held from going back, and counted on past the wrap of the
+///   33 bits; a PES packet without either does not move it. The PTS and the
+///   DTS are written as given.
 /// - The PAT and the PMT, `version_number` 0, are made from what is
-///   registered. They are sent before the first PES packet, and again
-///   before the first PES packet [`MuxerConfig::psi_interval`] or more after
-///   the last sending.
-/// - The PCR is sent before the first PES packet, and again before the first
-///   PES packet [`MuxerConfig::pcr_interval`] or more after the last PCR: in
-///   the adaptation field of that PES packet's first Transport Packet when
-///   it is on the PCR PID, in a Transport Packet of its own on the PCR PID
-///   otherwise.
-/// - Its value is the DTS of the PES packet (its PTS when it has none) less
-///   [`MuxerConfig::mux_delay`], held from going back; a PES packet without
-///   either does not move it. The PTS and the DTS are written as given.
+///   registered. They are sent before the first PES packet, and again each
+///   [`MuxerConfig::psi_interval`] of the time after.
+/// - The PCR is sent before the first PES packet, and again each
+///   [`MuxerConfig::pcr_interval`] of the time after; its value is the time
+///   less [`MuxerConfig::mux_delay`]. One that falls at the time of a PES
+///   packet on the PCR PID goes in the adaptation field of that PES packet's
+///   first Transport Packet, and any other in a Transport Packet of its own
+///   on the PCR PID, before the PES packet, so a leap of the time stamps is
+///   filled with PCRs, and with PATs and PMTs, at their intervals.
+/// - The longest leap that can be filled is set by
+///   [`MuxerConfig::buffer_limit`] and [`MuxerConfig::pcr_interval`]: a PES
+///   packet whose leap needs more PCRs and tables than the limit holds is
+///   refused as [`TimestampGap`](Error::TimestampGap).
 /// - The PCR PID is the `pcr_pid` registered with the program. Without one,
 ///   it is the PID of the first video stream registered, or of the first
 ///   stream when none is video. The video streams are those of `stream_type`
@@ -441,6 +459,50 @@ struct Schedule {
     // Why not psi_sent_at: the PSI and the PCR are sent at intervals of
     // their own.
     pcr_sent_at: u64,
+}
+
+/// The times, on the line of [`Schedule`], at which the PAT and the PMT, or
+/// the PCR, are sent before a PES packet: `count` times `step` apart from
+/// `first`
+#[derive(Debug, Clone, Copy)]
+struct Times {
+    first: u64,
+    count: u64,
+    step: u64,
+}
+
+impl Times {
+    /// Returns the one time `at`
+    const fn once(at: u64) -> Self {
+        Self {
+            first: at,
+            count: 1,
+            step: 0,
+        }
+    }
+
+    /// Returns the times `interval` apart after `sent_at` up to `clock`, or
+    /// `clock` alone when `interval` is 0
+    const fn due(sent_at: u64, clock: u64, interval: u64) -> Self {
+        match clock.saturating_sub(sent_at).checked_div(interval) {
+            None => Self::once(clock),
+            Some(count) => Self {
+                first: sent_at.saturating_add(interval),
+                count,
+                step: interval,
+            },
+        }
+    }
+
+    /// Returns the last of the times, `None` when there are none
+    fn last(self) -> Option<u64> {
+        let steps = self.count.checked_sub(1)?;
+        Some(self.first.saturating_add(steps.saturating_mul(self.step)))
+    }
+
+    fn iter(self) -> impl Iterator<Item = u64> {
+        (0..self.count).map(move |index| self.first.saturating_add(index.saturating_mul(self.step)))
+    }
 }
 
 impl Muxer {
@@ -582,6 +644,9 @@ impl Muxer {
     ///   that of a PES packet.
     /// * [`PesPacket`](Error::PesPacket): [`PesPacket::write`] refuses the
     ///   packet.
+    /// * [`TimestampGap`](Error::TimestampGap): the PCRs and the tables to
+    ///   send since the PES packet before do not fit
+    ///   [`MuxerConfig::buffer_limit`], however much `poll_output` takes.
     /// * [`BufferFull`](Error::BufferFull): the Transport Packets would grow
     ///   the output held past [`MuxerConfig::buffer_limit`]; once
     ///   `poll_output` has taken it, the same input may be given again.
@@ -628,66 +693,57 @@ impl Muxer {
                 )
                 .saturating_mul(TICKS_PER_TIMESTAMP_TICK)
             });
-        let (send_psi, send_pcr, next) = match *schedule {
+        let interval = |duration| ticks(duration);
+        let (clock, psi_times, pcr_times) = match *schedule {
             None => {
                 let clock = at.unwrap_or(ClockReference::MODULUS);
-                let next = Schedule {
-                    clock,
-                    psi_sent_at: clock,
-                    pcr_sent_at: clock,
-                };
-                (true, true, next)
+                (clock, Times::once(clock), Times::once(clock))
             }
             Some(schedule) => {
                 let clock = at.map_or(schedule.clock, |at| schedule.clock.max(at));
-                let due = |sent_at: u64, interval| clock.saturating_sub(sent_at) >= ticks(interval);
-                let send_psi = due(schedule.psi_sent_at, config.psi_interval);
-                let send_pcr = due(schedule.pcr_sent_at, config.pcr_interval);
-                let next = Schedule {
+                (
                     clock,
-                    psi_sent_at: if send_psi {
-                        clock
-                    } else {
-                        schedule.psi_sent_at
-                    },
-                    pcr_sent_at: if send_pcr {
-                        clock
-                    } else {
-                        schedule.pcr_sent_at
-                    },
-                };
-                (send_psi, send_pcr, next)
+                    Times::due(schedule.psi_sent_at, clock, interval(config.psi_interval)),
+                    Times::due(schedule.pcr_sent_at, clock, interval(config.pcr_interval)),
+                )
             }
         };
-        let pcr = ClockReference::from_ticks(next.clock.wrapping_sub(ticks(config.mux_delay)));
-        let pcr_pid = program.pcr_pid().filter(|_| send_pcr);
-        let adaptation_field = (pcr_pid == Some(pid)).then(|| {
+        let pcr = |at: u64| ClockReference::from_ticks(at.wrapping_sub(ticks(config.mux_delay)));
+        let pcr_pid = program.pcr_pid();
+        let pcr_in_packet = pcr_pid == Some(pid) && pcr_times.last() == Some(clock);
+        let adaptation_field = pcr_in_packet.then(|| {
             let mut adaptation_field = AdaptationField::new();
-            adaptation_field.program_clock_reference = Some(pcr);
+            adaptation_field.program_clock_reference = Some(pcr(clock));
             adaptation_field
         });
-        let pcr_packet_pid = pcr_pid.filter(|&pcr_pid| pcr_pid != pid);
+        let pcrs_alone = pcr_times
+            .count
+            .saturating_sub(u64::from(pcr_in_packet))
+            .min(if pcr_pid.is_some() { u64::MAX } else { 0 });
 
         section_bodies.clear();
-        let sections = if send_psi {
+        let sections = if psi_times.count > 0 {
             let pat_body_length = program.write_bodies(section_bodies)?;
             let (pat_body, pmt_body) = section_bodies.split_at(pat_body_length);
             Some(program.sections_of(config.transport_stream_id, pat_body, pmt_body))
         } else {
             None
         };
-
-        let length = sections
-            .as_ref()
-            .map_or(0, |(pat, pmt)| {
-                section_packets_length(pat.encoded_len())
-                    .saturating_add(section_packets_length(pmt.encoded_len()))
-            })
-            .saturating_add(if pcr_packet_pid.is_some() {
-                PACKET_LENGTH
-            } else {
-                0
-            })
+        let psi_length = sections.as_ref().map_or(0, |(pat, pmt)| {
+            section_packets_length(pat.encoded_len())
+                .saturating_add(section_packets_length(pmt.encoded_len()))
+        });
+        let as_length = |count: u64| usize::try_from(count).unwrap_or(usize::MAX);
+        let filling = psi_length
+            .saturating_mul(as_length(psi_times.count))
+            .saturating_add(PACKET_LENGTH.saturating_mul(as_length(pcrs_alone)));
+        if filling > config.buffer_limit {
+            let previous = schedule.map_or(clock, |schedule| schedule.clock);
+            return Err(Error::TimestampGap {
+                gap: clock.saturating_sub(previous) / TICKS_PER_TIMESTAMP_TICK,
+            });
+        }
+        let length = filling
             .saturating_add(
                 packet_count(
                     pes_length,
@@ -706,12 +762,27 @@ impl Muxer {
             .write(scratch)
             .map_err(|error| Error::PesPacket { error })?;
 
-        if let Some((pat, pmt)) = &sections {
-            writer.write_section(Pid::PAT, pat, pending)?;
-            writer.write_section(program.program_map_pid, pmt, pending)?;
-        }
-        if let Some(pcr_packet_pid) = pcr_packet_pid {
-            writer.write_pcr_packet(pcr_packet_pid, pcr, pending)?;
+        // Why not all the PSI and then all the PCRs: each goes at its time,
+        // the PSI first where the two fall together, so that a PCR stays
+        // the time its bytes arrive at.
+        let mut psi_at = psi_times.iter().peekable();
+        let mut pcr_at = pcr_times.iter().take(as_length(pcrs_alone)).peekable();
+        loop {
+            let psi_first = match (psi_at.peek(), pcr_at.peek()) {
+                (Some(psi), Some(pcr)) => psi <= pcr,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => break,
+            };
+            if psi_first {
+                psi_at.next();
+                if let Some((pat, pmt)) = &sections {
+                    writer.write_section(Pid::PAT, pat, pending)?;
+                    writer.write_section(program.program_map_pid, pmt, pending)?;
+                }
+            } else if let (Some(at), Some(pcr_pid)) = (pcr_at.next(), pcr_pid) {
+                writer.write_pcr_packet(pcr_pid, pcr(at), pending)?;
+            }
         }
         writer.write_payload_unit(
             pid,
@@ -723,6 +794,15 @@ impl Muxer {
             Stuffing::AdaptationField,
             pending,
         )?;
+        let next = Schedule {
+            clock,
+            psi_sent_at: psi_times
+                .last()
+                .unwrap_or_else(|| schedule.map_or(clock, |schedule| schedule.psi_sent_at)),
+            pcr_sent_at: pcr_times
+                .last()
+                .unwrap_or_else(|| schedule.map_or(clock, |schedule| schedule.pcr_sent_at)),
+        };
         *schedule = Some(next);
         Ok(())
     }
