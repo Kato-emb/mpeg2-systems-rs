@@ -26,18 +26,6 @@ const LONGEST_SCR_INTERVAL: Duration = Duration::from_millis(LONGEST_SCR_INTERVA
 // next one is never due before the step is over.
 const FILLING_PACK_INTERVAL: Duration = Duration::from_millis(500);
 
-/// The time of the STC the input has reached, and the last pack written
-#[derive(Debug, Clone, Copy)]
-pub(super) struct Schedule {
-    /// The latest time the DTS (the PTS without one) of a PES packet given
-    /// samples
-    // Why not the time of the last pack: it runs ahead of the time stamps
-    // while the packs take longer to arrive than the time stamps advance,
-    // and a time stamp is expanded near the time it follows.
-    pub(super) clock: SystemTimeClock,
-    pub(super) last_pack: Pack,
-}
-
 /// A pack written: the time of the STC its SCR samples, before
 /// [`MuxerConfig::mux_delay`] is taken off, and its bytes
 #[derive(Debug, Clone, Copy)]
@@ -71,17 +59,12 @@ pub(super) struct Filling {
 }
 
 impl Filling {
-    /// Returns the packs that fill the leap from the last pack of `schedule`
-    /// to `time`, so that no two SCRs are more than [`LONGEST_SCR_INTERVAL`]
-    /// apart, `None` where there is no leap to fill
-    pub(super) fn across(
-        schedule: Schedule,
-        time: SystemTimeClock,
-        program_mux_rate: u32,
-    ) -> Option<Self> {
+    /// Returns the packs that fill the leap from `last`, the last pack
+    /// written, to `time`, so that no two SCRs are more than
+    /// [`LONGEST_SCR_INTERVAL`] apart, `None` where there is no leap to fill
+    pub(super) fn across(last: Pack, time: SystemTimeClock, program_mux_rate: u32) -> Option<Self> {
         let longest = SystemTimeClock::ticks_in(LONGEST_SCR_INTERVAL);
         let step = SystemTimeClock::ticks_in(FILLING_PACK_INTERVAL);
-        let last = schedule.last_pack;
         if time.ticks_since(last.at) <= longest {
             return None;
         }

@@ -68,7 +68,7 @@ use crate::ps::{PackHeader, pack_header, system_header};
 use crate::stream_type::StreamType;
 use crate::time::SystemTimeClock;
 use pack_writer::PesPacketPieces;
-use schedule::{Filling, LONGEST_SCR_INTERVAL_MILLIS, PROGRAM_MUX_RATE_UNIT, Pack, Schedule};
+use schedule::{Filling, LONGEST_SCR_INTERVAL_MILLIS, PROGRAM_MUX_RATE_UNIT, Pack};
 use stream_definition::Stream;
 
 mod error;
@@ -238,10 +238,8 @@ impl MuxerConfig {
 pub struct Muxer {
     config: MuxerConfig,
     streams: Vec<Stream>,
-    /// The time reached and the last pack written, `None` before the first
-    /// PES packet
-    // Why not an `Option` for each: one could be set without the other.
-    schedule: Option<Schedule>,
+    /// The last pack written, `None` before the first PES packet
+    last_pack: Option<Pack>,
     /// The packs [`poll_output`](Self::poll_output) gives next
     // Why not write into the caller's buffer on input: only
     // `handle_pes_packet` can fail, and an input refused must leave nothing.
@@ -303,7 +301,7 @@ impl Muxer {
         Ok(Self {
             config,
             streams: Vec::new(),
-            schedule: None,
+            last_pack: None,
             pending: Vec::new(),
             end: End::Open,
         })
@@ -358,7 +356,7 @@ impl Muxer {
         es_info: &[u8],
     ) -> Result<(), Error> {
         assert!(
-            self.schedule.is_none(),
+            self.last_pack.is_none(),
             "a stream is registered after the first PES packet"
         );
         if !stream_id.is_pes_packet() {
@@ -502,21 +500,19 @@ impl Muxer {
             return Err(missing_pts);
         }
         let timestamp = header.and_then(|header| header.dts.or(header.pts));
-        let (time, clock) = match (self.schedule, timestamp) {
+        // Why not a field of the time reached: it is the latest
+        // `last_timestamp` of the streams, which every time stamp taken sets.
+        let clock = self
+            .streams
+            .iter()
+            .filter_map(|stream| stream.last_timestamp)
+            .max();
+        let time = match (clock, timestamp) {
             // Why not a time of its own: the SCR of the first pack is the
             // time of its PES packet, and this one has none.
             (None, None) => return Err(missing_pts),
-            (None, Some(timestamp)) => {
-                let time = SystemTimeClock::first(timestamp);
-                (Some(time), time)
-            }
-            (Some(schedule), timestamp) => {
-                let time = timestamp.map(|timestamp| schedule.clock.expand(timestamp));
-                (
-                    time,
-                    time.map_or(schedule.clock, |time| schedule.clock.max(time)),
-                )
-            }
+            (None, Some(timestamp)) => Some(SystemTimeClock::first(timestamp)),
+            (Some(clock), timestamp) => timestamp.map(|timestamp| clock.expand(timestamp)),
         };
         if let (Some(time), Some(previous)) = (time, stream.last_timestamp)
             && time < previous
@@ -554,12 +550,12 @@ impl Muxer {
         let Self {
             config,
             streams,
-            schedule,
+            last_pack,
             pending,
             ..
         } = self;
         let mut headers = Vec::new();
-        if schedule.is_none() {
+        if last_pack.is_none() {
             stream_definition::write_headers(streams, config.program_mux_rate, &mut headers)?;
         }
         let pack_header_length = pack_header::FIXED_LENGTH;
@@ -576,9 +572,9 @@ impl Muxer {
             return Err(Error::PackLength { length });
         }
         let pieces = PesPacketPieces::new(packet, longest, longest_continued);
-        let leap = schedule.zip(time);
-        let filling = leap
-            .and_then(|(schedule, time)| Filling::across(schedule, time, config.program_mux_rate));
+        let filling = last_pack.zip(time).and_then(|(last_pack, time)| {
+            Filling::across(last_pack, time, config.program_mux_rate)
+        });
         let filling_length = filling.map_or(0, |filling| {
             usize::try_from(filling.count)
                 .unwrap_or(usize::MAX)
@@ -586,9 +582,9 @@ impl Muxer {
         });
         if filling_length > config.buffer_limit {
             return Err(Error::TimestampGap {
-                gap: leap.map_or(0, |(schedule, time)| {
-                    time.timestamp_ticks_since(schedule.clock)
-                }),
+                gap: clock
+                    .zip(time)
+                    .map_or(0, |(clock, time)| time.timestamp_ticks_since(clock)),
             });
         }
         let length = filling_length
@@ -603,7 +599,7 @@ impl Muxer {
         let writer = PackWriter::new();
         let program_mux_rate = config.program_mux_rate;
         let mux_delay = config.mux_delay;
-        let mut last_pack = schedule.map(|schedule| schedule.last_pack);
+        let mut written = *last_pack;
         write_or_truncate(pending, |out| {
             let write_pack_header = |at: SystemTimeClock, out: &mut Vec<u8>| {
                 let header = PackHeader::new(at.to_clock_reference(mux_delay), program_mux_rate);
@@ -611,13 +607,13 @@ impl Muxer {
             };
             for at in filling.into_iter().flat_map(Filling::iter) {
                 write_pack_header(at, out)?;
-                last_pack = Some(Pack {
+                written = Some(Pack {
                     at,
                     length: pack_header_length,
                 });
             }
             for (index, piece) in pieces.enumerate() {
-                let arrived = last_pack.map(|pack| pack.arrived(program_mux_rate));
+                let arrived = written.map(|pack| pack.arrived(program_mux_rate));
                 let due = if index == 0 { time } else { None };
                 // Why not `None` as the earliest: before the first pack there
                 // is no pack to follow, and the first PES packet has a time.
@@ -630,16 +626,14 @@ impl Muxer {
                     out.extend_from_slice(&headers);
                 }
                 writer.write_pes_packets(&piece, out)?;
-                last_pack = Some(Pack {
+                written = Some(Pack {
                     at,
                     length: out.len().saturating_sub(start),
                 });
             }
             Ok(())
         })?;
-        if let Some(last_pack) = last_pack {
-            *schedule = Some(Schedule { clock, last_pack });
-        }
+        *last_pack = written;
         if let (Some(time), Some(stream)) = (time, streams.get_mut(index)) {
             stream.last_timestamp = Some(time);
         }
@@ -654,7 +648,7 @@ impl Muxer {
         out.extend_from_slice(&self.pending);
         self.pending.clear();
         if self.end == End::Finished {
-            if self.schedule.is_some() {
+            if self.last_pack.is_some() {
                 PackWriter::new().write_program_end_code(out);
             }
             self.end = End::Ended;
