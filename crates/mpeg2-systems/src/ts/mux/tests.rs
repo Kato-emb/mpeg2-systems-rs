@@ -791,3 +791,43 @@ fn a_pcr_interval_of_0_sends_a_pcr_each_time_the_clock_moves_and_never_twice_at_
         .collect();
     assert_eq!(pcrs, [(90_000 - DELAY) * 300, (91_800 - DELAY) * 300]);
 }
+
+#[test]
+fn a_pcr_interval_of_0_never_ends_a_stream_with_a_pcr_of_the_value_before_it() {
+    let finished = |inputs: &[(u16, u8)]| {
+        let mut config = MuxerConfig::new();
+        config.pcr_interval = Duration::ZERO;
+        let mut muxer = muxer_of(config);
+        let mut out = Vec::new();
+        for &(stream_pid, stream_id) in inputs {
+            muxer
+                .handle_pes_packet(pid(stream_pid), &stamped(stream_id, 90_000))
+                .unwrap();
+            muxer.poll_output(&mut out);
+        }
+        muxer.finish();
+        muxer.poll_output(&mut out);
+        let pcrs: Vec<u64> = out
+            .chunks(188)
+            .filter_map(|chunk| {
+                TransportPacket::read(chunk)
+                    .unwrap()
+                    .adaptation_field
+                    .and_then(|field| field.program_clock_reference)
+                    .map(ClockReference::ticks)
+            })
+            .collect();
+        let rising = pcrs.windows(2).all(|pair| match pair {
+            [earlier, later] => later > earlier,
+            _ => false,
+        });
+        (pcrs.len(), rising)
+    };
+    assert_eq!(
+        [
+            finished(&[(VIDEO_PID, 0xe0)]),
+            finished(&[(VIDEO_PID, 0xe0), (AUDIO_PID, 0xc0)])
+        ],
+        [(2, true), (2, true)]
+    );
+}

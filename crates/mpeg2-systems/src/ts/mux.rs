@@ -880,9 +880,10 @@ impl Muxer {
     /// Appends to `out` all the Transport Packets that can be given
     ///
     /// After [`finish`](Self::finish), a stream that carries one PCR only is
-    /// given a second one, [`MuxerConfig::pcr_interval`] after the first or
-    /// at the time of the last PES packet if that is later, so that a
-    /// decoder can take the rate of the stream from the two.
+    /// given a second one, [`MuxerConfig::pcr_interval`] after the first (a
+    /// tick of the 90 kHz clock of PTS and DTS when the interval is 0) or at
+    /// the time of the last PES packet if that is later, so that a decoder
+    /// can take the rate of the stream from the two.
     pub fn poll_output(&mut self, out: &mut Vec<u8>) {
         if let (true, Some(schedule), Some(pcr_pid)) = (
             self.finished,
@@ -892,7 +893,15 @@ impl Muxer {
         {
             let at = schedule
                 .pcr_sent_at
-                .add_ticks(SystemTimeClock::ticks_in(self.config.pcr_interval))
+                .add_ticks(match SystemTimeClock::ticks_in(self.config.pcr_interval) {
+                    // Why not a tick of the STC for an interval of 0: the
+                    // last Transport Packet would then have to arrive within
+                    // a tick far shorter than its bytes take at any rate a
+                    // Transport Stream carries; a tick of the PTS and the DTS
+                    // is the shortest step the time stamps themselves take.
+                    0 => SystemTimeClock::TICKS_PER_TIMESTAMP_TICK,
+                    step => step,
+                })
                 .max(schedule.clock);
             if self
                 .writer
