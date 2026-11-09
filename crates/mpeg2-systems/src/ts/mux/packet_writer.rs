@@ -25,8 +25,9 @@ use crate::ts::{ContinuityCounter, Pid};
 /// they were. It does not decide the order of the packets in the stream, the
 /// value of a PCR or how far apart PCRs are, how often the PAT and the PMT
 /// are sent, or which PID carries what. It does not write null packets or
-/// keep a constant bit rate, and puts no more than one section in a
-/// Transport Packet.
+/// keep a constant bit rate, does not guarantee that the stream fits the
+/// buffers of the T-STD, and puts no more than one section in a Transport
+/// Packet.
 #[derive(Debug, Clone, Default)]
 pub struct PacketWriter {
     /// The `continuity_counter` the next Transport Packet of each PID takes
