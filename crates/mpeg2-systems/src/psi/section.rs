@@ -154,6 +154,37 @@ impl core::error::Error for Error {
     }
 }
 
+/// Returns the number of bytes of the section that `prefix` starts, read
+/// from its first 3 bytes
+///
+/// `section_length`, ISO/IEC 13818-1 §2.4.4.11
+///
+/// The value is what [`Section::encoded_len`] gives for the section
+/// [`Section::read`] reads from those bytes, or `None` when fewer than 3 are
+/// given. It is not the value of the field: it adds 3 to `section_length`
+/// (`private_section_length` in a private section), whose value
+/// [`Section::section_length`] returns. Neither `table_id` nor the largest
+/// `section_length` its table allows ([`TableId::max_section_length`]) is
+/// checked; [`Section::read`] checks both.
+///
+/// # Examples
+///
+/// ```
+/// use mpeg2_systems::psi::section;
+///
+/// assert_eq!(section::encoded_len(&[0x00, 0xb0]), None);
+/// // The start of a program association section
+/// assert_eq!(section::encoded_len(&[0x00, 0xb0, 0x0d]), Some(16));
+/// // The 4 bits before section_length are not part of it
+/// assert_eq!(section::encoded_len(&[0x00, 0xf0, 0x0d]), Some(16));
+/// ```
+#[must_use]
+pub fn encoded_len(prefix: &[u8]) -> Option<usize> {
+    let [_, high, low] = prefix.first_chunk::<PREFIX_LENGTH>()?;
+
+    Some(PREFIX_LENGTH.saturating_add(usize::from(u16::from_be_bytes([high & 0x0f, *low]))))
+}
+
 /// Section, the unit a table is cut into for carriage
 ///
 /// `private_section`, ISO/IEC 13818-1 §2.4.4.11
@@ -355,35 +386,6 @@ impl<'input> Section<'input> {
         PREFIX_LENGTH.saturating_add(self.section_length())
     }
 
-    /// Returns the number of bytes of the section that `prefix` starts, read
-    /// from its first 3 bytes
-    ///
-    /// `section_length`, ISO/IEC 13818-1 §2.4.4.11
-    ///
-    /// The value is what [`encoded_len`](Self::encoded_len) gives for the
-    /// section [`read`](Self::read) reads from those bytes, or `None` when
-    /// fewer than 3 are given. Neither `table_id` nor the largest
-    /// `section_length` its table allows ([`TableId::max_section_length`]) is
-    /// checked; [`read`](Self::read) checks both.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use mpeg2_systems::psi::section::Section;
-    ///
-    /// assert_eq!(Section::encoded_len_of(&[0x00, 0xb0]), None);
-    /// // The start of a program association section
-    /// assert_eq!(Section::encoded_len_of(&[0x00, 0xb0, 0x0d]), Some(16));
-    /// // The 4 bits before section_length are not part of it
-    /// assert_eq!(Section::encoded_len_of(&[0x00, 0xf0, 0x0d]), Some(16));
-    /// ```
-    #[must_use]
-    pub fn encoded_len_of(prefix: &[u8]) -> Option<usize> {
-        let [_, high, low] = prefix.first_chunk::<PREFIX_LENGTH>()?;
-
-        Some(PREFIX_LENGTH.saturating_add(usize::from(u16::from_be_bytes([high & 0x0f, *low]))))
-    }
-
     /// Appends the section to `out`, with its `CRC_32` when it has the
     /// fields `section_syntax_indicator` `'1'` announces
     ///
@@ -478,7 +480,7 @@ mod tests {
 
     use super::{Error, Section, SectionSyntax};
     use crate::field;
-    use crate::psi::{TableId, VersionNumber};
+    use crate::psi::{TableId, VersionNumber, section};
     use crate::ts::Pid;
     use crate::ts::packet::TransportPacket;
 
@@ -672,27 +674,27 @@ mod tests {
 
     #[test]
     fn fewer_than_3_bytes_have_no_encoded_length() {
-        assert_eq!(Section::encoded_len_of(&[]), None);
-        assert_eq!(Section::encoded_len_of(&[0x00]), None);
-        assert_eq!(Section::encoded_len_of(&[0x00, 0xb0]), None);
+        assert_eq!(section::encoded_len(&[]), None);
+        assert_eq!(section::encoded_len(&[0x00]), None);
+        assert_eq!(section::encoded_len(&[0x00, 0xb0]), None);
     }
 
     #[test]
     fn the_encoded_length_counts_the_3_bytes_up_to_section_length() {
-        assert_eq!(Section::encoded_len_of(&[0x00, 0xb0, 0x0d]), Some(16));
-        assert_eq!(Section::encoded_len_of(&[0x80, 0x70, 0x00]), Some(3));
+        assert_eq!(section::encoded_len(&[0x00, 0xb0, 0x0d]), Some(16));
+        assert_eq!(section::encoded_len(&[0x80, 0x70, 0x00]), Some(3));
     }
 
     #[test]
     fn the_bits_before_section_length_do_not_change_the_encoded_length() {
-        assert_eq!(Section::encoded_len_of(&[0x02, 0xf0, 0x0d]), Some(16));
-        assert_eq!(Section::encoded_len_of(&[0x02, 0x00, 0x0d]), Some(16));
+        assert_eq!(section::encoded_len(&[0x02, 0xf0, 0x0d]), Some(16));
+        assert_eq!(section::encoded_len(&[0x02, 0x00, 0x0d]), Some(16));
     }
 
     #[test]
     fn an_encoded_length_past_the_largest_any_table_allows_is_returned_unchecked() {
-        assert_eq!(Section::encoded_len_of(&[0x00, 0x0f, 0xff]), Some(4098));
-        assert_eq!(Section::encoded_len_of(&[0xff, 0xff, 0xff]), Some(4098));
+        assert_eq!(section::encoded_len(&[0x00, 0x0f, 0xff]), Some(4098));
+        assert_eq!(section::encoded_len(&[0xff, 0xff, 0xff]), Some(4098));
     }
 
     #[test]
@@ -705,7 +707,7 @@ mod tests {
         let (&pointer_field, rest) = packet.payload.unwrap().split_first().unwrap();
         let bytes = rest.get(usize::from(pointer_field)..).unwrap();
 
-        let length = Section::encoded_len_of(bytes).unwrap();
+        let length = section::encoded_len(bytes).unwrap();
 
         assert_eq!(
             Section::read(bytes.get(..length).unwrap())
