@@ -23,6 +23,11 @@ const PACKET_START_CODE_PREFIX: u32 = 0x00_0001;
 /// Bytes from `packet_start_code_prefix` to `PES_packet_length`
 pub(crate) const PREFIX_LENGTH: usize = 6;
 
+/// The most bytes of a PES packet of a specified length: its prefix and the
+/// 65535 bytes `PES_packet_length` can count
+#[cfg(feature = "alloc")]
+pub(crate) const LONGEST_PES_PACKET: usize = PREFIX_LENGTH + 0xffff;
+
 /// Failure to read or write a PES packet
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

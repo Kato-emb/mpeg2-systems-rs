@@ -176,6 +176,25 @@ impl StreamType {
                 | Self::MEDIA_ORCHESTRATION_ACCESS_UNITS_IN_SECTIONS
         )
     }
+
+    /// Returns whether Table 2-34 gives the stream type to a video stream of
+    /// a coding, whether or not the payload is a sub-bitstream, rather than
+    /// to an additional view, an enhancement or another part of one
+    #[cfg(feature = "alloc")]
+    pub(crate) const fn is_video(self) -> bool {
+        matches!(
+            self,
+            Self::ISO_IEC_11172_2_VIDEO
+                | Self::ISO_IEC_13818_2_VIDEO
+                | Self::ISO_IEC_14496_2_VISUAL
+                | Self::AVC_VIDEO
+                | Self::ISO_IEC_15444_1_VIDEO
+                | Self::HEVC_VIDEO
+                | Self::JPEG_XS_VIDEO
+                | Self::VVC_VIDEO
+                | Self::EVC_VIDEO
+        )
+    }
 }
 
 impl From<u8> for StreamType {

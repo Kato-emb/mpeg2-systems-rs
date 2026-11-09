@@ -7,6 +7,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use mpeg2_systems::pes::extension::PStdBuffer;
 use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
 use mpeg2_systems::ps;
 use mpeg2_systems::stream_type::StreamType;
@@ -153,6 +154,58 @@ pub fn multiplex_pes_packets(
         packet.optional_header = Some(header);
         muxer
             .handle_pes_packet(pid, &packet)
+            .expect("the muxer takes the packet");
+        muxer.poll_output(out);
+    }
+    out.len()
+}
+
+/// Returns a Program Stream muxer at 1 260 000 bytes a second, the other
+/// settings by default, with its video stream of `stream_id` 0xE0 registered
+///
+/// # Panics
+///
+/// Panics if the muxer refuses the registration, which a benchmark must not
+/// measure.
+#[must_use]
+pub fn registered_program_stream_muxer() -> ps::mux::Muxer {
+    let mut muxer = ps::mux::Muxer::new(ps::mux::MuxerConfig::new(25_200))
+        .expect("the default settings are taken");
+    muxer
+        .add_stream(
+            StreamId::from(0xE0),
+            None,
+            StreamType::AVC_VIDEO,
+            PStdBuffer::new(true, 224),
+            &[],
+        )
+        .expect("the muxer registers the stream");
+    muxer
+}
+
+/// Clears `out` and gives the Program Stream `muxer` [`PES_PACKETS`] video
+/// PES packets of `access_unit`, a frame apart from the DTS `first_dts`,
+/// taking its output into `out` after each, and returns the bytes taken
+///
+/// # Panics
+///
+/// Panics if the muxer refuses a packet, which a benchmark must not measure.
+pub fn multiplex_program_stream_pes_packets(
+    muxer: &mut ps::mux::Muxer,
+    access_unit: &[u8],
+    first_dts: u64,
+    out: &mut Vec<u8>,
+) -> usize {
+    out.clear();
+    for index in 0..PES_PACKETS {
+        let dts = first_dts + u64::try_from(index).expect("an index fits u64") * 3_600;
+        let mut header = OptionalHeader::new();
+        header.pts = Some(Timestamp::try_from(dts + 3_600).expect("a PTS fits 33 bits"));
+        header.dts = Some(Timestamp::try_from(dts).expect("a DTS fits 33 bits"));
+        let mut packet = PesPacket::new(StreamId::from(0xE0), access_unit);
+        packet.optional_header = Some(header);
+        muxer
+            .handle_pes_packet(&packet)
             .expect("the muxer takes the packet");
         muxer.poll_output(out);
     }

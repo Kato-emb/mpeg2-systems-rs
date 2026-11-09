@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::process::Command;
 
 use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
+use mpeg2_systems::ps::demux as ps_demux;
 use mpeg2_systems::time::Timestamp;
 use mpeg2_systems::ts::Pid;
 use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event};
@@ -202,10 +203,16 @@ pub(crate) fn ffprobe(path: &str, format: Option<&str>, all_packets: bool) -> Pr
             continue;
         }
         let index = usize::try_from(integer(packet, "stream_index")).unwrap();
-        let timing = (
-            packet.get("pts").and_then(Value::as_u64),
-            packet.get("dts").and_then(Value::as_u64),
-        );
+        // Why round the circle: ffprobe counts the time stamps on past the
+        // wrap of their 33 bits, and those before a wrap near the start
+        // below 0, where the stream carries them as written.
+        let time_stamp = |key: &str| {
+            packet
+                .get(key)
+                .and_then(Value::as_i64)
+                .map(|value| value.rem_euclid(1 << 33).unsigned_abs())
+        };
+        let timing = (time_stamp("pts"), time_stamp("dts"));
         packets.entry(streams[index].0).or_default().push(timing);
     }
     (streams.into_iter().collect(), packets)
@@ -228,6 +235,28 @@ pub(crate) fn pes_packets_of_188() -> (Vec<PesPayload>, Vec<PesPayload>) {
         if pid == 0x100 { &mut video } else { &mut audio }.push(packet);
     }
     (video, audio)
+}
+
+/// The `stream_id`, the timing and the payload of each PES packet of the
+/// MPEG-2 video and the MPEG-1 Layer II audio in `program.ps`, elementary
+/// streams ffprobe can parse
+pub(crate) fn pes_packets_of_program_stream() -> Vec<(u8, PesPayload)> {
+    let source = std::fs::read(fixture_path("program.ps")).unwrap();
+    let mut demuxer = ps_demux::Demuxer::new();
+    demuxer.handle_input(&source);
+    demuxer.finish();
+    let mut packets = Vec::new();
+    while let Some(event) = demuxer.poll_event() {
+        if let ps_demux::Event::PesPacket(packet) = event
+            && (packet.stream_id.is_video() || packet.stream_id.is_audio())
+        {
+            packets.push((
+                packet.stream_id.get(),
+                (timing(&packet), packet.payload.to_vec()),
+            ));
+        }
+    }
+    packets
 }
 
 pub(crate) fn pes_packet(stream_id: u8, (pts, dts): Timing, payload: &[u8]) -> PesPacket<'_> {

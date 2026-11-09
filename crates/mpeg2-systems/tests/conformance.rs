@@ -8,6 +8,10 @@
 #[cfg(feature = "alloc")]
 #[path = "support/tools.rs"]
 #[expect(
+    dead_code,
+    reason = "each test file takes a part of what the tests share"
+)]
+#[expect(
     clippy::indexing_slicing,
     reason = "what a tool prints is read at the keys and indexes it always prints"
 )]

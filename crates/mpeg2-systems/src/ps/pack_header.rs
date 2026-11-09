@@ -14,7 +14,7 @@ use crate::time::write_marked_clock_reference;
 use crate::time::{ClockReference, read_marked_clock_reference};
 
 /// Bytes from `pack_start_code` to `pack_stuffing_length`
-const FIXED_LENGTH: usize = 14;
+pub(crate) const FIXED_LENGTH: usize = 14;
 
 /// Failure to read or write a pack header
 #[non_exhaustive]

@@ -25,11 +25,11 @@ const FIXED_LENGTH: usize = 6;
 
 /// Largest `audio_bound`
 #[cfg(feature = "alloc")]
-const MAX_AUDIO_BOUND: u8 = 32;
+pub(crate) const MAX_AUDIO_BOUND: u8 = 32;
 
 /// Largest `video_bound`
 #[cfg(feature = "alloc")]
-const MAX_VIDEO_BOUND: u8 = 16;
+pub(crate) const MAX_VIDEO_BOUND: u8 = 16;
 
 /// Failure to read or write a system header, or an entry of its stream
 /// bound loop
