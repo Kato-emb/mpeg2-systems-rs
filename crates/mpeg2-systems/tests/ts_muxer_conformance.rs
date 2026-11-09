@@ -31,6 +31,7 @@ mod tests {
     use std::process::Command;
 
     use mpeg2_systems::stream_type::StreamType;
+    use mpeg2_systems::time::{ClockReference, Timestamp};
     use mpeg2_systems::ts::Pid;
     use mpeg2_systems::ts::mux::{Muxer, MuxerConfig};
 
@@ -57,6 +58,12 @@ mod tests {
     /// [`REPEATS`] times, each given [`STEP`] after the one before it from a
     /// second in, a picture with its PTS two steps after its DTS
     fn inputs() -> Vec<Input> {
+        inputs_at(|index| 90_000 + index * STEP)
+    }
+
+    /// The PES packets of [`inputs`], the DTS of the one at each index
+    /// `dts_of` it, round the 33-bit circle
+    fn inputs_at(dts_of: impl Fn(u64) -> u64) -> Vec<Input> {
         let (video, audio) = pes_packets_of_188();
         let mut fixture: Vec<(u16, u8, Timing, Vec<u8>)> = video
             .into_iter()
@@ -70,10 +77,10 @@ mod tests {
         fixture.sort_by_key(|(_, _, (_, dts), _)| *dts);
         (0..REPEATS)
             .flat_map(|_| fixture.clone())
-            .zip((0..).map(|index| 90_000 + index * STEP))
+            .zip((0..).map(|index| dts_of(index) % Timestamp::MODULUS))
             .map(|((pid, stream_id, _, payload), dts)| {
                 let timing = if pid == VIDEO_PID {
-                    (Some(dts + 2 * STEP), Some(dts))
+                    (Some((dts + 2 * STEP) % Timestamp::MODULUS), Some(dts))
                 } else {
                     (Some(dts), Some(dts))
                 };
@@ -85,6 +92,12 @@ mod tests {
     /// Writes what the muxer of the default settings makes of [`inputs`] to
     /// a file of `name`, and returns its path
     fn multiplexed(name: &str) -> String {
+        multiplexed_of(name, inputs())
+    }
+
+    /// Writes what the muxer of the default settings makes of `inputs` to a
+    /// file of `name`, and returns its path
+    fn multiplexed_of(name: &str, inputs: Vec<Input>) -> String {
         let pid = |value: u16| Pid::try_from(value).unwrap();
         let mut muxer = Muxer::new(MuxerConfig::new());
         muxer.add_program(1, pid(PMT_PID), None, &[]).unwrap();
@@ -95,7 +108,7 @@ mod tests {
             .add_stream(1, pid(AUDIO_PID), StreamType::ISO_IEC_11172_3_AUDIO, &[])
             .unwrap();
         let mut stream = Vec::new();
-        for (pid_value, stream_id, timing, payload) in inputs() {
+        for (pid_value, stream_id, timing, payload) in inputs {
             muxer
                 .handle_pes_packet(pid(pid_value), &pes_packet(stream_id, timing, &payload))
                 .unwrap();
@@ -189,6 +202,38 @@ mod tests {
         )
     }
 
+    /// The count of each error `tsanalyze` finds in the file at `path`, by
+    /// what it counts
+    fn tsanalyze_errors(path: &str) -> BTreeMap<String, u64> {
+        let analyzed = run("tsanalyze", &["--json", path]);
+        let mut errors = BTreeMap::new();
+        for key in ["invalid-syncs", "transport-errors", "suspect-ignored"] {
+            errors.insert(
+                format!("ts {key}"),
+                integer(&analyzed["ts"]["packets"], key),
+            );
+        }
+        errors.insert(
+            "unreferenced PIDs".to_owned(),
+            integer(&analyzed["ts"]["pids"], "unreferenced"),
+        );
+        for analyzed_pid in analyzed["pids"].as_array().unwrap() {
+            let id = integer(analyzed_pid, "id");
+            for key in [
+                "discontinuities",
+                "duplicated",
+                "invalid-scrambling",
+                "pcr-leap",
+            ] {
+                errors.insert(
+                    format!("PID {id:#06x} {key}"),
+                    integer(&analyzed_pid["packets"], key),
+                );
+            }
+        }
+        errors
+    }
+
     /// 27 MHz ticks of `milliseconds`
     const fn ticks(milliseconds: u64) -> u64 {
         milliseconds * 27_000
@@ -225,32 +270,7 @@ mod tests {
             }],
         );
 
-        let analyzed = run("tsanalyze", &["--json", &path]);
-        let mut errors = BTreeMap::new();
-        for key in ["invalid-syncs", "transport-errors", "suspect-ignored"] {
-            errors.insert(
-                format!("ts {key}"),
-                integer(&analyzed["ts"]["packets"], key),
-            );
-        }
-        errors.insert(
-            "unreferenced PIDs".to_owned(),
-            integer(&analyzed["ts"]["pids"], "unreferenced"),
-        );
-        for analyzed_pid in analyzed["pids"].as_array().unwrap() {
-            let id = integer(analyzed_pid, "id");
-            for key in [
-                "discontinuities",
-                "duplicated",
-                "invalid-scrambling",
-                "pcr-leap",
-            ] {
-                errors.insert(
-                    format!("PID {id:#06x} {key}"),
-                    integer(&analyzed_pid["packets"], key),
-                );
-            }
-        }
+        let errors = tsanalyze_errors(&path);
         let no_errors: BTreeMap<_, _> = errors.keys().map(|key| (key.clone(), 0)).collect();
         assert_eq!((tables_tstables(&path), errors), (registered, no_errors));
     }
@@ -300,5 +320,57 @@ mod tests {
                 "PID {pid:#06x}: {longest} ticks"
             );
         }
+    }
+
+    /// The longest time from one PCR to the next in the file at `path`,
+    /// round the circle of [`ClockReference::MODULUS`]
+    fn longest_pcr_interval(path: &str) -> u64 {
+        pcrs(path)
+            .windows(2)
+            .map(|pair| (pair[1].1 + ClockReference::MODULUS - pair[0].1) % ClockReference::MODULUS)
+            .max()
+            .unwrap()
+    }
+
+    #[test]
+    #[ignore = "runs tsp and tsanalyze from TSDuck"]
+    fn the_pcrs_stay_within_the_pcr_interval_across_a_leap_of_the_time_stamps() {
+        let path = multiplexed_of(
+            "muxer_leap.ts",
+            inputs_at(|index| 90_000 + index * STEP + if index >= 75 { 90_000 } else { 0 }),
+        );
+        let longest = longest_pcr_interval(&path);
+        println!("leap: longest PCR interval {longest} ticks");
+        let errors = tsanalyze_errors(&path);
+        let no_errors: BTreeMap<_, _> = errors.keys().map(|key| (key.clone(), 0)).collect();
+        assert_eq!(
+            (longest <= ticks(40), errors),
+            (true, no_errors),
+            "{longest} ticks"
+        );
+    }
+
+    #[test]
+    #[ignore = "runs tsp and tsanalyze from TSDuck"]
+    fn the_pcrs_stay_within_the_pcr_interval_across_the_wrap_of_33_bits() {
+        let path = multiplexed_of(
+            "muxer_wrap.ts",
+            inputs_at(|index| Timestamp::MODULUS - 30 * STEP + index * STEP),
+        );
+        let longest = longest_pcr_interval(&path);
+        println!("wrap: longest PCR interval {longest} ticks");
+        let mut expected: BTreeMap<_, _> = tsanalyze_errors(&path)
+            .keys()
+            .map(|key| (key.clone(), 0))
+            .collect();
+        // Why not 0 leaps of the PCR: tsanalyze counts the wrap of the
+        // counter as a leap, as it does that of the PTS and the DTS of the
+        // same stream, which this crate writes as given.
+        expected.insert(format!("PID {VIDEO_PID:#06x} pcr-leap"), 1);
+        assert_eq!(
+            (longest <= ticks(40), tsanalyze_errors(&path)),
+            (true, expected),
+            "{longest} ticks"
+        );
     }
 }

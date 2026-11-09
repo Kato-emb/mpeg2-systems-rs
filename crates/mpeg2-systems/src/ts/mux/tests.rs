@@ -444,6 +444,7 @@ fn after_finish_poll_output_gives_what_is_held_and_a_second_finish_does_nothing(
     muxer.poll_output(&mut out);
     let mut fresh = muxer_of(MuxerConfig::new());
     fresh.handle_pes_packet(pid(VIDEO_PID), &packet).unwrap();
+    fresh.finish();
     let mut expected = Vec::new();
     fresh.poll_output(&mut expected);
     assert_eq!(out, expected);
@@ -696,4 +697,44 @@ fn a_dts_past_the_wrap_of_33_bits_does_not_go_back() {
     let results = [Timestamp::MODULUS - 1_800, Timestamp::MODULUS + 1_800]
         .map(|timestamp| muxer.handle_pes_packet(pid(VIDEO_PID), &stamped(0xe0, timestamp)));
     assert_eq!(results, [Ok(()), Ok(())]);
+}
+
+#[test]
+fn a_stream_of_one_pcr_ends_with_a_second_one_pcr_interval_on_and_a_longer_one_with_none_added() {
+    let finished = |timestamps: &[u64]| {
+        let mut muxer = muxer_of(MuxerConfig::new());
+        let mut out = Vec::new();
+        for &timestamp in timestamps {
+            muxer
+                .handle_pes_packet(pid(VIDEO_PID), &stamped(0xe0, timestamp))
+                .unwrap();
+        }
+        muxer.poll_output(&mut out);
+        let before = timing_of(&out).0;
+        muxer.finish();
+        muxer.poll_output(&mut out);
+        muxer.poll_output(&mut out);
+        let pcrs: Vec<u64> = out
+            .chunks(188)
+            .filter_map(|chunk| {
+                TransportPacket::read(chunk)
+                    .unwrap()
+                    .adaptation_field
+                    .and_then(|field| field.program_clock_reference)
+                    .map(ClockReference::ticks)
+            })
+            .collect();
+        (before, pcrs.len(), pcrs.last().copied())
+    };
+    let first = (90_000 - DELAY) * 300;
+    assert_eq!(
+        [
+            finished(&[90_000]),
+            finished(&[90_000, 91_800, 93_600, 95_400])
+        ],
+        [
+            (1, 2, Some(first + PCR_INTERVAL)),
+            (2, 2, Some(first + PCR_INTERVAL))
+        ]
+    );
 }

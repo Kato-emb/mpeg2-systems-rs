@@ -393,8 +393,9 @@ impl MuxerConfig {
 ///   additional view or an enhancement.
 ///
 /// The muxer does not write null packets to keep a constant bit rate.
-/// It carries one program only.
-/// It does not check that the stream fits the buffers of the T-STD.
+/// It carries one program only: the PCRs of several programs cannot all keep
+/// to the times of their own streams at a variable bit rate.
+/// It does not guarantee that the stream fits the buffers of the T-STD.
 /// It does not pace the output in real time; the caller sends it at the pace
 /// its PCRs give.
 /// It does not check the order of the PES packets across the streams; the
@@ -493,6 +494,10 @@ struct Schedule {
     // Why not psi_sent_at: the PSI and the PCR are sent at intervals of
     // their own.
     pcr_sent_at: u64,
+    /// Whether more than one PCR has been sent
+    // Why not compare pcr_sent_at with the time of the first PCR: PCRs an
+    // interval of 0 apart can fall at one time.
+    several_pcrs: bool,
 }
 
 /// The times, on the line of [`Schedule`], at which the PAT and the PMT, or
@@ -853,6 +858,9 @@ impl Muxer {
             pcr_sent_at: pcr_times
                 .last()
                 .unwrap_or_else(|| schedule.map_or(clock, |schedule| schedule.pcr_sent_at)),
+            several_pcrs: schedule.map_or(pcr_times.count > 1, |schedule| {
+                schedule.several_pcrs || pcr_times.count > 0
+            }),
         };
         *schedule = Some(next);
         if let Some(stream) = self
@@ -867,7 +875,31 @@ impl Muxer {
     }
 
     /// Appends to `out` all the Transport Packets that can be given
+    ///
+    /// After [`finish`](Self::finish), a stream that carries one PCR only is
+    /// given a second one, [`MuxerConfig::pcr_interval`] after the first or
+    /// at the time of the last PES packet if that is later, so that a
+    /// decoder can take the rate of the stream from the two.
     pub fn poll_output(&mut self, out: &mut Vec<u8>) {
+        if let (true, Some(schedule), Some(pcr_pid)) = (
+            self.finished,
+            self.schedule.as_mut(),
+            self.program.as_ref().and_then(ProgramDefinition::pcr_pid),
+        ) && !schedule.several_pcrs
+        {
+            let at = schedule
+                .pcr_sent_at
+                .saturating_add(ticks(self.config.pcr_interval))
+                .max(schedule.clock);
+            let pcr = ClockReference::from_ticks(at.wrapping_sub(ticks(self.config.mux_delay)));
+            if self
+                .writer
+                .write_pcr_packet(pcr_pid, pcr, &mut self.pending)
+                .is_ok()
+            {
+                schedule.several_pcrs = true;
+            }
+        }
         out.extend_from_slice(&self.pending);
         self.pending.clear();
     }

@@ -100,4 +100,9 @@ mod tests {
         };
         assert_eq!(read(&stream), (vec![pat(), pmt], given, Vec::new()));
     }
+
+    #[test]
+    fn the_same_input_gives_the_same_stream() {
+        assert_eq!(multiplex(MuxerConfig::new()), multiplex(MuxerConfig::new()));
+    }
 }
