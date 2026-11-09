@@ -17,5 +17,8 @@ alloc = ["mpeg2-systems/alloc"]
 [dependencies]
 mpeg2-systems = { workspace = true }
 
+[dev-dependencies]
+serde_json = { version = "=1.0.154", default-features = false, features = ["std"] }
+
 [lints]
 workspace = true

@@ -45,7 +45,7 @@ dpkg-deb -x "$work/$(basename "$tsduck_url")" "$destination/tsduck"
 dpkg-deb -f "$work/$(basename "$tsduck_url")" Depends \
   | tr ',' '\n' | sed -E 's/\(.*\)//; s/\|.*//; s/[[:space:]]//g; /^$/d' > "$destination/tsduck-depends"
 libraries=$(dirname "$(find "$destination/tsduck" -name 'libtsduck.so*' -print -quit)")
-for tool in tstables tsanalyze; do
+for tool in tstables tsanalyze tsp; do
   cat > "$destination/bin/$tool" <<EOF
 #!/bin/sh
 LD_LIBRARY_PATH="$libraries\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}" exec "$destination/tsduck/usr/bin/$tool" "\$@"
