@@ -95,8 +95,10 @@ pub enum Error {
         /// The video streams there would be
         video_bound: usize,
     },
-    /// The first PES packet supplied for a stream has no PTS, which this
-    /// muxer requires to initialize the stream's timeline
+    /// The first PES packet supplied for a stream that carries the optional
+    /// header has no PTS, which this muxer requires to initialize the
+    /// stream's timeline, or the first PES packet supplied to the muxer has
+    /// no time stamp to start the SCRs from
     MissingPts {
         /// The `stream_id` of the stream
         stream_id: StreamId,

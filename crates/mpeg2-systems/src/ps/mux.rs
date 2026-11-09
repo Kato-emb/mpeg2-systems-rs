@@ -439,8 +439,10 @@ impl Muxer {
     /// * [`UnregisteredStream`](Error::UnregisteredStream): no stream of the
     ///   packet is registered.
     /// * [`MissingPts`](Error::MissingPts): the PES packet has no PTS and is
-    ///   the first of its stream, which carries the optional header, or the
-    ///   first given to the muxer.
+    ///   the first of a stream whose `stream_id` carries the optional header
+    ///   ([`StreamId::carries_optional_header`]), or has no PTS or DTS and is
+    ///   the first given to the muxer. The first PES packet of any other
+    ///   stream needs neither.
     /// * [`DecreasingTimestamp`](Error::DecreasingTimestamp): its DTS, or its
     ///   PTS when it has none, is before that of the PES packet given before
     ///   it on its stream.
@@ -498,6 +500,9 @@ impl Muxer {
             stream_id_extension,
         };
         let first_of_stream = stream.last_timestamp.is_none();
+        // Why not ask a PTS of the first PES packet of every stream: the PTS
+        // of the first access unit §2.7.5 asks for sits in the optional
+        // header, which the PES packets of some streams do not carry.
         if first_of_stream
             && stream_id.carries_optional_header()
             && header.and_then(|header| header.pts).is_none()
