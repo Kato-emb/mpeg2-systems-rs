@@ -173,6 +173,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo check -p mpeg2-systems --no-default-features --target thumbv7em-none-eabihf
+      - run: cargo check -p mpeg2-systems-arib --no-default-features --target thumbv7em-none-eabihf
 
   # Doctests run here, once: they are not instrumented in the coverage job
   # (that needs a nightly toolchain), and the code behaves the same on every host.
@@ -197,6 +198,7 @@ jobs:
       - run: cargo test --doc --workspace --all-features
       # The alloc-free build has doctests of its own to pass, without the items alloc adds.
       - run: cargo test --doc -p mpeg2-systems --no-default-features
+      - run: cargo test --doc -p mpeg2-systems-arib --no-default-features
 
   # Each fuzz target for a fixed time, seeded with the fixtures. A failure is
   # a bug, so it blocks the merge. Bounded by time rather than by a number of

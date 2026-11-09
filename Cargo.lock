@@ -92,6 +92,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpeg2-systems-arib"
+version = "0.0.0"
+dependencies = [
+ "mpeg2-systems",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
