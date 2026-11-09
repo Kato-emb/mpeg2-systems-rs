@@ -335,20 +335,16 @@ pub struct MuxerConfig {
     /// are sent (ISO/IEC 13818-1 Annex C.5); what an operation asks of it,
     /// such as ETSI TR 101 290, is the caller's to choose.
     pub psi_interval: Duration,
-    /// The time from one PCR to the next (40 ms by default, the threshold
-    /// of the `PCR_repetition_error` of ETSI TR 101 290, shorter than the
-    /// 0.1 s ISO/IEC 13818-1 §2.7.2 allows)
+    /// The time from one PCR to the next (40 ms by default)
     ///
     /// [`Muxer::new`] takes from one tick of the 27 MHz system clock to
-    /// 0.1 s: no longer than §2.7.2 allows, and not so short that two PCRs
-    /// fall at one time, between which the rate of §2.4.2.3 equation 2-5 is
-    /// not defined.
+    /// 0.1 s (ISO/IEC 13818-1 §2.7.2, §2.4.2.3 equation 2-5).
     pub pcr_interval: Duration,
     /// How far the PCR runs behind the DTS of the PES packet it is sent with,
     /// or its PTS when it has no DTS (0.7 s by default)
     pub mux_delay: Duration,
     /// The most bytes the output held for [`Muxer::poll_output`] may grow to
-    /// (4 MiB by default, the default `pes_buffer_limit` of the demuxer)
+    /// (4 MiB by default)
     ///
     /// An input that would grow the output held past it is refused, so the
     /// limit must be larger than the Transport Packets of the largest PES
@@ -397,7 +393,7 @@ impl MuxerConfig {
 ///   less [`MuxerConfig::mux_delay`]. One that falls at the time of a PES
 ///   packet on the PCR PID goes in the adaptation field of that PES packet's
 ///   first Transport Packet, and any other in a Transport Packet of its own
-///   on the PCR PID, before the PES packet, so a leap of the time stamps is
+///   on the PCR PID, before the PES packet. A leap of the time stamps is
 ///   filled with PCRs, and with PATs and PMTs, at their intervals.
 /// - The longest leap that can be filled is set by
 ///   [`MuxerConfig::buffer_limit`] and [`MuxerConfig::pcr_interval`]: a PES
@@ -413,9 +409,7 @@ impl MuxerConfig {
 ///   a sub-bitstream.
 ///
 /// The muxer does not write null packets to keep a constant bit rate.
-/// It carries one program only. A variable-rate Transport Stream containing
-/// programs with independent time bases cannot have a consistent T-STD
-/// delivery schedule (ISO/IEC 13818-1 §2.4.2.3).
+/// It carries one program only.
 /// It does not guarantee that the stream fits the buffers of the T-STD.
 /// It does not pace the output in real time; the caller sends it at the pace
 /// its PCRs give.
@@ -572,7 +566,7 @@ impl Muxer {
     ///
     /// * [`PcrInterval`](Error::PcrInterval):
     ///   [`MuxerConfig::pcr_interval`] is shorter than a tick of the 27 MHz
-    ///   system clock, or longer than 0.1 s.
+    ///   system clock, or longer than 0.1 s (§2.7.2, §2.4.2.3 equation 2-5).
     pub fn new(config: MuxerConfig) -> Result<Self, Error> {
         let pcr_interval = config.pcr_interval;
         if SystemTimeClock::ticks_in(pcr_interval) == 0 || pcr_interval > LONGEST_PCR_INTERVAL {
@@ -910,8 +904,7 @@ impl Muxer {
     ///
     /// After [`finish`](Self::finish), a stream that carries one PCR only is
     /// given a second one, [`MuxerConfig::pcr_interval`] after the first or
-    /// at the time of the last PES packet if that is later, so that a
-    /// decoder can take the rate of the stream from the two.
+    /// at the time of the last PES packet if that is later.
     pub fn poll_output(&mut self, out: &mut Vec<u8>) {
         if let (true, Some(schedule), Some(pcr_pid)) = (
             self.finished,

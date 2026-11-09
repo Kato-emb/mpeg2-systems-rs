@@ -48,11 +48,10 @@ impl PacketWriter {
     /// PCR, ISO/IEC 13818-1 §2.4.3.4 and §2.4.3.5
     ///
     /// The packet is an adaptation field filling the whole packet, its
-    /// `PCR_flag` set, with no payload, so a PCR can be sent as often as
-    /// §2.7.2 asks however far apart the PES packets of `pid` are; how often
-    /// is up to the caller. The packet takes the `continuity_counter` of the
-    /// packet of `pid` written before it, as a packet without a payload does
-    /// not advance it. A write that fails leaves `out` as it was.
+    /// `PCR_flag` set, with no payload; how often to send one is up to the
+    /// caller. The packet takes the `continuity_counter` of the packet of
+    /// `pid` written before it (§2.4.3.3). A write that fails leaves `out`
+    /// as it was.
     ///
     /// # Errors
     ///
@@ -83,8 +82,7 @@ impl PacketWriter {
     /// `pcr` is given, the PCR in its adaptation field; the last is filled out
     /// with stuffing bytes in its adaptation field. For video PES packets too
     /// long for `PES_packet_length`, the caller must set
-    /// `length_unspecified`, as a Transport Stream permits a zero
-    /// `PES_packet_length` for video (§2.4.3.7).
+    /// `length_unspecified` (§2.4.3.7).
     ///
     /// # Errors
     ///

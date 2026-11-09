@@ -254,6 +254,35 @@ fn an_audio_pes_packet_longer_than_its_length_field_is_refused_leaving_out_as_it
 }
 
 #[test]
+fn a_pes_packet_too_long_for_its_length_field_is_written_only_as_video_with_length_unspecified() {
+    let payload = counting(70_000);
+    let video = pes_packet(VIDEO, &payload);
+    let mut unbounded_video = video.clone();
+    unbounded_video.length_unspecified = true;
+    let mut unbounded_audio = pes_packet(AUDIO, &payload);
+    unbounded_audio.length_unspecified = true;
+    let refusal = |packet: &PesPacket<'_>| Error::PesPacket {
+        error: packet.write(&mut Vec::new()).unwrap_err(),
+    };
+    let mut writer = PacketWriter::new();
+    let mut out = Vec::new();
+    let results = [
+        (pid(0x100), &video),
+        (pid(0x100), &unbounded_video),
+        (pid(0x101), &unbounded_audio),
+    ]
+    .map(|(pid, packet)| writer.write_pes_packet(pid, packet, None, &mut out));
+    assert_eq!(
+        results,
+        [
+            Err(refusal(&video)),
+            Ok(pes_bytes(&unbounded_video).len().div_ceil(184)),
+            Err(refusal(&unbounded_audio)),
+        ]
+    );
+}
+
+#[test]
 fn a_refused_write_leaves_the_continuity_counter_where_it_was() {
     let too_long = counting(70_000);
     let short = counting(10);
