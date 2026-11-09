@@ -705,13 +705,19 @@ impl Muxer {
     )]
     pub fn handle_pes_packet(&mut self, pid: Pid, packet: &PesPacket<'_>) -> Result<(), Error> {
         assert!(!self.finished, "a PES packet is given after finish");
-        let Some((program, stream)) = self
-            .program
-            .as_ref()
-            .and_then(|program| Some((program, program.stream(pid)?)))
-        else {
+        let Some((program, stream_index)) = self.program.as_ref().and_then(|program| {
+            let index = program
+                .streams
+                .iter()
+                .position(|stream| stream.pid == pid)?;
+            Some((program, index))
+        }) else {
             return Err(Error::UnregisteredPid { pid });
         };
+        let last_timestamp = program
+            .streams
+            .get(stream_index)
+            .and_then(|stream| stream.last_timestamp);
         let stream_id = packet.stream_id;
         if !stream_id.is_pes_packet() {
             return Err(Error::StreamId { stream_id });
@@ -728,7 +734,7 @@ impl Muxer {
         let pes_length = packet.encoded_len();
 
         let header = packet.optional_header.as_ref();
-        if stream.last_timestamp.is_none() && header.and_then(|header| header.pts).is_none() {
+        if last_timestamp.is_none() && header.and_then(|header| header.pts).is_none() {
             return Err(Error::MissingPts { pid });
         }
         let timestamp = header.and_then(|header| header.dts.or(header.pts));
@@ -739,7 +745,7 @@ impl Muxer {
             )
         });
         if let (Some(timestamp), Some(unwrapped), Some(previous)) =
-            (timestamp, unwrapped, stream.last_timestamp)
+            (timestamp, unwrapped, last_timestamp)
             && unwrapped < previous
         {
             return Err(Error::DecreasingTimestamp {
@@ -749,33 +755,41 @@ impl Muxer {
             });
         }
         let at = unwrapped.map(|unwrapped| unwrapped.saturating_mul(TICKS_PER_TIMESTAMP_TICK));
-        let interval = |duration| ticks(duration);
-        let (clock, psi_times, pcr_times) = match *schedule {
+        let (psi_times, pcr_times, next) = match *schedule {
             None => {
                 let clock = at.unwrap_or(ClockReference::MODULUS);
-                (clock, Times::once(clock), Times::once(clock))
+                let next = Schedule {
+                    clock,
+                    psi_sent_at: clock,
+                    pcr_sent_at: clock,
+                    several_pcrs: false,
+                };
+                (Times::once(clock), Times::once(clock), next)
             }
             Some(schedule) => {
                 let clock = at.map_or(schedule.clock, |at| schedule.clock.max(at));
-                (
+                let psi_times = Times::due(schedule.psi_sent_at, clock, ticks(config.psi_interval));
+                let pcr_times = Times::due(schedule.pcr_sent_at, clock, ticks(config.pcr_interval));
+                let next = Schedule {
                     clock,
-                    Times::due(schedule.psi_sent_at, clock, interval(config.psi_interval)),
-                    Times::due(schedule.pcr_sent_at, clock, interval(config.pcr_interval)),
-                )
+                    psi_sent_at: psi_times.last().unwrap_or(schedule.psi_sent_at),
+                    pcr_sent_at: pcr_times.last().unwrap_or(schedule.pcr_sent_at),
+                    several_pcrs: schedule.several_pcrs || pcr_times.count > 0,
+                };
+                (psi_times, pcr_times, next)
             }
         };
-        let pcr = |at: u64| ClockReference::from_ticks(at.wrapping_sub(ticks(config.mux_delay)));
-        let pcr_pid = program.pcr_pid();
-        let pcr_in_packet = pcr_pid == Some(pid) && pcr_times.last() == Some(clock);
+        let clock = next.clock;
+        // Why not refuse a program without a PCR PID: a stream is registered
+        // on `pid`, so the program has one.
+        let pcr_pid = program.pcr_pid().unwrap_or(pid);
+        let pcr_in_packet = pcr_pid == pid && pcr_times.last() == Some(clock);
         let adaptation_field = pcr_in_packet.then(|| {
             let mut adaptation_field = AdaptationField::new();
-            adaptation_field.program_clock_reference = Some(pcr(clock));
+            adaptation_field.program_clock_reference = Some(pcr_at(config, clock));
             adaptation_field
         });
-        let pcrs_alone = pcr_times
-            .count
-            .saturating_sub(u64::from(pcr_in_packet))
-            .min(if pcr_pid.is_some() { u64::MAX } else { 0 });
+        let pcrs_alone = pcr_times.count.saturating_sub(u64::from(pcr_in_packet));
 
         section_bodies.clear();
         let sections = if psi_times.count > 0 {
@@ -821,23 +835,22 @@ impl Muxer {
         // Why not all the PSI and then all the PCRs: each goes at its time,
         // the PSI first where the two fall together, so that a PCR stays
         // the time its bytes arrive at.
-        let mut psi_at = psi_times.iter().peekable();
-        let mut pcr_at = pcr_times.iter().take(as_length(pcrs_alone)).peekable();
+        let mut psi_at = psi_times.iter().zip(sections.iter().cycle()).peekable();
+        let mut pcrs_at = pcr_times.iter().take(as_length(pcrs_alone)).peekable();
         loop {
-            let psi_first = match (psi_at.peek(), pcr_at.peek()) {
-                (Some(psi), Some(pcr)) => psi <= pcr,
+            let psi_first = match (psi_at.peek(), pcrs_at.peek()) {
+                (Some((psi, _)), Some(pcr)) => psi <= pcr,
                 (Some(_), None) => true,
                 (None, Some(_)) => false,
                 (None, None) => break,
             };
             if psi_first {
-                psi_at.next();
-                if let Some((pat, pmt)) = &sections {
+                if let Some((_, (pat, pmt))) = psi_at.next() {
                     writer.write_section(Pid::PAT, pat, pending)?;
                     writer.write_section(program.program_map_pid, pmt, pending)?;
                 }
-            } else if let (Some(at), Some(pcr_pid)) = (pcr_at.next(), pcr_pid) {
-                writer.write_pcr_packet(pcr_pid, pcr(at), pending)?;
+            } else if let Some(at) = pcrs_at.next() {
+                writer.write_pcr_packet(pcr_pid, pcr_at(config, at), pending)?;
             }
         }
         writer.write_payload_unit(
@@ -850,26 +863,14 @@ impl Muxer {
             Stuffing::AdaptationField,
             pending,
         )?;
-        let next = Schedule {
-            clock,
-            psi_sent_at: psi_times
-                .last()
-                .unwrap_or_else(|| schedule.map_or(clock, |schedule| schedule.psi_sent_at)),
-            pcr_sent_at: pcr_times
-                .last()
-                .unwrap_or_else(|| schedule.map_or(clock, |schedule| schedule.pcr_sent_at)),
-            several_pcrs: schedule.map_or(pcr_times.count > 1, |schedule| {
-                schedule.several_pcrs || pcr_times.count > 0
-            }),
-        };
         *schedule = Some(next);
-        if let Some(stream) = self
-            .program
-            .as_mut()
-            .and_then(|program| program.stream_mut(pid))
-            && unwrapped.is_some()
-        {
-            stream.last_timestamp = unwrapped;
+        if let (Some(unwrapped), Some(stream)) = (
+            unwrapped,
+            self.program
+                .as_mut()
+                .and_then(|program| program.streams.get_mut(stream_index)),
+        ) {
+            stream.last_timestamp = Some(unwrapped);
         }
         Ok(())
     }
@@ -891,10 +892,9 @@ impl Muxer {
                 .pcr_sent_at
                 .saturating_add(ticks(self.config.pcr_interval))
                 .max(schedule.clock);
-            let pcr = ClockReference::from_ticks(at.wrapping_sub(ticks(self.config.mux_delay)));
             if self
                 .writer
-                .write_pcr_packet(pcr_pid, pcr, &mut self.pending)
+                .write_pcr_packet(pcr_pid, pcr_at(&self.config, at), &mut self.pending)
                 .is_ok()
             {
                 schedule.several_pcrs = true;
@@ -911,6 +911,13 @@ impl Muxer {
     pub const fn finish(&mut self) {
         self.finished = true;
     }
+}
+
+/// Returns the PCR of `at`, a time on the line of [`Schedule`], less
+/// [`MuxerConfig::mux_delay`] and round the circle of
+/// [`ClockReference::MODULUS`]
+fn pcr_at(config: &MuxerConfig, at: u64) -> ClockReference {
+    ClockReference::from_ticks(at.wrapping_sub(ticks(config.mux_delay)))
 }
 
 /// Returns `duration` in ticks of the 27 MHz system clock

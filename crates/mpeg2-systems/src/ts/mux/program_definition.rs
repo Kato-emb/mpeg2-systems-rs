@@ -47,11 +47,6 @@ impl ProgramDefinition {
         self.streams.iter().find(|stream| stream.pid == pid)
     }
 
-    /// Returns the stream registered on `pid`, to change
-    pub(super) fn stream_mut(&mut self, pid: Pid) -> Option<&mut Stream> {
-        self.streams.iter_mut().find(|stream| stream.pid == pid)
-    }
-
     /// Returns the PID the PCR goes on: the `pcr_pid` registered, or else
     /// the first video stream, or else the first stream
     pub(super) fn pcr_pid(&self) -> Option<Pid> {
