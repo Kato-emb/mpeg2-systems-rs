@@ -506,10 +506,7 @@ fn the_pcr_is_the_dts_less_the_mux_delay_and_never_goes_back() {
                 .map(ClockReference::ticks)
         }));
     }
-    assert_eq!(
-        pcrs,
-        [27_000 * 300, 36_000 * 300, 36_000 * 300, 45_000 * 300]
-    );
+    assert_eq!(pcrs, [27_000 * 300, 36_000 * 300, 45_000 * 300]);
 }
 
 /// A PES packet of `stream_id` whose PTS and DTS are both `timestamp`, taken
@@ -763,4 +760,34 @@ fn a_mux_delay_longer_than_the_time_stamp_gives_the_pcr_round_the_circle() {
         .collect();
     let delay = 96_000 * 27_000_000 % ClockReference::MODULUS;
     assert_eq!(pcrs, [ClockReference::MODULUS - delay]);
+}
+
+#[test]
+fn a_pcr_interval_of_0_sends_a_pcr_each_time_the_clock_moves_and_never_twice_at_one_time() {
+    let mut config = MuxerConfig::new();
+    config.pcr_interval = Duration::ZERO;
+    let mut muxer = muxer_of(config);
+    let mut out = Vec::new();
+    for (stream_pid, stream_id, timestamp) in [
+        (VIDEO_PID, 0xe0, 90_000),
+        (AUDIO_PID, 0xc0, 90_000),
+        (VIDEO_PID, 0xe0, 91_800),
+        (AUDIO_PID, 0xc0, 91_800),
+    ] {
+        muxer
+            .handle_pes_packet(pid(stream_pid), &stamped(stream_id, timestamp))
+            .unwrap();
+        muxer.poll_output(&mut out);
+    }
+    let pcrs: Vec<u64> = out
+        .chunks(188)
+        .filter_map(|chunk| {
+            TransportPacket::read(chunk)
+                .unwrap()
+                .adaptation_field
+                .and_then(|field| field.program_clock_reference)
+                .map(ClockReference::ticks)
+        })
+        .collect();
+    assert_eq!(pcrs, [(90_000 - DELAY) * 300, (91_800 - DELAY) * 300]);
 }

@@ -487,8 +487,8 @@ struct Schedule {
     // their own.
     pcr_sent_at: SystemTimeClock,
     /// Whether more than one PCR has been sent
-    // Why not compare pcr_sent_at with the time of the first PCR: PCRs an
-    // interval of 0 apart can fall at one time.
+    // Why not compare pcr_sent_at with the time of the first PCR: that time
+    // is kept nowhere else, so it would be a field for this alone.
     several_pcrs: bool,
 }
 
@@ -511,11 +511,16 @@ impl Times {
         }
     }
 
-    /// Returns the times `interval` apart after `sent_at` up to `clock`, or
-    /// `clock` alone when `interval` is 0
+    /// Returns the times `interval` apart after `sent_at` up to `clock`, or,
+    /// when `interval` is 0, `clock` alone if it is after `sent_at`
     const fn due(sent_at: SystemTimeClock, clock: SystemTimeClock, interval: u64) -> Self {
         match clock.ticks_since(sent_at).checked_div(interval) {
-            None => Self::once(clock),
+            None if clock.ticks_since(sent_at) > 0 => Self::once(clock),
+            None => Self {
+                first: clock,
+                count: 0,
+                step: 0,
+            },
             Some(count) => Self {
                 first: sent_at.add_ticks(interval),
                 count,
@@ -758,8 +763,13 @@ impl Muxer {
                 }
                 let clock = time.map_or(schedule.clock, |time| schedule.clock.max(time));
                 let interval = |duration| SystemTimeClock::ticks_in(duration);
-                let psi_times =
-                    Times::due(schedule.psi_sent_at, clock, interval(config.psi_interval));
+                // Why not `due` for an interval of 0: PATs and PMTs at one
+                // time are allowed, where PCRs at one time leave the rate
+                // between them unknown (§2.4.2.2, equation 2-4).
+                let psi_times = match interval(config.psi_interval) {
+                    0 => Times::once(clock),
+                    psi_interval => Times::due(schedule.psi_sent_at, clock, psi_interval),
+                };
                 let pcr_times =
                     Times::due(schedule.pcr_sent_at, clock, interval(config.pcr_interval));
                 let next = Schedule {
