@@ -216,8 +216,22 @@ impl<'input> ProgramAssociationSection<'input> {
         }
 
         let mut body = Vec::with_capacity(self.programs.0.len());
-        program::write_entries(self.programs, &mut body)?;
-        let mut section = Section::new(TableId::PROGRAM_ASSOCIATION, &body);
+        self.write_body(&mut body)?;
+        Ok(self.section(&body).write(out)?)
+    }
+
+    /// Appends the bytes of the program loop to `body`, for a section
+    /// [`write`](Self::write) accepts
+    #[cfg(feature = "alloc")]
+    pub(crate) fn write_body(&self, body: &mut Vec<u8>) -> Result<(), Error> {
+        program::write_entries(self.programs, body)
+    }
+
+    /// Returns the section that carries `body`, as
+    /// [`write_body`](Self::write_body) writes it
+    #[cfg(feature = "alloc")]
+    pub(crate) fn section<'body>(&self, body: &'body [u8]) -> Section<'body> {
+        let mut section = Section::new(TableId::PROGRAM_ASSOCIATION, body);
         section.syntax = Some(SectionSyntax::new(
             self.transport_stream_id,
             self.version_number,
@@ -225,7 +239,7 @@ impl<'input> ProgramAssociationSection<'input> {
             self.section_number,
             self.last_section_number,
         ));
-        Ok(section.write(out)?)
+        section
     }
 }
 

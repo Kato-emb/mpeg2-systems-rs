@@ -9,10 +9,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
 use mpeg2_systems::ps;
+use mpeg2_systems::stream_type::StreamType;
 use mpeg2_systems::time::{ClockReference, Timestamp};
 use mpeg2_systems::ts::Pid;
 use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig};
-use mpeg2_systems::ts::mux::PacketWriter;
+use mpeg2_systems::ts::mux::{Muxer, MuxerConfig, PacketWriter};
 
 /// Length of the inputs the demuxer is measured on
 pub const INPUT_LENGTH: usize = 10 << 20;
@@ -104,6 +105,56 @@ pub fn mux_pes_packets(writer: &mut PacketWriter, access_unit: &[u8], out: &mut 
         writer
             .write_pes_packet(pid, &packet, Some(pcr), out)
             .expect("the writer writes the packet");
+    }
+    out.len()
+}
+
+/// Returns a muxer of the default settings with program 1 and its video
+/// stream on PID 0x0100 registered
+///
+/// # Panics
+///
+/// Panics if the muxer refuses the registration, which a benchmark must not
+/// measure.
+#[must_use]
+pub fn registered_muxer() -> Muxer {
+    let mut muxer = Muxer::new(MuxerConfig::new()).expect("the default settings are taken");
+    let pid = |value| Pid::try_from(value).expect("a PID");
+    muxer
+        .add_program(1, pid(0x1000), None, &[])
+        .expect("the muxer registers the program");
+    muxer
+        .add_stream(1, pid(0x0100), StreamType::AVC_VIDEO, &[])
+        .expect("the muxer registers the stream");
+    muxer
+}
+
+/// Clears `out` and gives `muxer` [`PES_PACKETS`] video PES packets of
+/// `access_unit`, a frame apart from the DTS `first_dts`, taking its output
+/// into `out` after each, and returns the bytes taken
+///
+/// # Panics
+///
+/// Panics if the muxer refuses a packet, which a benchmark must not measure.
+pub fn multiplex_pes_packets(
+    muxer: &mut Muxer,
+    access_unit: &[u8],
+    first_dts: u64,
+    out: &mut Vec<u8>,
+) -> usize {
+    out.clear();
+    let pid = Pid::try_from(0x0100).expect("0x0100 is a PID");
+    for index in 0..PES_PACKETS {
+        let dts = first_dts + u64::try_from(index).expect("an index fits u64") * 3_600;
+        let mut header = OptionalHeader::new();
+        header.pts = Some(Timestamp::try_from(dts + 3_600).expect("a PTS fits 33 bits"));
+        header.dts = Some(Timestamp::try_from(dts).expect("a DTS fits 33 bits"));
+        let mut packet = PesPacket::new(StreamId::from(0xE0), access_unit);
+        packet.optional_header = Some(header);
+        muxer
+            .handle_pes_packet(pid, &packet)
+            .expect("the muxer takes the packet");
+        muxer.poll_output(out);
     }
     out.len()
 }

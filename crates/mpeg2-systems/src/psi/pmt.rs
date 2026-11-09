@@ -282,25 +282,54 @@ impl<'input> TsProgramMapSection<'input> {
             self.encoded_len()
                 .saturating_sub(super::LONG_SECTION_OVERHEAD),
         );
-        let mut writer = FieldWriter::new(&mut body);
+        self.write_body(&mut body)?;
+        Ok(self.section(&body).write(out)?)
+    }
+
+    /// Appends the bytes of the section from `PCR_PID` to the end of the
+    /// elementary stream loop to `body`, for a section
+    /// [`write`](Self::write) accepts
+    #[cfg(feature = "alloc")]
+    pub(crate) fn write_body(&self, body: &mut Vec<u8>) -> Result<(), Error> {
+        Self::write_body_with(self.pcr_pid, self.program_info, body, |body| {
+            elementary_stream::write_entries(self.elementary_streams, body)
+        })
+    }
+
+    /// Appends the bytes of the section from `PCR_PID` to the end of the
+    /// elementary stream loop to `body`, the loop written by
+    /// `write_streams`, for a section [`write`](Self::write) accepts
+    #[cfg(feature = "alloc")]
+    pub(crate) fn write_body_with(
+        pcr_pid: Option<Pid>,
+        program_info: DescriptorLoop<'_>,
+        body: &mut Vec<u8>,
+        write_streams: impl FnOnce(&mut Vec<u8>) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let mut writer = FieldWriter::new(body);
         // Why not an error per field: every value fits its field's width, and
-        // `program_info` is at most 1008 bytes after the check above.
+        // `program_info` is at most 1008 bytes once `write` has checked the
+        // length of the section.
         (|| {
             writer.write_bits::<3>(0b111_u8)?;
-            writer.write_bits::<13>(self.pcr_pid.unwrap_or(Pid::NULL).get())?;
+            writer.write_bits::<13>(pcr_pid.unwrap_or(Pid::NULL).get())?;
             writer.write_bits::<4>(0b1111_u8)?;
-            writer
-                .write_bits::<12>(u64::try_from(self.program_info.0.len()).unwrap_or(u64::MAX))?;
+            writer.write_bits::<12>(u64::try_from(program_info.0.len()).unwrap_or(u64::MAX))?;
             writer.finish()
         })()
         .map_err(|error| Error::Field {
             field: "program header",
             error,
         })?;
-        DescriptorLoop::write_entries(self.program_info, &mut body)?;
-        elementary_stream::write_entries(self.elementary_streams, &mut body)?;
+        DescriptorLoop::write_entries(program_info, body)?;
+        write_streams(body)
+    }
 
-        let mut section = Section::new(TableId::TS_PROGRAM_MAP, &body);
+    /// Returns the section that carries `body`, as
+    /// [`write_body`](Self::write_body) writes it
+    #[cfg(feature = "alloc")]
+    pub(crate) fn section<'body>(&self, body: &'body [u8]) -> Section<'body> {
+        let mut section = Section::new(TableId::TS_PROGRAM_MAP, body);
         section.syntax = Some(SectionSyntax::new(
             self.program_number,
             self.version_number,
@@ -308,7 +337,7 @@ impl<'input> TsProgramMapSection<'input> {
             self.section_number,
             self.last_section_number,
         ));
-        Ok(section.write(out)?)
+        section
     }
 }
 

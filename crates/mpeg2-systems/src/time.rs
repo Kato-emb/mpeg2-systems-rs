@@ -7,6 +7,8 @@
 //! [`Timestamp::distance_from`] and [`ClockReference::distance_from`] measure.
 
 use core::fmt;
+#[cfg(feature = "alloc")]
+use core::time::Duration;
 
 #[cfg(feature = "alloc")]
 use crate::field::FieldWriter;
@@ -170,6 +172,84 @@ impl Timestamp {
     }
 }
 
+/// A time of the system time clock (STC), the 27 MHz clock all the timing
+/// of ISO/IEC 13818-1 is defined in, counted on past the wrap of the fields
+/// that sample it
+///
+/// A PTS or a DTS ([`Timestamp`]) and a PCR or an SCR ([`ClockReference`])
+/// are samples of the STC, each the time of the STC taken modulo its period
+/// (equations 2-2 and 2-11, Annex D.1.3); a `SystemTimeClock` is
+/// the time before the modulo is taken. The first time is placed one whole
+/// period of [`Timestamp::MODULUS`] in, so that a time behind it is still a
+/// time.
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SystemTimeClock(u64);
+
+#[cfg(feature = "alloc")]
+impl SystemTimeClock {
+    /// Ticks of the STC in one tick of the 90 kHz clock of PTS and DTS
+    const TICKS_PER_TIMESTAMP_TICK: u64 = 300;
+
+    /// Returns the time `timestamp` samples, the first time placed
+    pub(crate) const fn first(timestamp: Timestamp) -> Self {
+        Self(
+            Timestamp::MODULUS
+                .saturating_add(timestamp.get())
+                .saturating_mul(Self::TICKS_PER_TIMESTAMP_TICK),
+        )
+    }
+
+    /// Returns the time `timestamp` samples that is nearest `self`
+    pub(crate) const fn expand(self, timestamp: Timestamp) -> Self {
+        let reference = self.0 / Self::TICKS_PER_TIMESTAMP_TICK;
+        Self(
+            reference
+                .saturating_add_signed(timestamp.distance_from(Timestamp::from_33_bits(reference)))
+                .saturating_mul(Self::TICKS_PER_TIMESTAMP_TICK),
+        )
+    }
+
+    /// Returns the PTS or the DTS that samples the time
+    pub(crate) const fn to_timestamp(self) -> Timestamp {
+        Timestamp::from_33_bits(self.0 / Self::TICKS_PER_TIMESTAMP_TICK)
+    }
+
+    /// Returns the PCR or the SCR that samples the time `delay` before it
+    pub(crate) fn to_clock_reference(self, delay: Duration) -> ClockReference {
+        // Why not `self - delay` wrapping: it wraps at 2^64, which is not a
+        // multiple of the period, so both are taken modulo it first.
+        ClockReference::from_ticks(
+            (self.0 % ClockReference::MODULUS)
+                .wrapping_add(ClockReference::MODULUS)
+                .wrapping_sub(Self::ticks_in(delay) % ClockReference::MODULUS),
+        )
+    }
+
+    /// Returns the time `ticks` ticks of the STC after it
+    pub(crate) const fn add_ticks(self, ticks: u64) -> Self {
+        Self(self.0.saturating_add(ticks))
+    }
+
+    /// Returns the ticks of the STC from `earlier` to it, 0 if `earlier` is
+    /// not before it
+    pub(crate) const fn ticks_since(self, earlier: Self) -> u64 {
+        self.0.saturating_sub(earlier.0)
+    }
+
+    /// Returns the ticks of the 90 kHz clock of PTS and DTS from `earlier`
+    /// to it, 0 if `earlier` is not before it
+    pub(crate) const fn timestamp_ticks_since(self, earlier: Self) -> u64 {
+        self.ticks_since(earlier) / Self::TICKS_PER_TIMESTAMP_TICK
+    }
+
+    /// Returns `duration` in ticks of the STC
+    pub(crate) fn ticks_in(duration: Duration) -> u64 {
+        u64::try_from(duration.as_nanos().saturating_mul(27_000_000) / 1_000_000_000)
+            .unwrap_or(u64::MAX)
+    }
+}
+
 impl TryFrom<u64> for Timestamp {
     type Error = TimestampOutOfRange;
 
@@ -282,6 +362,20 @@ impl ClockReference {
         self.base
             .wrapping_mul(300)
             .wrapping_add(u64::from(self.extension))
+    }
+
+    /// Returns the clock reference that counts `ticks` 27 MHz ticks, round
+    /// the circle of [`MODULUS`](Self::MODULUS) ticks
+    #[cfg(feature = "alloc")]
+    pub(crate) fn from_ticks(ticks: u64) -> Self {
+        let extension_modulus = u64::from(Self::EXTENSION_MODULUS);
+        Self::from_fields(
+            ticks.checked_div(extension_modulus).unwrap_or(0),
+            ticks
+                .checked_rem(extension_modulus)
+                .and_then(|extension| u16::try_from(extension).ok())
+                .unwrap_or(0),
+        )
     }
 
     /// Returns the signed distance from `other` to `self`, in 27 MHz ticks
