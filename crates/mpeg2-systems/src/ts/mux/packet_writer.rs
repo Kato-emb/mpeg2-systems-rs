@@ -87,11 +87,16 @@ impl PacketWriter {
     /// long for `PES_packet_length`, the caller must set
     /// `length_unspecified` (§2.4.3.7).
     ///
+    /// A PES packet of `stream_id` 0xBC, the `program_stream_map`, is
+    /// carried too (§2.5.4): its payload is the map after
+    /// `program_stream_map_length`, written as given.
+    ///
     /// # Errors
     ///
     /// * [`Pid`](Error::Pid): `pid` is below 0x0010 or that of null packets.
-    /// * [`StreamId`](Error::StreamId): the `stream_id` is below 0xBD, not
-    ///   that of a PES packet.
+    /// * [`StreamId`](Error::StreamId): the `stream_id` is below 0xBC, not
+    ///   that of a PES packet
+    ///   ([`StreamId::is_pes_packet`](crate::pes::StreamId::is_pes_packet)).
     /// * [`PesPacket`](Error::PesPacket): [`PesPacket::write`] refuses the
     ///   packet, as it does one too long for `PES_packet_length` without
     ///   `length_unspecified`, or `length_unspecified` on a stream other than

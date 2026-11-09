@@ -59,12 +59,15 @@ impl StreamId {
         self.0
     }
 
-    /// Returns whether the `stream_id` is that of a PES packet: 0xBD
-    /// (`private_stream_1`) and above, those below being the start codes of
-    /// the Program Stream's own elements, §2.5.3.1 and Table 2-22
+    /// Returns whether the `stream_id` is that of a PES packet: 0xBC
+    /// (`program_stream_map`) and above, Table 2-22
+    ///
+    /// 0xBC is a PES packet of a syntax of its own (§2.5.4, Table 2-22
+    /// NOTE 1); those below it are the start codes of the other elements of
+    /// a Program Stream (§2.5.3).
     #[must_use]
     pub const fn is_pes_packet(self) -> bool {
-        self.0 >= Self::PRIVATE_STREAM_1.0
+        self.0 >= Self::PROGRAM_STREAM_MAP.0
     }
 
     /// Returns whether the stream is an audio stream, `'110x xxxx'`
@@ -112,10 +115,10 @@ mod tests {
     use super::StreamId;
 
     #[test]
-    fn a_pes_packet_has_a_stream_id_of_0xbd_or_more() {
+    fn a_pes_packet_has_a_stream_id_of_0xbc_or_more() {
         assert_eq!(
-            [0x00, 0xbc, 0xbd, 0xff].map(|value| StreamId(value).is_pes_packet()),
-            [false, false, true, true]
+            [0x00, 0xb9, 0xbb, 0xbc, 0xbd, 0xff].map(|value| StreamId(value).is_pes_packet()),
+            [false, false, false, true, true, true]
         );
     }
 }

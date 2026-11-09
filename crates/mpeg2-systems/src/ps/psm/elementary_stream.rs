@@ -103,7 +103,8 @@ impl<'input> ElementaryStreamLoop<'input> {
     /// * [`Forbidden`](Error::Forbidden): a `stream_type` carried in sections
     ///   ([`StreamType::is_carried_in_sections`]), or an
     ///   `elementary_stream_id` that is not the `stream_id` of an elementary
-    ///   stream: below 0xBD, 0xBE (`padding_stream`) or 0xFF
+    ///   stream: below 0xBC, not that of a PES packet, 0xBC
+    ///   (`program_stream_map`), 0xBE (`padding_stream`) or 0xFF
     ///   (`program_stream_directory`).
     /// * [`ElementaryStreamIdExtension`](Error::ElementaryStreamIdExtension):
     ///   an `elementary_stream_id_extension` where `elementary_stream_id` is
@@ -161,6 +162,7 @@ impl<'input> ElementaryStreamLoop<'input> {
                 }
                 let elementary_stream_id = stream.elementary_stream_id;
                 if !elementary_stream_id.is_pes_packet()
+                    || elementary_stream_id == StreamId::PROGRAM_STREAM_MAP
                     || elementary_stream_id == StreamId::PADDING_STREAM
                     || elementary_stream_id == StreamId::PROGRAM_STREAM_DIRECTORY
                 {

@@ -71,7 +71,7 @@ impl StreamBound {
     #[cfg(feature = "alloc")]
     fn check(self) -> Result<Self, Error> {
         let stream_id = self.stream_id;
-        if stream_id < StreamId::PROGRAM_STREAM_MAP
+        if !stream_id.is_pes_packet()
             && ![
                 Self::WITH_STREAM_ID_EXTENSION,
                 Self::ALL_AUDIO_STREAMS,

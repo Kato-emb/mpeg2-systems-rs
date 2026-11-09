@@ -20,6 +20,8 @@ mod tests {
     use std::collections::{BTreeMap, VecDeque};
 
     use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
+    use mpeg2_systems::ps::ProgramStreamMap;
+    use mpeg2_systems::ps::psm::ElementaryStreamLoop as PsmElementaryStreamLoop;
     use mpeg2_systems::psi::VersionNumber;
     use mpeg2_systems::psi::pat::{ProgramAssociationSection, ProgramLoop};
     use mpeg2_systems::psi::pmt::{ElementaryStream, ElementaryStreamLoop, TsProgramMapSection};
@@ -329,5 +331,42 @@ mod tests {
                 others: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn a_program_stream_map_written_as_a_pes_packet_reads_back_as_the_same_bytes() {
+        let streams = [0x1B, 0xE0, 0x00, 0x00, 0x03, 0xC0, 0x00, 0x00];
+        let mut map = ProgramStreamMap::new(VersionNumber::try_from(0).unwrap());
+        map.elementary_streams = PsmElementaryStreamLoop::from(&streams[..]);
+        let mut map_bytes = Vec::new();
+        map.write(&mut map_bytes).unwrap();
+        let packet = PesPacket::new(StreamId::PROGRAM_STREAM_MAP, map_bytes.get(6..).unwrap());
+        // Why not write the map once: the demuxer locks onto the packet grid
+        // only after several sync bytes, and a map takes one Transport Packet.
+        let mut writer = PacketWriter::new();
+        let mut stream = Vec::new();
+        for _ in 0..5 {
+            writer
+                .write_pes_packet(pid(VIDEO_PID), &packet, None, &mut stream)
+                .unwrap();
+        }
+
+        let mut demuxer = Demuxer::new(DemuxerConfig::default());
+        demuxer.subscribe_pes(pid(VIDEO_PID));
+        demuxer.handle_input(&stream);
+        demuxer.finish();
+        let mut read = Vec::new();
+        while let Some(event) = demuxer.poll_event() {
+            if let Event::PesPacket { pid, packet, .. } = &event {
+                let mut bytes = Vec::new();
+                packet.write(&mut bytes).unwrap();
+                read.push((pid.get(), bytes));
+            } else {
+                let seen = seen_event(event);
+                assert!(matches!(seen, Seen::SyncAcquired(_)), "{seen:?}");
+            }
+        }
+
+        assert_eq!(read, vec![(VIDEO_PID, map_bytes.clone()); 5]);
     }
 }

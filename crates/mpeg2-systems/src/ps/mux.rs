@@ -370,7 +370,7 @@ impl Muxer {
             self.last_pack.is_none(),
             "a stream is registered after the first PES packet"
         );
-        if !stream_id.is_pes_packet() {
+        if !stream_id.is_pes_packet() || stream_id == StreamId::PROGRAM_STREAM_MAP {
             return Err(Error::StreamId { stream_id });
         }
         if stream_id_extension.is_some() != (stream_id == StreamId::EXTENDED_STREAM_ID) {
