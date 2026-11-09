@@ -163,7 +163,7 @@ stream and reads it out of its Transport Packet.
 
 ```rust
 use mpeg2_systems::psi::pat::{Program, ProgramAssociationSection};
-use mpeg2_systems::psi::section::Section;
+use mpeg2_systems::psi::section::{self, Section};
 use mpeg2_systems::ts::Pid;
 use mpeg2_systems::ts::packet::TransportPacket;
 
@@ -178,7 +178,7 @@ let packet = stream
 let (&pointer_field, rest) = packet.payload.and_then(<[u8]>::split_first).ok_or("no payload")?;
 let bytes = rest.get(usize::from(pointer_field)..).ok_or("pointer_field past the payload")?;
 // Cut the section to its length, read from its first 3 bytes
-let length = Section::encoded_len_of(bytes).ok_or("section cut short")?;
+let length = section::encoded_len(bytes).ok_or("section cut short")?;
 let section = Section::read(bytes.get(..length).ok_or("section cut short")?)?;
 // Read the PAT from the section
 let pat = ProgramAssociationSection::try_from(&section)?;

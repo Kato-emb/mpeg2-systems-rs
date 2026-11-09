@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use super::continuity::Verdict;
-use crate::pes::{self, PesPacketLength, pes_packet_length};
+use crate::pes::{self, EncodedLen};
 use crate::ts::Pid;
 use crate::ts::demux::{Error, Event, Lent, Pending};
 use crate::ts::packet::{PACKET_LENGTH, TransportPacket, TransportScramblingControl};
@@ -162,11 +162,11 @@ impl PesReassembly {
     pub(super) fn finish(&mut self, pending: &mut VecDeque<Pending>) {
         for (&pid, reassembler) in &mut self.reassemblers {
             match length_of(reassembler.in_flight(), reassembler.is_scrambled()) {
-                PesPacketLength::Unbounded => reassembler.close_ended(pid, pending),
+                EncodedLen::Unbounded => reassembler.close_ended(pid, pending),
                 // Why not read a packet of a declared length: it ends the
                 // moment its bytes are in, so one still in flight is short of
                 // its length.
-                PesPacketLength::Bounded(_) | PesPacketLength::NeedMoreData => {
+                EncodedLen::Bounded(_) | EncodedLen::NeedMoreData => {
                     reassembler.close_truncated(pid, pending);
                 }
             }
@@ -385,32 +385,30 @@ fn growth(in_flight: &[u8], scrambled: bool, payload: &[u8], buffer_limit: usize
         // Why end before checking the limit: a PES packet whose declared
         // length is all in hand is whole, and dropping it as an overrun would
         // lose it for nothing.
-        PesPacketLength::Bounded(length) if length <= gathered => Growth::Ends {
+        EncodedLen::Bounded(length) if length <= gathered => Growth::Ends {
             length: length.saturating_sub(in_flight.len()),
         },
-        PesPacketLength::Bounded(_)
-        | PesPacketLength::Unbounded
-        | PesPacketLength::NeedMoreData
+        EncodedLen::Bounded(_) | EncodedLen::Unbounded | EncodedLen::NeedMoreData
             if gathered > buffer_limit =>
         {
             Growth::Overruns
         }
-        PesPacketLength::Bounded(_)
-        | PesPacketLength::Unbounded
-        | PesPacketLength::NeedMoreData => Growth::Gathers,
+        EncodedLen::Bounded(_) | EncodedLen::Unbounded | EncodedLen::NeedMoreData => {
+            Growth::Gathers
+        }
     }
 }
 
 /// Returns how long the PES packet that `prefix` starts is, unread when
 /// its Transport Packets are `scrambled`
-fn length_of(prefix: &[u8], scrambled: bool) -> PesPacketLength {
+fn length_of(prefix: &[u8], scrambled: bool) -> EncodedLen {
     // Why not read the length of a packet in scrambled Transport Packets:
     // PES_packet_length is scrambled with the rest, so the packet runs to
     // the next payload_unit_start_indicator, bounded by the limit.
     if scrambled {
-        PesPacketLength::Unbounded
+        EncodedLen::Unbounded
     } else {
-        pes_packet_length(prefix)
+        pes::encoded_len(prefix)
     }
 }
 
