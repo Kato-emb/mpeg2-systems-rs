@@ -84,6 +84,35 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
+//! # Reading the text of a caption
+//!
+//! A data group of a caption statement carries caption data, whose data
+//! units hold the text in the 8-unit code, which the caller decodes. This
+//! data group, of the statement あ, comes from the same independent source:
+//!
+//! ```
+//! use mpeg2_systems_arib::caption::data_group::DataGroup;
+//! use mpeg2_systems_arib::caption::data_unit::DataUnitParameter;
+//! use mpeg2_systems_arib::caption::statement::CaptionData;
+//!
+//! let bytes = [
+//!     0x04, 0x00, 0x00, 0x00, 0x0b, 0x3f, 0x00, 0x00, 0x07, 0x1f, 0x20, 0x00, 0x00, 0x02, 0x24,
+//!     0x22, 0x05, 0x71,
+//! ];
+//! let group = DataGroup::read(&bytes)?;
+//! let data = CaptionData::try_from(&group)?;
+//! let mut text = Vec::new();
+//! for unit in data.data_units.iter() {
+//!     let unit = unit?;
+//!     // Other data units carry DRCS patterns, bitmaps and the like
+//!     if unit.data_unit_parameter == DataUnitParameter::STATEMENT_BODY {
+//!         text.extend_from_slice(unit.data_unit_data_byte);
+//!     }
+//! }
+//! assert_eq!(text, [0x24, 0x22]);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
 //! # What the crate does not do
 //!
 //! - It does not read the SI tables of ARIB STD-B10, such as the NIT, the
