@@ -89,7 +89,7 @@ use crate::psi::pat;
 use crate::psi::pmt;
 use crate::psi::section;
 use crate::stream_type::StreamType;
-use crate::time::ClockReference;
+use crate::time::{ClockReference, unwrap_timestamp};
 use crate::ts::Pid;
 use crate::ts::adaptation_field::AdaptationField;
 use crate::ts::packet::{self, PACKET_LENGTH};
@@ -425,8 +425,9 @@ pub struct Muxer {
 }
 
 /// The time of the 27 MHz system clock the input has reached, and the times
-/// the PAT and the PMT and the PCR were last sent, each modulo
-/// [`ClockReference::MODULUS`]
+/// the PAT and the PMT and the PCR were last sent, each on the line
+/// [`unwrap_timestamp`] places the time stamps on, times 300, and before
+/// [`MuxerConfig::mux_delay`] is taken off
 #[derive(Debug, Clone, Copy)]
 struct Schedule {
     // Why not take it from the PES packet each time: a PES packet without a
@@ -622,16 +623,15 @@ impl Muxer {
             .as_ref()
             .and_then(|header| header.dts.or(header.pts))
             .map(|timestamp| {
-                timestamp
-                    .get()
-                    .wrapping_mul(TICKS_PER_TIMESTAMP_TICK)
-                    .wrapping_add(ClockReference::MODULUS)
-                    .wrapping_sub(ticks(config.mux_delay) % ClockReference::MODULUS)
-                    % ClockReference::MODULUS
+                unwrap_timestamp(
+                    schedule.map(|schedule| schedule.clock / TICKS_PER_TIMESTAMP_TICK),
+                    timestamp,
+                )
+                .saturating_mul(TICKS_PER_TIMESTAMP_TICK)
             });
         let (send_psi, send_pcr, next) = match *schedule {
             None => {
-                let clock = at.unwrap_or(0);
+                let clock = at.unwrap_or(ClockReference::MODULUS);
                 let next = Schedule {
                     clock,
                     psi_sent_at: clock,
@@ -641,7 +641,7 @@ impl Muxer {
             }
             Some(schedule) => {
                 let clock = at.map_or(schedule.clock, |at| schedule.clock.max(at));
-                let due = |sent_at, interval| elapsed(sent_at, clock) >= ticks(interval);
+                let due = |sent_at: u64, interval| clock.saturating_sub(sent_at) >= ticks(interval);
                 let send_psi = due(schedule.psi_sent_at, config.psi_interval);
                 let send_pcr = due(schedule.pcr_sent_at, config.pcr_interval);
                 let next = Schedule {
@@ -660,7 +660,7 @@ impl Muxer {
                 (send_psi, send_pcr, next)
             }
         };
-        let pcr = ClockReference::from_ticks(next.clock);
+        let pcr = ClockReference::from_ticks(next.clock.wrapping_sub(ticks(config.mux_delay)));
         let pcr_pid = program.pcr_pid().filter(|_| send_pcr);
         let adaptation_field = (pcr_pid == Some(pid)).then(|| {
             let mut adaptation_field = AdaptationField::new();
@@ -751,15 +751,6 @@ impl Muxer {
 fn ticks(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos().saturating_mul(SYSTEM_CLOCK_FREQUENCY) / 1_000_000_000)
         .unwrap_or(u64::MAX)
-}
-
-/// Returns the ticks from `earlier` to `later` round the circle of
-/// [`ClockReference::MODULUS`]
-const fn elapsed(earlier: u64, later: u64) -> u64 {
-    later
-        .wrapping_add(ClockReference::MODULUS)
-        .wrapping_sub(earlier)
-        % ClockReference::MODULUS
 }
 
 #[cfg(test)]

@@ -170,6 +170,22 @@ impl Timestamp {
     }
 }
 
+/// Places `timestamp` on the line of 90 kHz ticks that never wraps, at the
+/// point nearest `previous`, a point on that line
+///
+/// The first time stamp, without a `previous`, is placed one whole circle
+/// of [`Timestamp::MODULUS`] in, so that a time stamp behind it stays on the
+/// line. A point on the line is the time stamp it stands for once taken
+/// modulo [`Timestamp::MODULUS`].
+#[cfg(feature = "alloc")]
+pub(crate) fn unwrap_timestamp(previous: Option<u64>, timestamp: Timestamp) -> u64 {
+    match previous {
+        None => Timestamp::MODULUS.saturating_add(timestamp.get()),
+        Some(previous) => previous
+            .saturating_add_signed(timestamp.distance_from(Timestamp::from_33_bits(previous))),
+    }
+}
+
 impl TryFrom<u64> for Timestamp {
     type Error = TimestampOutOfRange;
 

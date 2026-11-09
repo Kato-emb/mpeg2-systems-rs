@@ -505,3 +505,78 @@ fn the_pcr_is_the_dts_less_the_mux_delay_and_never_goes_back() {
         [27_000 * 300, 36_000 * 300, 36_000 * 300, 45_000 * 300]
     );
 }
+
+/// A PES packet of `stream_id` whose PTS and DTS are both `timestamp`, taken
+/// round the 33-bit circle
+fn stamped(stream_id: u8, timestamp: u64) -> PesPacket<'static> {
+    let timestamp = Timestamp::try_from(timestamp % Timestamp::MODULUS).unwrap();
+    let mut header = OptionalHeader::new();
+    header.pts = Some(timestamp);
+    header.dts = Some(timestamp);
+    let mut packet = PesPacket::new(StreamId::from(stream_id), &[0x5a; 10]);
+    packet.optional_header = Some(header);
+    packet
+}
+
+/// How many PCRs `stream` carries, the longest time from one to the next
+/// round the circle, and how many PATs it carries
+fn timing_of(stream: &[u8]) -> (usize, u64, usize) {
+    let packets: Vec<TransportPacket<'_>> = stream
+        .chunks(188)
+        .map(|chunk| TransportPacket::read(chunk).unwrap())
+        .collect();
+    let pcrs: Vec<u64> = packets
+        .iter()
+        .filter_map(|packet| {
+            packet
+                .adaptation_field
+                .as_ref()
+                .and_then(|field| field.program_clock_reference)
+                .map(ClockReference::ticks)
+        })
+        .collect();
+    let longest = pcrs
+        .windows(2)
+        .map(|pair| match pair {
+            [earlier, later] => {
+                (later + ClockReference::MODULUS - earlier) % ClockReference::MODULUS
+            }
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0);
+    let pats = packets
+        .iter()
+        .filter(|packet| packet.pid == Pid::PAT)
+        .count();
+    (pcrs.len(), longest, pats)
+}
+
+/// The stream a muxer of the default settings writes of one video stream
+/// whose PTS and DTS are each of `timestamps`
+fn multiplexed(timestamps: impl IntoIterator<Item = u64>) -> Vec<u8> {
+    let mut muxer = muxer_of(MuxerConfig::new());
+    let mut out = Vec::new();
+    for timestamp in timestamps {
+        muxer
+            .handle_pes_packet(pid(VIDEO_PID), &stamped(0xe0, timestamp))
+            .unwrap();
+        muxer.poll_output(&mut out);
+    }
+    out
+}
+
+/// 27 MHz ticks of 40 ms, the default `pcr_interval`
+const PCR_INTERVAL: u64 = 40 * 27_000;
+
+#[test]
+fn time_stamps_below_the_mux_delay_keep_the_pcr_and_the_pat_and_the_pmt_coming() {
+    let stream = multiplexed((0..=100).map(|index| index * 1_800));
+    assert_eq!(timing_of(&stream), (51, PCR_INTERVAL, 21));
+}
+
+#[test]
+fn time_stamps_across_the_wrap_of_33_bits_keep_the_pcr_and_the_pat_and_the_pmt_coming() {
+    let stream = multiplexed((0..=100).map(|index| Timestamp::MODULUS - 45_000 + index * 1_800));
+    assert_eq!(timing_of(&stream), (51, PCR_INTERVAL, 21));
+}
