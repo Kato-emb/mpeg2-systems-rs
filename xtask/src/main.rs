@@ -10,7 +10,8 @@ const USAGE: &str = "\
 Usage: cargo xtask <task>
 
 Tasks:
-  fixtures    Generate the stream fixtures of the tests with FFmpeg
+  fixtures    Generate the stream fixtures of the tests with FFmpeg, or the
+              ARIB caption fixture with TSDuck (--arib)
 ";
 
 fn main() -> ExitCode {
@@ -22,6 +23,13 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(message) => {
                 eprintln!("cargo xtask fixtures: {message}");
+                ExitCode::FAILURE
+            }
+        },
+        ["fixtures", "--arib"] => match fixtures::arib::generate() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(message) => {
+                eprintln!("cargo xtask fixtures --arib: {message}");
                 ExitCode::FAILURE
             }
         },
