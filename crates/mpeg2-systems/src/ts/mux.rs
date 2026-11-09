@@ -175,8 +175,10 @@ pub enum Error {
         /// The `pcr_interval` set
         pcr_interval: Duration,
     },
-    /// The first PES packet supplied for a stream has no PTS, which this
-    /// muxer requires to initialize the stream's timeline
+    /// The first PES packet supplied for a stream that carries the optional
+    /// header has no PTS, which this muxer requires to initialize the
+    /// stream's timeline, or the first PES packet supplied to the muxer has
+    /// no time stamp to start the PCRs from
     MissingPts {
         /// The PID of the stream
         pid: Pid,
@@ -338,8 +340,11 @@ pub struct MuxerConfig {
     /// [`Muxer::new`] takes from one tick of the 27 MHz system clock to
     /// 0.1 s (ISO/IEC 13818-1 §2.7.2, §2.4.2.3 equation 2-5).
     pub pcr_interval: Duration,
-    /// How far the PCR runs behind the DTS of the PES packet it is sent with,
-    /// or its PTS when it has no DTS (0.7 s by default)
+    /// Offset subtracted from a PES packet's DTS, or its PTS when it has no
+    /// DTS, to obtain the desired PCR (0.7 s by default)
+    ///
+    /// The PCR does not go back, so a PES packet given after one of a later
+    /// DTS on another stream may arrive after a later PCR.
     pub mux_delay: Duration,
     /// The most bytes the output held for [`Muxer::poll_output`] may grow to
     /// (4 MiB by default)
@@ -462,11 +467,11 @@ pub struct Muxer {
     config: MuxerConfig,
     writer: PacketWriter,
     program: Option<ProgramDefinition>,
-    /// The clock and when the PAT, the PMT and the PCR were last sent, `None`
-    /// before the first PES packet
-    // Why not an `Option` for each time, or a clock of 0 before the first
-    // PES packet: one could be set without the others, and 0 could not be
-    // told from the time 0.
+    /// When the PAT, the PMT and the PCR were last sent, `None` before the
+    /// first PES packet
+    // Why not an `Option` for each time, or times of 0 before the first PES
+    // packet: one could be set without the others, and 0 could not be told
+    // from the time 0.
     schedule: Option<Schedule>,
     /// The Transport Packets [`poll_output`](Self::poll_output) gives next
     // Why not write into the caller's buffer on input: the output may be
@@ -488,15 +493,12 @@ pub struct Muxer {
     finished: bool,
 }
 
-/// The time of the STC the input has reached, and the times the PAT and the
-/// PMT and the PCR were last sent, before [`MuxerConfig::mux_delay`] is
-/// taken off
+/// The times the PAT and the PMT and the PCR were last sent, before
+/// [`MuxerConfig::mux_delay`] is taken off
+// Why not a field of the time the input has reached: it is the latest
+// `last_timestamp` of the streams, which every time stamp taken sets.
 #[derive(Debug, Clone, Copy)]
 struct Schedule {
-    // Why not take it from the PES packet each time: a PES packet without a
-    // PTS or a DTS, or with an earlier DTS than one before it, must not move
-    // it back.
-    clock: SystemTimeClock,
     psi_sent_at: SystemTimeClock,
     pcr_sent_at: SystemTimeClock,
     /// Whether more than one PCR has been sent
@@ -588,7 +590,9 @@ impl Muxer {
     ///   0x0010 to 0x1FFE, the PIDs Table 2-3 leaves free to assign.
     /// * [`TsProgramMapSection`](Error::TsProgramMapSection):
     ///   [`TsProgramMapSection::write`](pmt::TsProgramMapSection::write) refuses the PMT of the program, as it
-    ///   does `program_info` that is not whole descriptors or is too long.
+    ///   does `program_info` that is not whole descriptors, or a PMT past the
+    ///   1021 bytes of `section_length`, which is refused before
+    ///   `program_info` is copied.
     ///
     /// # Panics
     ///
@@ -613,6 +617,7 @@ impl Muxer {
                 return Err(Error::Pid { pid });
             }
         }
+        program_definition::check_pmt_length(program_info, core::iter::empty())?;
         let program = ProgramDefinition {
             program_number,
             program_map_pid,
@@ -640,8 +645,10 @@ impl Muxer {
     ///   already, or of the PMT.
     /// * [`TsProgramMapSection`](Error::TsProgramMapSection):
     ///   [`TsProgramMapSection::write`](pmt::TsProgramMapSection::write) refuses the PMT with the stream, as
-    ///   it does `es_info` that is not whole descriptors or is too long, or
-    ///   a PMT past the length of a section.
+    ///   it does `es_info` that is not whole descriptors or is longer than
+    ///   `ES_info_length` counts, or a PMT past the 1021 bytes of
+    ///   `section_length`; a length past either is refused before `es_info`
+    ///   is copied.
     ///
     /// # Panics
     ///
@@ -675,6 +682,12 @@ impl Muxer {
         if pid == program.program_map_pid || program.stream(pid).is_some() {
             return Err(Error::PidInUse { pid });
         }
+        let mut entry = pmt::ElementaryStream::new(stream_type, pid);
+        entry.es_info = es_info.into();
+        program_definition::check_pmt_length(
+            &program.program_info,
+            program.elementary_streams().chain(core::iter::once(entry)),
+        )?;
         program.streams.push(Stream {
             pid,
             stream_type,
@@ -699,8 +712,11 @@ impl Muxer {
     ///   that of a PES packet.
     /// * [`PesPacket`](Error::PesPacket): [`PesPacket::write`] refuses the
     ///   packet.
-    /// * [`MissingPts`](Error::MissingPts): the PES packet is the first of its
-    ///   stream and has no PTS.
+    /// * [`MissingPts`](Error::MissingPts): the PES packet has no PTS and is
+    ///   the first of a stream whose `stream_id` carries the optional header
+    ///   ([`StreamId::carries_optional_header`]), or has no PTS or DTS and is
+    ///   the first given to the muxer. The first PES packet of any other
+    ///   stream needs neither.
     /// * [`DecreasingTimestamp`](Error::DecreasingTimestamp): its DTS, or its
     ///   PTS when it has none, is before that of the PES packet given before
     ///   it on its stream.
@@ -749,27 +765,39 @@ impl Muxer {
         let pes_length = packet.encoded_len();
 
         let header = packet.optional_header.as_ref();
-        if last_timestamp.is_none() && header.and_then(|header| header.pts).is_none() {
+        // Why not ask a PTS of the first PES packet of every stream: the PTS
+        // of the first access unit §2.7.5 asks for sits in the optional
+        // header, which the PES packets of some streams do not carry.
+        if last_timestamp.is_none()
+            && stream_id.carries_optional_header()
+            && header.and_then(|header| header.pts).is_none()
+        {
             return Err(Error::MissingPts { pid });
         }
         let timestamp = header.and_then(|header| header.dts.or(header.pts));
-        let (time, psi_times, pcr_times, next) = match (*schedule, timestamp) {
+        let reached = program.latest_timestamp();
+        let (clock, time, psi_times, pcr_times, next) = match (schedule.zip(reached), timestamp) {
             (None, Some(timestamp)) => {
                 let clock = SystemTimeClock::first(timestamp);
                 let next = Schedule {
-                    clock,
                     psi_sent_at: clock,
                     pcr_sent_at: clock,
                     several_pcrs: false,
                 };
-                (Some(clock), Times::once(clock), Times::once(clock), next)
+                (
+                    clock,
+                    Some(clock),
+                    Times::once(clock),
+                    Times::once(clock),
+                    next,
+                )
             }
-            // Why not a time of its own: the first PES packet given is the
-            // first of its stream, and without a PTS it is refused above;
-            // this names the same refusal.
+            // Why not a time of its own: the PCR and the PAT and the PMT
+            // start at the time of the first PES packet, and this one has
+            // none.
             (None, None) => return Err(Error::MissingPts { pid }),
-            (Some(schedule), timestamp) => {
-                let time = timestamp.map(|timestamp| schedule.clock.expand(timestamp));
+            (Some((schedule, reached)), timestamp) => {
+                let time = timestamp.map(|timestamp| reached.expand(timestamp));
                 if let (Some(time), Some(timestamp), Some(previous)) =
                     (time, timestamp, last_timestamp)
                     && time < previous
@@ -780,22 +808,20 @@ impl Muxer {
                         previous: previous.to_timestamp(),
                     });
                 }
-                let clock = time.map_or(schedule.clock, |time| schedule.clock.max(time));
+                let clock = time.map_or(reached, |time| reached.max(time));
                 let interval = |duration| SystemTimeClock::ticks_in(duration);
                 let psi_times =
                     Times::due(schedule.psi_sent_at, clock, interval(config.psi_interval));
                 let pcr_times =
                     Times::due(schedule.pcr_sent_at, clock, interval(config.pcr_interval));
                 let next = Schedule {
-                    clock,
                     psi_sent_at: psi_times.last().unwrap_or(schedule.psi_sent_at),
                     pcr_sent_at: pcr_times.last().unwrap_or(schedule.pcr_sent_at),
                     several_pcrs: schedule.several_pcrs || pcr_times.count > 0,
                 };
-                (time, psi_times, pcr_times, next)
+                (clock, time, psi_times, pcr_times, next)
             }
         };
-        let clock = next.clock;
         // Why not refuse a program without a PCR PID: a stream is registered
         // on `pid`, so the program has one.
         let pcr_pid = program.pcr_pid().unwrap_or(pid);
@@ -824,9 +850,8 @@ impl Muxer {
             .saturating_mul(as_length(psi_times.count))
             .saturating_add(PACKET_LENGTH.saturating_mul(as_length(pcrs_alone)));
         if filling > config.buffer_limit {
-            let previous = schedule.map_or(clock, |schedule| schedule.clock);
             return Err(Error::TimestampGap {
-                gap: clock.timestamp_ticks_since(previous),
+                gap: clock.timestamp_ticks_since(reached.unwrap_or(clock)),
             });
         }
         let length = filling
@@ -897,16 +922,15 @@ impl Muxer {
     /// given a second one, [`MuxerConfig::pcr_interval`] after the first or
     /// at the time of the last PES packet if that is later.
     pub fn poll_output(&mut self, out: &mut Vec<u8>) {
-        if let (true, Some(schedule), Some(pcr_pid)) = (
-            self.finished,
-            self.schedule.as_mut(),
-            self.program.as_ref().and_then(ProgramDefinition::pcr_pid),
-        ) && !schedule.several_pcrs
+        if let (true, Some(schedule), Some(program)) =
+            (self.finished, self.schedule.as_mut(), self.program.as_ref())
+            && let (Some(pcr_pid), Some(reached)) = (program.pcr_pid(), program.latest_timestamp())
+            && !schedule.several_pcrs
         {
             let at = schedule
                 .pcr_sent_at
                 .add_ticks(SystemTimeClock::ticks_in(self.config.pcr_interval))
-                .max(schedule.clock);
+                .max(reached);
             if self
                 .writer
                 .write_pcr_packet(pcr_pid, pcr_at(&self.config, at), &mut self.pending)

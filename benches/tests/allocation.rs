@@ -9,8 +9,9 @@
 //! packets, or PCRs on their own, again reuses the output buffer and the
 //! continuity counters of the PIDs written before, and multiplexing PES
 //! packets with either muxer reuses its output held and its scratch buffer.
-//! A stream whose descriptors could not fit the program stream map is
-//! refused before they are copied.
+//! A stream whose descriptors could not fit the program stream map, or a
+//! program or a stream whose descriptors could not fit the PMT, is refused
+//! before they are copied.
 
 #[cfg(test)]
 mod tests {
@@ -21,7 +22,7 @@ mod tests {
     use mpeg2_systems::time::ClockReference;
     use mpeg2_systems::ts::Pid;
     use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig};
-    use mpeg2_systems::ts::mux::PacketWriter;
+    use mpeg2_systems::ts::mux::{Muxer, MuxerConfig, PacketWriter};
     use mpeg2_systems_bench::{
         ACCESS_UNIT_LENGTH, CountingAllocator, PES_PACKETS, PROGRAM, STREAMS,
         allocations_once_grown, demux_events, multiplex_pes_packets,
@@ -119,6 +120,32 @@ mod tests {
         });
         allocations.push(("es_info past the map", es_info.len(), "ps muxer", counted));
         none.push(("es_info past the map", es_info.len(), "ps muxer", 0));
+        let mut muxer = registered_muxer();
+        let counted = allocations_once_grown(&ALLOCATOR, || {
+            muxer
+                .add_stream(
+                    1,
+                    Pid::try_from(0x0101).unwrap(),
+                    StreamType::ISO_IEC_13818_7_AUDIO,
+                    &es_info,
+                )
+                .unwrap_err();
+        });
+        allocations.push(("es_info past the pmt", es_info.len(), "ts muxer", counted));
+        none.push(("es_info past the pmt", es_info.len(), "ts muxer", 0));
+        let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
+        let counted = allocations_once_grown(&ALLOCATOR, || {
+            muxer
+                .add_program(1, Pid::try_from(0x1000).unwrap(), None, &es_info)
+                .unwrap_err();
+        });
+        allocations.push((
+            "program_info past the pmt",
+            es_info.len(),
+            "ts muxer",
+            counted,
+        ));
+        none.push(("program_info past the pmt", es_info.len(), "ts muxer", 0));
         assert_eq!(allocations, none);
     }
 }

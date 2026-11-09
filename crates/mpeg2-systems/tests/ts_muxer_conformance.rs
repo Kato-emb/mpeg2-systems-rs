@@ -1,6 +1,7 @@
 //! What the Transport Stream `Muxer` writes, checked against TSDuck and
-//! ffprobe: the streams and PES packets, the PAT and the PMT, and how far
-//! apart the PCRs and the tables are
+//! ffprobe: the streams and PES packets, a stream of `private_stream_2`
+//! among them, the PAT and the PMT, and how far apart the PCRs and the
+//! tables are
 //!
 //! The tests run `tstables`, `tsanalyze`, `tsp` and `ffprobe` from `PATH`, so
 //! they are ignored unless asked for; once asked for, a tool missing is a
@@ -30,6 +31,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::process::Command;
 
+    use mpeg2_systems::pes::{PesPacket, StreamId};
     use mpeg2_systems::stream_type::StreamType;
     use mpeg2_systems::time::{ClockReference, Timestamp};
     use mpeg2_systems::ts::Pid;
@@ -43,6 +45,13 @@ mod tests {
     const PMT_PID: u16 = 0x1000;
     const VIDEO_PID: u16 = 0x0100;
     const AUDIO_PID: u16 = 0x0101;
+    const PRIVATE_PID: u16 = 0x0102;
+
+    /// The PID and `stream_type` of the video and the audio of the fixture
+    const STREAMS: [(u16, StreamType); 2] = [
+        (VIDEO_PID, StreamType::ISO_IEC_13818_2_VIDEO),
+        (AUDIO_PID, StreamType::ISO_IEC_11172_3_AUDIO),
+    ];
 
     /// Times the PES packets of the fixture are given, one after the other
     const REPEATS: u64 = 30;
@@ -92,26 +101,30 @@ mod tests {
     /// Writes what the muxer of the default settings makes of [`inputs`] to
     /// a file of `name`, and returns its path
     fn multiplexed(name: &str) -> String {
-        multiplexed_of(name, inputs())
+        multiplexed_of(name, &STREAMS, inputs())
     }
 
-    /// Writes what the muxer of the default settings makes of `inputs` to a
-    /// file of `name`, and returns its path
-    fn multiplexed_of(name: &str, inputs: Vec<Input>) -> String {
+    /// Writes what the muxer of the default settings, `streams` registered,
+    /// makes of `inputs` to a file of `name`, and returns its path
+    ///
+    /// An input of `private_stream_2` is given without an optional header.
+    fn multiplexed_of(name: &str, streams: &[(u16, StreamType)], inputs: Vec<Input>) -> String {
         let pid = |value: u16| Pid::try_from(value).unwrap();
         let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
         muxer.add_program(1, pid(PMT_PID), None, &[]).unwrap();
-        muxer
-            .add_stream(1, pid(VIDEO_PID), StreamType::ISO_IEC_13818_2_VIDEO, &[])
-            .unwrap();
-        muxer
-            .add_stream(1, pid(AUDIO_PID), StreamType::ISO_IEC_11172_3_AUDIO, &[])
-            .unwrap();
+        for &(stream_pid, stream_type) in streams {
+            muxer
+                .add_stream(1, pid(stream_pid), stream_type, &[])
+                .unwrap();
+        }
         let mut stream = Vec::new();
         for (pid_value, stream_id, timing, payload) in inputs {
-            muxer
-                .handle_pes_packet(pid(pid_value), &pes_packet(stream_id, timing, &payload))
-                .unwrap();
+            let packet = if StreamId::from(stream_id) == StreamId::PRIVATE_STREAM_2 {
+                PesPacket::new(StreamId::PRIVATE_STREAM_2, &payload)
+            } else {
+                pes_packet(stream_id, timing, &payload)
+            };
+            muxer.handle_pes_packet(pid(pid_value), &packet).unwrap();
             muxer.poll_output(&mut stream);
         }
         muxer.finish();
@@ -337,6 +350,7 @@ mod tests {
     fn the_pcrs_stay_within_the_pcr_interval_across_a_leap_of_the_time_stamps() {
         let path = multiplexed_of(
             "muxer_leap.ts",
+            &STREAMS,
             inputs_at(|index| 90_000 + index * STEP + if index >= 75 { 90_000 } else { 0 }),
         );
         let longest = longest_pcr_interval(&path);
@@ -355,6 +369,7 @@ mod tests {
     fn the_pcrs_stay_within_the_pcr_interval_across_the_wrap_of_33_bits() {
         let path = multiplexed_of(
             "muxer_wrap.ts",
+            &STREAMS,
             inputs_at(|index| Timestamp::MODULUS - 30 * STEP + index * STEP),
         );
         let longest = longest_pcr_interval(&path);
@@ -371,6 +386,45 @@ mod tests {
             (longest <= ticks(40), tsanalyze_errors(&path)),
             (true, expected),
             "{longest} ticks"
+        );
+    }
+
+    #[test]
+    #[ignore = "runs tstables, tsanalyze and ffprobe"]
+    fn a_stream_of_private_stream_2_without_time_stamps_reads_in_tstables_and_ffprobe_as_given() {
+        let mut inputs = Vec::new();
+        for input in self::inputs() {
+            let after_video = input.0 == VIDEO_PID;
+            inputs.push(input);
+            if after_video {
+                inputs.push((PRIVATE_PID, 0xbf, (None, None), vec![0xcc; 300]));
+            }
+        }
+        let streams = [
+            STREAMS[0],
+            STREAMS[1],
+            (PRIVATE_PID, StreamType::ISO_IEC_13818_1_PES_PRIVATE_DATA),
+        ];
+        let path = multiplexed_of("muxer_private_stream_2.ts", &streams, inputs.clone());
+        let mut expected: BTreeMap<u64, Vec<Timing>> = BTreeMap::new();
+        for (pid, _, timing, _) in inputs {
+            expected.entry(pid.into()).or_default().push(timing);
+        }
+        let registered = vec![ProgramMap {
+            program_number: 1,
+            pcr_pid: Some(VIDEO_PID.into()),
+            elementary_streams: vec![
+                (0x02, VIDEO_PID.into()),
+                (0x03, AUDIO_PID.into()),
+                (0x06, PRIVATE_PID.into()),
+            ],
+        }];
+        let errors = tsanalyze_errors(&path);
+        let no_errors: BTreeMap<_, _> = errors.keys().map(|key| (key.clone(), 0)).collect();
+        let (_, probed) = ffprobe(&path, None, false);
+        assert_eq!(
+            (tables_tstables(&path).1, errors, probed),
+            (registered, no_errors, expected)
         );
     }
 }

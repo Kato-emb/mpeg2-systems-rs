@@ -16,6 +16,10 @@ use crate::ts::Pid;
 #[cfg(feature = "alloc")]
 const MAX_ES_INFO_LENGTH: usize = 0x3ff;
 
+/// Bytes of an entry from `stream_type` to `ES_info_length`
+#[cfg(feature = "alloc")]
+const ENTRY_PREFIX_LENGTH: usize = 5;
+
 /// Entry of the elementary stream loop of a
 /// [`TsProgramMapSection`](super::TsProgramMapSection): a program element and
 /// the PID that carries it
@@ -39,6 +43,12 @@ impl<'input> ElementaryStream<'input> {
             elementary_pid,
             es_info: DescriptorLoop(&[]),
         }
+    }
+
+    /// Returns the bytes the entry takes in the elementary stream loop
+    #[cfg(feature = "alloc")]
+    pub(super) const fn encoded_len(&self) -> usize {
+        ENTRY_PREFIX_LENGTH.saturating_add(self.es_info.0.len())
     }
 }
 
@@ -136,12 +146,8 @@ pub(super) fn write_entries<'stream>(
             if !pid.is_assignable() {
                 return Err(Error::ElementaryPid { pid });
             }
+            check_es_info_length(stream.es_info)?;
             let es_info_length = stream.es_info.0.len();
-            if es_info_length > MAX_ES_INFO_LENGTH {
-                return Err(Error::EsInfoLength {
-                    length: es_info_length,
-                });
-            }
             let mut writer = FieldWriter::new(out);
             // Why not an error per field: every value fits its field's width.
             (|| {
@@ -161,6 +167,16 @@ pub(super) fn write_entries<'stream>(
 
         Ok(())
     })
+}
+
+/// Refuses `es_info` longer than `ES_info_length` counts
+#[cfg(feature = "alloc")]
+pub(super) const fn check_es_info_length(es_info: DescriptorLoop<'_>) -> Result<(), Error> {
+    let length = es_info.0.len();
+    if length > MAX_ES_INFO_LENGTH {
+        return Err(Error::EsInfoLength { length });
+    }
+    Ok(())
 }
 
 impl<'input> From<&'input [u8]> for ElementaryStreamLoop<'input> {
