@@ -363,6 +363,61 @@ mod tests {
         );
     }
 
+    /// Video and audio of 10 bytes each, a second apart, from a second in,
+    /// leaping `leaps` 90 kHz ticks after the 2nd and the 4th
+    fn sparse(leaps: [u64; 2]) -> Vec<Input> {
+        let mut dts = 90_000;
+        (0_u64..6)
+            .map(|index| {
+                dts += match index {
+                    0 => 0,
+                    2 => leaps[0],
+                    4 => leaps[1],
+                    _ => 90_000,
+                };
+                Input {
+                    stream_id: if index % 2 == 0 { VIDEO } else { AUDIO },
+                    pts: dts % Timestamp::MODULUS,
+                    dts: Some(dts % Timestamp::MODULUS),
+                    payload: vec![0xaa; 10],
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn long_leaps_at_the_lowest_rate_keep_the_scrs_within_0_7_s() {
+        // 150 bytes a second: the lowest rate whose 0.7 s carries the first
+        // pack of the two streams and a PES packet with its PTS and DTS
+        let (packs, _) = packs(&multiplex(
+            MuxerConfig::new(3),
+            &sparse([900_000, 90_000 * 3_500]),
+        ));
+        let (kept, longest) = scr_steps(&packs, 3);
+        assert_eq!(
+            (
+                kept,
+                longest,
+                packs
+                    .iter()
+                    .filter(|pack| pack.start_codes.is_empty())
+                    .count()
+            ),
+            // ⌈10 / 0.7⌉ − 1 and ⌈3 500 / 0.7⌉ − 1 packs of a pack header
+            // alone, and ⌈1 / 0.7⌉ − 1 in each of the three steps of 1 s
+            (true, LONGEST_SCR_INTERVAL, 14 + 4_999 + 3)
+        );
+    }
+
+    #[test]
+    fn a_leap_across_the_wrap_of_33_bits_keeps_the_scrs_within_0_7_s() {
+        let (packs, _) = packs(&multiplex(
+            MuxerConfig::new(RATE),
+            &stepped(Timestamp::MODULUS - 50 * 1_800, 180_000),
+        ));
+        assert!(scr_steps(&packs, RATE).0);
+    }
+
     #[test]
     fn the_same_input_gives_the_same_stream() {
         let inputs = stepped(Timestamp::MODULUS - 50 * 1_800, 180_000);

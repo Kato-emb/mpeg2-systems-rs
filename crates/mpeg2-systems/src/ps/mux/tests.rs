@@ -710,14 +710,14 @@ fn a_buffer_limit_of_0_refuses_every_pes_packet_and_of_usize_max_none() {
 #[test]
 fn a_leap_too_long_to_fill_within_the_buffer_limit_is_refused_however_much_is_taken() {
     let mut config = MuxerConfig::new(RATE);
-    config.buffer_limit = 200;
+    config.buffer_limit = 150;
     let mut muxer = muxer_of(config);
     let mut stream = Vec::new();
     muxer
         .handle_pes_packet(&pes_packet(VIDEO, &[0xaa; 10], Some(90_000)))
         .unwrap();
     muxer.poll_output(&mut stream);
-    // A leap of 10 s takes 19 packs of a pack header alone, 266 bytes
+    // A leap of 10 s takes 14 packs of a pack header alone, 196 bytes
     let leap = muxer.handle_pes_packet(&pes_packet(VIDEO, &[0xaa; 10], Some(990_000)));
     muxer
         .handle_pes_packet(&pes_packet(VIDEO, &[0xaa; 10], Some(93_600)))
@@ -739,45 +739,45 @@ fn a_leap_too_long_to_fill_within_the_buffer_limit_is_refused_however_much_is_ta
     );
 }
 
-#[test]
-fn a_leap_is_filled_with_packs_of_a_pack_header_alone_no_more_than_0_7_s_apart() {
-    let stream = multiplexed_by(
+/// The SCR of each pack the muxer writes of two PES packets of video, the
+/// second `leap` ticks of 90 kHz after the first
+fn scrs_across(leap: u64) -> Vec<u64> {
+    scrs(&multiplexed_by(
         muxer(),
         &[
             pes_packet(VIDEO, &[0xaa; 10], Some(90_000)),
-            pes_packet(VIDEO, &[0xaa; 10], Some(270_000)),
+            pes_packet(VIDEO, &[0xaa; 10], Some(leap.saturating_add(90_000))),
         ],
-    );
-    let packs_alone = elements(&stream)
-        .into_iter()
-        .map(|(element, _)| element)
-        .collect::<Vec<_>>()
-        .windows(2)
-        .filter(|pair| {
-            matches!(
-                pair,
-                [
-                    Element::PackHeader(_),
-                    Element::PackHeader(_) | Element::ProgramEnd
-                ]
-            )
-        })
-        .count();
-    let scrs = scrs(&stream);
-    // From 0.3 s to 2.3 s, the first after 0.5 s, then every 0.5 s while
-    // 2.3 s is more than 0.7 s on
+    ))
+}
+
+#[test]
+fn a_leap_past_0_7_s_is_filled_with_packs_of_a_pack_header_alone_0_7_s_apart() {
+    // The 27 MHz ticks of 0.7 s, and the SCR of the first pack
+    const LONGEST: u64 = 18_900_000;
+    let first = 90_000 * 300 - DELAY;
+    // A leap of exactly 0.7 s needs no pack, and one 90 kHz tick more needs
+    // one; a leap of 2 s needs ⌈2 / 0.7⌉ − 1 = 2, and one of 3 s 4
     assert_eq!(
-        (packs_alone, scrs),
-        (
-            3,
+        [63_000, 63_001, 180_000, 270_000].map(scrs_across),
+        [
+            vec![first, first + 63_000 * 300],
+            vec![first, first + LONGEST, first + 63_001 * 300],
             vec![
-                90_000 * 300 - DELAY,
-                90_000 * 300 - DELAY + 13_500_000,
-                90_000 * 300 - DELAY + 27_000_000,
-                90_000 * 300 - DELAY + 40_500_000,
-                270_000 * 300 - DELAY,
-            ]
-        )
+                first,
+                first + LONGEST,
+                first + 2 * LONGEST,
+                first + 180_000 * 300
+            ],
+            vec![
+                first,
+                first + LONGEST,
+                first + 2 * LONGEST,
+                first + 3 * LONGEST,
+                first + 4 * LONGEST,
+                first + 270_000 * 300
+            ],
+        ]
     );
 }
 

@@ -16,15 +16,10 @@ const LONGEST_SCR_INTERVAL_MILLIS: u64 = 700;
 /// The longest time from one SCR to the next, ISO/IEC 13818-1 §2.7.1
 const LONGEST_SCR_INTERVAL: Duration = Duration::from_millis(LONGEST_SCR_INTERVAL_MILLIS);
 
-/// The time from one pack of a pack header alone to the next, where the time
-/// stamps leap past [`LONGEST_SCR_INTERVAL`]
-// Why not LONGEST_SCR_INTERVAL itself: the pack after the last of them is due
-// at the time of its PES packet, which may fall up to a whole step after it,
-// so a step no shorter than the longest interval could leave it too far.
-// Why not a step from the end of the pack before: a pack header alone takes
-// less than this step to arrive at any program_mux_rate of 1 or more, so the
-// next one is never due before the step is over.
-const FILLING_PACK_INTERVAL: Duration = Duration::from_millis(500);
+/// Returns [`LONGEST_SCR_INTERVAL`] in ticks of the STC
+fn longest_scr_interval() -> u64 {
+    SystemTimeClock::ticks_in(LONGEST_SCR_INTERVAL)
+}
 
 /// Returns the most bytes that arrive within [`LONGEST_SCR_INTERVAL`] at
 /// `program_mux_rate` (§2.5.2.2 equation 2-21), the longest pack after which
@@ -66,7 +61,7 @@ impl Pack {
 }
 
 /// The times of the packs of a pack header alone before a PES packet:
-/// `count` of them, [`FILLING_PACK_INTERVAL`] apart from `first`
+/// `count` of them, [`LONGEST_SCR_INTERVAL`] apart from `first`
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Filling {
     first: SystemTimeClock,
@@ -75,28 +70,34 @@ pub(super) struct Filling {
 
 impl Filling {
     /// Returns the packs that fill the leap from `last`, the last pack
-    /// written, to `time`, so that no two SCRs are more than
-    /// [`LONGEST_SCR_INTERVAL`] apart, `None` where there is no leap to fill
+    /// written, to `time`: each [`LONGEST_SCR_INTERVAL`] after the SCR before
+    /// it, or once the bytes before it have arrived if that is later, while
+    /// the pack at `time` would be more than [`LONGEST_SCR_INTERVAL`] after
+    /// the SCR before it; `None` where there is no leap to fill
     pub(super) fn across(last: Pack, time: SystemTimeClock, program_mux_rate: u32) -> Option<Self> {
-        let longest = SystemTimeClock::ticks_in(LONGEST_SCR_INTERVAL);
-        let step = SystemTimeClock::ticks_in(FILLING_PACK_INTERVAL);
+        let longest = longest_scr_interval();
+        // Why compare with `time` alone, not with when `last` has arrived:
+        // `largest_pack` keeps every pack arriving within the longest
+        // interval, so only the time stamp can carry the next SCR past it.
         if time.ticks_since(last.at) <= longest {
             return None;
         }
-        let first = last.arrived(program_mux_rate).max(last.at.add_ticks(step));
-        // Why the count from `first` alone: each pack after the first is due
-        // a step after the one before, which it outlasts (see
-        // FILLING_PACK_INTERVAL).
+        let first = last
+            .arrived(program_mux_rate)
+            .max(last.at.add_ticks(longest));
+        // Why each one the longest interval after the one before, not after
+        // its bytes have arrived: a pack header alone arrives within the
+        // longest interval at any program_mux_rate of 1 or more.
         let count = time
             .ticks_since(first)
             .saturating_sub(longest)
-            .div_ceil(step)
+            .div_ceil(longest)
             .saturating_add(1);
         Some(Self { first, count })
     }
 
     pub(super) fn iter(self) -> impl Iterator<Item = SystemTimeClock> {
-        let step = SystemTimeClock::ticks_in(FILLING_PACK_INTERVAL);
-        (0..self.count).map(move |index| self.first.add_ticks(index.saturating_mul(step)))
+        let longest = longest_scr_interval();
+        (0..self.count).map(move |index| self.first.add_ticks(index.saturating_mul(longest)))
     }
 }
