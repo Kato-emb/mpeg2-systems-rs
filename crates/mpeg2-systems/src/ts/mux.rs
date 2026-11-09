@@ -89,7 +89,7 @@ use crate::psi::pat;
 use crate::psi::pmt;
 use crate::psi::section;
 use crate::stream_type::StreamType;
-use crate::time::{ClockReference, Timestamp, unwrap_timestamp};
+use crate::time::{ClockReference, SystemTimeClock, Timestamp};
 use crate::ts::Pid;
 use crate::ts::adaptation_field::AdaptationField;
 use crate::ts::packet::{self, PACKET_LENGTH};
@@ -100,13 +100,6 @@ mod packet_writer;
 mod program_definition;
 
 pub use packet_writer::PacketWriter;
-
-/// Ticks of the 27 MHz system clock in a second
-const SYSTEM_CLOCK_FREQUENCY: u128 = 27_000_000;
-
-/// Ticks of the 27 MHz system clock in one tick of the 90 kHz clock of PTS
-/// and DTS
-const TICKS_PER_TIMESTAMP_TICK: u64 = 300;
 
 /// Failure to write a PES packet or a section as Transport Packets, or to
 /// register or multiplex a stream with a [`Muxer`]
@@ -480,39 +473,37 @@ pub struct Muxer {
     finished: bool,
 }
 
-/// The time of the 27 MHz system clock the input has reached, and the times
-/// the PAT and the PMT and the PCR were last sent, each on the line
-/// [`unwrap_timestamp`] places the time stamps on, times 300, and before
-/// [`MuxerConfig::mux_delay`] is taken off
+/// The time of the STC the input has reached, and the times the PAT and the
+/// PMT and the PCR were last sent, before [`MuxerConfig::mux_delay`] is
+/// taken off
 #[derive(Debug, Clone, Copy)]
 struct Schedule {
     // Why not take it from the PES packet each time: a PES packet without a
     // PTS or a DTS, or with an earlier DTS than one before it, must not move
     // it back.
-    clock: u64,
-    psi_sent_at: u64,
+    clock: SystemTimeClock,
+    psi_sent_at: SystemTimeClock,
     // Why not psi_sent_at: the PSI and the PCR are sent at intervals of
     // their own.
-    pcr_sent_at: u64,
+    pcr_sent_at: SystemTimeClock,
     /// Whether more than one PCR has been sent
     // Why not compare pcr_sent_at with the time of the first PCR: PCRs an
     // interval of 0 apart can fall at one time.
     several_pcrs: bool,
 }
 
-/// The times, on the line of [`Schedule`], at which the PAT and the PMT, or
-/// the PCR, are sent before a PES packet: `count` times `step` apart from
-/// `first`
+/// The times at which the PAT and the PMT, or the PCR, are sent before a
+/// PES packet: `count` times `step` ticks of the STC apart from `first`
 #[derive(Debug, Clone, Copy)]
 struct Times {
-    first: u64,
+    first: SystemTimeClock,
     count: u64,
     step: u64,
 }
 
 impl Times {
     /// Returns the one time `at`
-    const fn once(at: u64) -> Self {
+    const fn once(at: SystemTimeClock) -> Self {
         Self {
             first: at,
             count: 1,
@@ -522,11 +513,11 @@ impl Times {
 
     /// Returns the times `interval` apart after `sent_at` up to `clock`, or
     /// `clock` alone when `interval` is 0
-    const fn due(sent_at: u64, clock: u64, interval: u64) -> Self {
-        match clock.saturating_sub(sent_at).checked_div(interval) {
+    const fn due(sent_at: SystemTimeClock, clock: SystemTimeClock, interval: u64) -> Self {
+        match clock.ticks_since(sent_at).checked_div(interval) {
             None => Self::once(clock),
             Some(count) => Self {
-                first: sent_at.saturating_add(interval),
+                first: sent_at.add_ticks(interval),
                 count,
                 step: interval,
             },
@@ -534,13 +525,13 @@ impl Times {
     }
 
     /// Returns the last of the times, `None` when there are none
-    fn last(self) -> Option<u64> {
+    fn last(self) -> Option<SystemTimeClock> {
         let steps = self.count.checked_sub(1)?;
-        Some(self.first.saturating_add(steps.saturating_mul(self.step)))
+        Some(self.first.add_ticks(steps.saturating_mul(self.step)))
     }
 
-    fn iter(self) -> impl Iterator<Item = u64> {
-        (0..self.count).map(move |index| self.first.saturating_add(index.saturating_mul(self.step)))
+    fn iter(self) -> impl Iterator<Item = SystemTimeClock> {
+        (0..self.count).map(move |index| self.first.add_ticks(index.saturating_mul(self.step)))
     }
 }
 
@@ -738,45 +729,46 @@ impl Muxer {
             return Err(Error::MissingPts { pid });
         }
         let timestamp = header.and_then(|header| header.dts.or(header.pts));
-        let unwrapped = timestamp.map(|timestamp| {
-            unwrap_timestamp(
-                schedule.map(|schedule| schedule.clock / TICKS_PER_TIMESTAMP_TICK),
-                timestamp,
-            )
-        });
-        if let (Some(timestamp), Some(unwrapped), Some(previous)) =
-            (timestamp, unwrapped, last_timestamp)
-            && unwrapped < previous
-        {
-            return Err(Error::DecreasingTimestamp {
-                pid,
-                timestamp,
-                previous: Timestamp::from_33_bits(previous),
-            });
-        }
-        let at = unwrapped.map(|unwrapped| unwrapped.saturating_mul(TICKS_PER_TIMESTAMP_TICK));
-        let (psi_times, pcr_times, next) = match *schedule {
-            None => {
-                let clock = at.unwrap_or(ClockReference::MODULUS);
+        let (time, psi_times, pcr_times, next) = match (*schedule, timestamp) {
+            (None, Some(timestamp)) => {
+                let clock = SystemTimeClock::first(timestamp);
                 let next = Schedule {
                     clock,
                     psi_sent_at: clock,
                     pcr_sent_at: clock,
                     several_pcrs: false,
                 };
-                (Times::once(clock), Times::once(clock), next)
+                (Some(clock), Times::once(clock), Times::once(clock), next)
             }
-            Some(schedule) => {
-                let clock = at.map_or(schedule.clock, |at| schedule.clock.max(at));
-                let psi_times = Times::due(schedule.psi_sent_at, clock, ticks(config.psi_interval));
-                let pcr_times = Times::due(schedule.pcr_sent_at, clock, ticks(config.pcr_interval));
+            // Why not a time of its own: the first PES packet given is the
+            // first of its stream, and without a PTS it is refused above;
+            // this names the same refusal.
+            (None, None) => return Err(Error::MissingPts { pid }),
+            (Some(schedule), timestamp) => {
+                let time = timestamp.map(|timestamp| schedule.clock.expand(timestamp));
+                if let (Some(time), Some(timestamp), Some(previous)) =
+                    (time, timestamp, last_timestamp)
+                    && time < previous
+                {
+                    return Err(Error::DecreasingTimestamp {
+                        pid,
+                        timestamp,
+                        previous: previous.to_timestamp(),
+                    });
+                }
+                let clock = time.map_or(schedule.clock, |time| schedule.clock.max(time));
+                let interval = |duration| SystemTimeClock::ticks_in(duration);
+                let psi_times =
+                    Times::due(schedule.psi_sent_at, clock, interval(config.psi_interval));
+                let pcr_times =
+                    Times::due(schedule.pcr_sent_at, clock, interval(config.pcr_interval));
                 let next = Schedule {
                     clock,
                     psi_sent_at: psi_times.last().unwrap_or(schedule.psi_sent_at),
                     pcr_sent_at: pcr_times.last().unwrap_or(schedule.pcr_sent_at),
                     several_pcrs: schedule.several_pcrs || pcr_times.count > 0,
                 };
-                (psi_times, pcr_times, next)
+                (time, psi_times, pcr_times, next)
             }
         };
         let clock = next.clock;
@@ -810,7 +802,7 @@ impl Muxer {
         if filling > config.buffer_limit {
             let previous = schedule.map_or(clock, |schedule| schedule.clock);
             return Err(Error::TimestampGap {
-                gap: clock.saturating_sub(previous) / TICKS_PER_TIMESTAMP_TICK,
+                gap: clock.timestamp_ticks_since(previous),
             });
         }
         let length = filling
@@ -864,13 +856,13 @@ impl Muxer {
             pending,
         )?;
         *schedule = Some(next);
-        if let (Some(unwrapped), Some(stream)) = (
-            unwrapped,
+        if let (Some(time), Some(stream)) = (
+            time,
             self.program
                 .as_mut()
                 .and_then(|program| program.streams.get_mut(stream_index)),
         ) {
-            stream.last_timestamp = Some(unwrapped);
+            stream.last_timestamp = Some(time);
         }
         Ok(())
     }
@@ -890,7 +882,7 @@ impl Muxer {
         {
             let at = schedule
                 .pcr_sent_at
-                .saturating_add(ticks(self.config.pcr_interval))
+                .add_ticks(SystemTimeClock::ticks_in(self.config.pcr_interval))
                 .max(schedule.clock);
             if self
                 .writer
@@ -913,23 +905,9 @@ impl Muxer {
     }
 }
 
-/// Returns the PCR of `at`, a time on the line of [`Schedule`], less
-/// [`MuxerConfig::mux_delay`] and round the circle of
-/// [`ClockReference::MODULUS`]
-fn pcr_at(config: &MuxerConfig, at: u64) -> ClockReference {
-    // Why not `at - mux_delay` wrapping: it wraps at 2^64, which is not a
-    // multiple of the modulus, so both are taken modulo it first.
-    ClockReference::from_ticks(
-        (at % ClockReference::MODULUS)
-            .wrapping_add(ClockReference::MODULUS)
-            .wrapping_sub(ticks(config.mux_delay) % ClockReference::MODULUS),
-    )
-}
-
-/// Returns `duration` in ticks of the 27 MHz system clock
-fn ticks(duration: Duration) -> u64 {
-    u64::try_from(duration.as_nanos().saturating_mul(SYSTEM_CLOCK_FREQUENCY) / 1_000_000_000)
-        .unwrap_or(u64::MAX)
+/// Returns the PCR of `at`, less [`MuxerConfig::mux_delay`]
+fn pcr_at(config: &MuxerConfig, at: SystemTimeClock) -> ClockReference {
+    at.to_clock_reference(config.mux_delay)
 }
 
 #[cfg(test)]

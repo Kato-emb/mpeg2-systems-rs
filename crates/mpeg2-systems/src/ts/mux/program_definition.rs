@@ -10,6 +10,7 @@ use crate::psi::pat::{Program, ProgramAssociationSection, ProgramLoop};
 use crate::psi::pmt::{ElementaryStream, ElementaryStreamLoop, TsProgramMapSection};
 use crate::psi::section::Section;
 use crate::stream_type::StreamType;
+use crate::time::SystemTimeClock;
 use crate::ts::Pid;
 
 /// The program registered, and the streams registered with it
@@ -33,12 +34,11 @@ pub(super) struct Stream {
     pub(super) pid: Pid,
     pub(super) stream_type: StreamType,
     pub(super) es_info: Vec<u8>,
-    /// The DTS (the PTS without one) of the last PES packet given on the
-    /// stream, on the line [`unwrap_timestamp`](crate::time::unwrap_timestamp)
-    /// places it on, `None` before the first
+    /// The time of the STC the DTS (the PTS without one) of the last PES
+    /// packet given on the stream samples, `None` before the first
     // Why not the clock of the muxer: the clock follows every stream, and a
     // stream may run behind another.
-    pub(super) last_timestamp: Option<u64>,
+    pub(super) last_timestamp: Option<SystemTimeClock>,
 }
 
 impl ProgramDefinition {
