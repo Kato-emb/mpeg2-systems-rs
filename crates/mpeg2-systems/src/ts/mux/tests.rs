@@ -32,7 +32,7 @@ fn pes_packet(stream_id: u8, payload: &[u8], dts: Option<u64>) -> PesPacket<'_> 
 
 /// A muxer of `config` with program 1 and a video and an audio stream
 fn muxer_of(config: MuxerConfig) -> Muxer {
-    let mut muxer = Muxer::new(config);
+    let mut muxer = Muxer::new(config).unwrap();
     muxer.add_program(1, pid(PMT_PID), None, &[]).unwrap();
     muxer
         .add_stream(1, pid(VIDEO_PID), StreamType::ISO_IEC_13818_2_VIDEO, &[])
@@ -197,7 +197,7 @@ fn the_pat_and_the_pmt_and_the_pcr_are_sent_again_once_their_interval_has_passed
 
 #[test]
 fn without_a_stream_on_the_pcr_pid_the_pcr_goes_alone() {
-    let mut muxer = Muxer::new(MuxerConfig::new());
+    let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
     muxer
         .add_program(1, pid(PMT_PID), Some(pid(0x01ff)), &[])
         .unwrap();
@@ -223,7 +223,7 @@ fn without_a_stream_on_the_pcr_pid_the_pcr_goes_alone() {
 #[test]
 fn the_pcr_goes_on_the_first_video_stream_or_else_the_first_stream() {
     let first_pcr_pid = |stream_types: &[StreamType]| {
-        let mut muxer = Muxer::new(MuxerConfig::new());
+        let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
         muxer.add_program(1, pid(PMT_PID), None, &[]).unwrap();
         for (pid_value, stream_type) in (0x0100..).zip(stream_types) {
             muxer
@@ -345,7 +345,7 @@ fn a_program_is_refused_for_program_number_0_a_pid_not_free_to_assign_or_its_des
     let mut pmt = TsProgramMapSection::new(1, VersionNumber(0));
     pmt.program_info = broken.as_slice().into();
     let broken_error = pmt.write(&mut Vec::new()).unwrap_err();
-    let mut muxer = Muxer::new(MuxerConfig::new());
+    let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
     let results = [
         muxer.add_program(0, pid(PMT_PID), None, &[]),
         muxer.add_program(1, pid(0x000f), None, &[]),
@@ -369,7 +369,7 @@ fn a_program_is_refused_for_program_number_0_a_pid_not_free_to_assign_or_its_des
 
 #[test]
 fn a_stream_is_refused_off_the_program_on_a_pid_in_use_or_for_its_descriptors() {
-    let mut muxer = Muxer::new(MuxerConfig::new());
+    let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
     let before_the_program = muxer.add_stream(1, pid(VIDEO_PID), StreamType::AVC_VIDEO, &[]);
     muxer.add_program(1, pid(PMT_PID), None, &[]).unwrap();
     muxer
@@ -484,7 +484,7 @@ fn the_packets_counted_are_those_a_payload_unit_is_cut_into() {
 #[test]
 fn the_pcr_is_the_dts_less_the_mux_delay_and_never_goes_back() {
     let mut config = MuxerConfig::new();
-    config.pcr_interval = Duration::ZERO;
+    config.pcr_interval = Duration::from_millis(100);
     let mut muxer = muxer_of(config);
     let mut pcrs = Vec::new();
     for (stream_pid, dts) in [
@@ -762,23 +762,57 @@ fn a_mux_delay_longer_than_the_time_stamp_gives_the_pcr_round_the_circle() {
     assert_eq!(pcrs, [ClockReference::MODULUS - delay]);
 }
 
+/// The shortest `pcr_interval` a muxer takes: one tick of the 27 MHz system
+/// clock, rounded up to whole nanoseconds
+const ONE_TICK: Duration = Duration::from_nanos(38);
+
 #[test]
-fn a_pcr_interval_of_0_sends_a_pcr_each_time_the_clock_moves_and_never_twice_at_one_time() {
+fn a_pcr_interval_of_no_tick_of_the_stc_or_past_0_1_s_is_refused() {
+    let with = |pcr_interval| {
+        let mut config = MuxerConfig::new();
+        config.pcr_interval = pcr_interval;
+        Muxer::new(config).map(|_| ())
+    };
+    let refused = |pcr_interval| Err(Error::PcrInterval { pcr_interval });
+    let longest = Duration::from_millis(100);
+    let past_longest = longest + Duration::from_nanos(1);
+    assert_eq!(
+        [
+            Duration::ZERO,
+            Duration::from_nanos(1),
+            past_longest,
+            longest,
+            ONE_TICK
+        ]
+        .map(with),
+        [
+            refused(Duration::ZERO),
+            refused(Duration::from_nanos(1)),
+            refused(past_longest),
+            Ok(()),
+            Ok(())
+        ]
+    );
+}
+
+#[test]
+fn the_shortest_pcr_interval_never_sends_two_pcrs_of_one_value() {
     let mut config = MuxerConfig::new();
-    config.pcr_interval = Duration::ZERO;
+    config.pcr_interval = ONE_TICK;
     let mut muxer = muxer_of(config);
     let mut out = Vec::new();
     for (stream_pid, stream_id, timestamp) in [
         (VIDEO_PID, 0xe0, 90_000),
         (AUDIO_PID, 0xc0, 90_000),
-        (VIDEO_PID, 0xe0, 91_800),
-        (AUDIO_PID, 0xc0, 91_800),
+        (VIDEO_PID, 0xe0, 90_001),
     ] {
         muxer
             .handle_pes_packet(pid(stream_pid), &stamped(stream_id, timestamp))
             .unwrap();
         muxer.poll_output(&mut out);
     }
+    muxer.finish();
+    muxer.poll_output(&mut out);
     let pcrs: Vec<u64> = out
         .chunks(188)
         .filter_map(|chunk| {
@@ -789,45 +823,9 @@ fn a_pcr_interval_of_0_sends_a_pcr_each_time_the_clock_moves_and_never_twice_at_
                 .map(ClockReference::ticks)
         })
         .collect();
-    assert_eq!(pcrs, [(90_000 - DELAY) * 300, (91_800 - DELAY) * 300]);
-}
-
-#[test]
-fn a_pcr_interval_of_0_never_ends_a_stream_with_a_pcr_of_the_value_before_it() {
-    let finished = |inputs: &[(u16, u8)]| {
-        let mut config = MuxerConfig::new();
-        config.pcr_interval = Duration::ZERO;
-        let mut muxer = muxer_of(config);
-        let mut out = Vec::new();
-        for &(stream_pid, stream_id) in inputs {
-            muxer
-                .handle_pes_packet(pid(stream_pid), &stamped(stream_id, 90_000))
-                .unwrap();
-            muxer.poll_output(&mut out);
-        }
-        muxer.finish();
-        muxer.poll_output(&mut out);
-        let pcrs: Vec<u64> = out
-            .chunks(188)
-            .filter_map(|chunk| {
-                TransportPacket::read(chunk)
-                    .unwrap()
-                    .adaptation_field
-                    .and_then(|field| field.program_clock_reference)
-                    .map(ClockReference::ticks)
-            })
-            .collect();
-        let rising = pcrs.windows(2).all(|pair| match pair {
-            [earlier, later] => later > earlier,
-            _ => false,
-        });
-        (pcrs.len(), rising)
-    };
-    assert_eq!(
-        [
-            finished(&[(VIDEO_PID, 0xe0)]),
-            finished(&[(VIDEO_PID, 0xe0), (AUDIO_PID, 0xc0)])
-        ],
-        [(2, true), (2, true)]
-    );
+    let rising = pcrs.windows(2).all(|pair| match pair {
+        [earlier, later] => later > earlier,
+        _ => false,
+    });
+    assert_eq!((pcrs.len(), rising), (301, true));
 }

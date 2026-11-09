@@ -99,7 +99,7 @@ mod tests {
     /// file of `name`, and returns its path
     fn multiplexed_of(name: &str, inputs: Vec<Input>) -> String {
         let pid = |value: u16| Pid::try_from(value).unwrap();
-        let mut muxer = Muxer::new(MuxerConfig::new());
+        let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
         muxer.add_program(1, pid(PMT_PID), None, &[]).unwrap();
         muxer
             .add_stream(1, pid(VIDEO_PID), StreamType::ISO_IEC_13818_2_VIDEO, &[])

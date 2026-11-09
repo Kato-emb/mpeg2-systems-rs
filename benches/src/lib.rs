@@ -118,7 +118,7 @@ pub fn mux_pes_packets(writer: &mut PacketWriter, access_unit: &[u8], out: &mut 
 /// measure.
 #[must_use]
 pub fn registered_muxer() -> Muxer {
-    let mut muxer = Muxer::new(MuxerConfig::new());
+    let mut muxer = Muxer::new(MuxerConfig::new()).expect("the default settings are taken");
     let pid = |value| Pid::try_from(value).expect("a PID");
     muxer
         .add_program(1, pid(0x1000), None, &[])

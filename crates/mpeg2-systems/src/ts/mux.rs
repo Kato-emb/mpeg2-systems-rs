@@ -96,6 +96,9 @@ use crate::ts::packet::{self, PACKET_LENGTH};
 use packet_writer::{Stuffing, packet_count, section_packets_length};
 use program_definition::{ProgramDefinition, Stream};
 
+/// The longest time from one PCR to the next, ISO/IEC 13818-1 §2.7.2
+const LONGEST_PCR_INTERVAL: Duration = Duration::from_millis(100);
+
 mod packet_writer;
 mod program_definition;
 
@@ -167,6 +170,12 @@ pub enum Error {
     UnregisteredPid {
         /// The PID given
         pid: Pid,
+    },
+    /// The `pcr_interval` set is shorter than a tick of the 27 MHz system
+    /// clock, or longer than the 0.1 s ISO/IEC 13818-1 §2.7.2 allows
+    PcrInterval {
+        /// The `pcr_interval` set
+        pcr_interval: Duration,
     },
     /// The first PES packet of a stream has no PTS, which ISO/IEC 13818-1
     /// §2.7.5 asks of it
@@ -243,6 +252,10 @@ impl fmt::Display for Error {
                 "PID {:#06x} carries no registered stream",
                 pid.get()
             ),
+            Self::PcrInterval { pcr_interval } => write!(
+                formatter,
+                "pcr_interval {pcr_interval:?} is not from a tick of the system clock to 0.1 s"
+            ),
             Self::MissingPts { pid } => write!(
                 formatter,
                 "the first PES packet on PID {:#06x} has no PTS",
@@ -286,6 +299,7 @@ impl core::error::Error for Error {
             | Self::UnregisteredProgram { .. }
             | Self::PidInUse { .. }
             | Self::UnregisteredPid { .. }
+            | Self::PcrInterval { .. }
             | Self::MissingPts { .. }
             | Self::DecreasingTimestamp { .. }
             | Self::TimestampGap { .. }
@@ -318,6 +332,11 @@ pub struct MuxerConfig {
     /// The time from one PCR to the next (40 ms by default, the threshold
     /// of the `PCR_repetition_error` of ETSI TR 101 290, shorter than the
     /// 0.1 s ISO/IEC 13818-1 §2.7.2 allows)
+    ///
+    /// [`Muxer::new`] takes from one tick of the 27 MHz system clock to
+    /// 0.1 s: no longer than §2.7.2 allows, and not so short that two PCRs
+    /// fall at one time, between which the rate of §2.4.2.2 equation 2-4 is
+    /// not defined.
     pub pcr_interval: Duration,
     /// How far the PCR runs behind the DTS of the PES packet it is sent with,
     /// or its PTS when it has no DTS (0.7 s by default)
@@ -403,7 +422,7 @@ impl MuxerConfig {
 /// use mpeg2_systems::ts::mux::{Muxer, MuxerConfig};
 ///
 /// let (pmt_pid, video_pid) = (Pid::try_from(0x1000)?, Pid::try_from(0x0100)?);
-/// let mut muxer = Muxer::new(MuxerConfig::new());
+/// let mut muxer = Muxer::new(MuxerConfig::new())?;
 /// let mut stream = Vec::new();
 ///
 /// // Register the program and its stream
@@ -511,16 +530,11 @@ impl Times {
         }
     }
 
-    /// Returns the times `interval` apart after `sent_at` up to `clock`, or,
-    /// when `interval` is 0, `clock` alone if it is after `sent_at`
+    /// Returns the times `interval` apart after `sent_at` up to `clock`, or
+    /// `clock` alone when `interval` is 0
     const fn due(sent_at: SystemTimeClock, clock: SystemTimeClock, interval: u64) -> Self {
         match clock.ticks_since(sent_at).checked_div(interval) {
-            None if clock.ticks_since(sent_at) > 0 => Self::once(clock),
-            None => Self {
-                first: clock,
-                count: 0,
-                step: 0,
-            },
+            None => Self::once(clock),
             Some(count) => Self {
                 first: sent_at.add_ticks(interval),
                 count,
@@ -542,9 +556,18 @@ impl Times {
 
 impl Muxer {
     /// Returns a muxer of `config` with nothing registered
-    #[must_use]
-    pub const fn new(config: MuxerConfig) -> Self {
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// * [`PcrInterval`](Error::PcrInterval):
+    ///   [`MuxerConfig::pcr_interval`] is shorter than a tick of the 27 MHz
+    ///   system clock, or longer than 0.1 s.
+    pub fn new(config: MuxerConfig) -> Result<Self, Error> {
+        let pcr_interval = config.pcr_interval;
+        if SystemTimeClock::ticks_in(pcr_interval) == 0 || pcr_interval > LONGEST_PCR_INTERVAL {
+            return Err(Error::PcrInterval { pcr_interval });
+        }
+        Ok(Self {
             config,
             writer: PacketWriter::new(),
             program: None,
@@ -553,7 +576,7 @@ impl Muxer {
             scratch: Vec::new(),
             section_bodies: Vec::new(),
             finished: false,
-        }
+        })
     }
 
     /// Registers the program, its PMT on `program_map_pid`
@@ -763,13 +786,8 @@ impl Muxer {
                 }
                 let clock = time.map_or(schedule.clock, |time| schedule.clock.max(time));
                 let interval = |duration| SystemTimeClock::ticks_in(duration);
-                // Why not `due` for an interval of 0: PATs and PMTs at one
-                // time are allowed, where PCRs at one time leave the rate
-                // between them unknown (§2.4.2.2, equation 2-4).
-                let psi_times = match interval(config.psi_interval) {
-                    0 => Times::once(clock),
-                    psi_interval => Times::due(schedule.psi_sent_at, clock, psi_interval),
-                };
+                let psi_times =
+                    Times::due(schedule.psi_sent_at, clock, interval(config.psi_interval));
                 let pcr_times =
                     Times::due(schedule.pcr_sent_at, clock, interval(config.pcr_interval));
                 let next = Schedule {
@@ -880,10 +898,9 @@ impl Muxer {
     /// Appends to `out` all the Transport Packets that can be given
     ///
     /// After [`finish`](Self::finish), a stream that carries one PCR only is
-    /// given a second one, [`MuxerConfig::pcr_interval`] after the first (a
-    /// tick of the 90 kHz clock of PTS and DTS when the interval is 0) or at
-    /// the time of the last PES packet if that is later, so that a decoder
-    /// can take the rate of the stream from the two.
+    /// given a second one, [`MuxerConfig::pcr_interval`] after the first or
+    /// at the time of the last PES packet if that is later, so that a
+    /// decoder can take the rate of the stream from the two.
     pub fn poll_output(&mut self, out: &mut Vec<u8>) {
         if let (true, Some(schedule), Some(pcr_pid)) = (
             self.finished,
@@ -893,15 +910,7 @@ impl Muxer {
         {
             let at = schedule
                 .pcr_sent_at
-                .add_ticks(match SystemTimeClock::ticks_in(self.config.pcr_interval) {
-                    // Why not a tick of the STC for an interval of 0: the
-                    // last Transport Packet would then have to arrive within
-                    // a tick far shorter than its bytes take at any rate a
-                    // Transport Stream carries; a tick of the PTS and the DTS
-                    // is the shortest step the time stamps themselves take.
-                    0 => SystemTimeClock::TICKS_PER_TIMESTAMP_TICK,
-                    step => step,
-                })
+                .add_ticks(SystemTimeClock::ticks_in(self.config.pcr_interval))
                 .max(schedule.clock);
             if self
                 .writer

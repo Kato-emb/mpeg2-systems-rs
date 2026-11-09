@@ -69,7 +69,7 @@ pub(crate) fn inputs() -> Vec<Input> {
 
 /// A muxer of `config` with program 1, its video and its audio stream
 pub(crate) fn muxer(config: MuxerConfig) -> Muxer {
-    let mut muxer = Muxer::new(config);
+    let mut muxer = Muxer::new(config).unwrap();
     muxer.add_program(1, pid(PMT_PID), None, &[]).unwrap();
     muxer
         .add_stream(1, pid(VIDEO_PID), StreamType::ISO_IEC_13818_2_VIDEO, &[])

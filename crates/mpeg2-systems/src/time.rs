@@ -189,7 +189,7 @@ pub(crate) struct SystemTimeClock(u64);
 #[cfg(feature = "alloc")]
 impl SystemTimeClock {
     /// Ticks of the STC in one tick of the 90 kHz clock of PTS and DTS
-    pub(crate) const TICKS_PER_TIMESTAMP_TICK: u64 = 300;
+    const TICKS_PER_TIMESTAMP_TICK: u64 = 300;
 
     /// Returns the time `timestamp` samples, the first time placed
     pub(crate) const fn first(timestamp: Timestamp) -> Self {
