@@ -38,13 +38,13 @@ mod tests {
     use mpeg2_systems::stream_type::StreamType;
     use mpeg2_systems::time::ClockReference;
     use mpeg2_systems::ts::Pid;
-    use mpeg2_systems::ts::demux::{Event, PacketSize};
+    use mpeg2_systems::ts::demux::{DemuxerConfig, Event, PacketSize};
     use mpeg2_systems::ts::mux as ts_mux;
     use mpeg2_systems::ts::packet::TransportPacket;
 
     use crate::tools::{
         ProgramAssociation, ProgramMap, Timing, ffprobe, fixture_path, integer, pes_packet,
-        pes_packets_of_188, run, tables_tstables, timing, ts_events,
+        pes_packets_of_188, run, tables_tstables, timing, ts_events, ts_events_with,
     };
 
     /// A Transport Stream fixture: its name, the offset of its first
@@ -185,6 +185,27 @@ mod tests {
             pmt_pids.sort_unstable();
             let probed_pids: Vec<_> = streams.into_keys().collect();
             assert_eq!((pmt_pids, read), (probed_pids, probed), "{name}");
+        }
+    }
+
+    #[test]
+    #[ignore = "runs ffprobe from FFmpeg"]
+    fn each_transport_stream_has_the_pes_packets_ffprobe_reads_with_no_pid_subscribed_to() {
+        for (name, _, _) in TRANSPORT_STREAMS {
+            let path = fixture_path(name);
+            let stream = std::fs::read(&path).unwrap();
+            let config = DemuxerConfig::default().with_subscribe_elementary_pids(true);
+            let mut read: BTreeMap<u64, Vec<Timing>> = BTreeMap::new();
+            for (pid, timing) in ts_events_with(config, &stream, &[], |event| {
+                let Event::PesPacket { pid, packet, .. } = event else {
+                    return None;
+                };
+                Some((u64::from(pid.get()), timing(&packet)))
+            }) {
+                read.entry(pid).or_default().push(timing);
+            }
+            let (_, probed) = ffprobe(&path, None, false);
+            assert_eq!(read, probed, "{name}");
         }
     }
 

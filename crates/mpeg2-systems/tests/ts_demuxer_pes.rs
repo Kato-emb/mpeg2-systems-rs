@@ -22,7 +22,17 @@ mod support;
     reason = "streams are cut at constant offsets well inside their length"
 )]
 mod tests {
+    use core::num::NonZeroU16;
+
+    use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
+    use mpeg2_systems::psi::TableId;
+    use mpeg2_systems::psi::pat::{Program, ProgramAssociationSection, ProgramLoop};
+    use mpeg2_systems::psi::pmt::{ElementaryStream, ElementaryStreamLoop, TsProgramMapSection};
+    use mpeg2_systems::psi::section::{Section, SectionSyntax};
+    use mpeg2_systems::stream_type::StreamType;
+    use mpeg2_systems::time::Timestamp;
     use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Error, Event};
+    use mpeg2_systems::ts::mux::PacketWriter;
     use mpeg2_systems::ts::packet::TransportPacket;
     use mpeg2_systems::ts::{ContinuityCounter, Pid};
 
@@ -329,5 +339,271 @@ mod tests {
                 }
             ]
         );
+    }
+
+    fn pid(value: u16) -> Pid {
+        Pid::try_from(value).unwrap()
+    }
+
+    /// The events of `stream`, handed over in chunks of `chunk_length`, with
+    /// `on_program_map` given the demuxer and the elementary PIDs not carried
+    /// in sections of each [`Event::TsProgramMapSection`], once taken
+    fn demux_reacting(
+        config: DemuxerConfig,
+        stream: &[u8],
+        chunk_length: usize,
+        on_program_map: impl Fn(&mut Demuxer, Vec<Pid>),
+    ) -> Vec<Seen> {
+        let mut demuxer = Demuxer::new(config);
+        let mut seen = Vec::new();
+        let take = |demuxer: &mut Demuxer, seen: &mut Vec<Seen>| {
+            while let Some(event) = demuxer.poll_event() {
+                let mut pids = Vec::new();
+                if let Event::TsProgramMapSection { section, .. } = &event {
+                    pids.extend(
+                        section
+                            .elementary_streams
+                            .iter()
+                            .map_while(Result::ok)
+                            .filter(|stream| !stream.stream_type.is_carried_in_sections())
+                            .map(|stream| stream.elementary_pid),
+                    );
+                }
+                let is_program_map = matches!(event, Event::TsProgramMapSection { .. });
+                seen.push(seen_event(event));
+                if is_program_map {
+                    on_program_map(demuxer, pids);
+                }
+            }
+        };
+        for chunk in stream.chunks(chunk_length) {
+            demuxer.handle_input(chunk);
+            take(&mut demuxer, &mut seen);
+        }
+        demuxer.finish();
+        take(&mut demuxer, &mut seen);
+        seen
+    }
+
+    fn subscribing(demuxer: &mut Demuxer, pids: Vec<Pid>) {
+        for pid in pids {
+            demuxer.subscribe_pes(pid);
+        }
+    }
+
+    fn automatic() -> DemuxerConfig {
+        DemuxerConfig::default().with_subscribe_elementary_pids(true)
+    }
+
+    /// A stream built packet by packet: null packets enough for the demuxer
+    /// to find the packet grid, a PAT of program 1, its PMTs on
+    /// `program_map_pid`, and PES packets
+    struct Stream {
+        writer: PacketWriter,
+        program_map_pid: Pid,
+        bytes: Vec<u8>,
+    }
+
+    impl Stream {
+        fn new(program_map_pid: u16) -> Self {
+            let mut stream = Self {
+                writer: PacketWriter::new(),
+                program_map_pid: pid(program_map_pid),
+                bytes: Vec::new(),
+            };
+            for _ in 0..5 {
+                stream.bytes.extend([0x47, 0x1f, 0xff, 0x10]);
+                stream.bytes.extend([0xff; 184]);
+            }
+            let mut programs = Vec::new();
+            ProgramLoop::write_from(
+                [Program::ProgramMap {
+                    program_number: NonZeroU16::MIN,
+                    program_map_pid: stream.program_map_pid,
+                }],
+                &mut programs,
+            )
+            .unwrap();
+            let pat = ProgramAssociationSection::new(1, version(0))
+                .with_programs(ProgramLoop::from(programs.as_slice()));
+            stream
+                .writer
+                .write_program_association_section(&pat, &mut stream.bytes)
+                .unwrap();
+            stream
+        }
+
+        /// Appends a PMT of `version_number` naming `(stream_type, pid)`s
+        fn program_map(mut self, version_number: u8, streams: &[(u8, u16)]) -> Self {
+            let mut entries = Vec::new();
+            ElementaryStreamLoop::write_from(
+                streams.iter().map(|&(stream_type, elementary_pid)| {
+                    ElementaryStream::new(StreamType::from(stream_type), pid(elementary_pid))
+                }),
+                &mut entries,
+            )
+            .unwrap();
+            let pmt = TsProgramMapSection::new(1, version(version_number))
+                .with_elementary_streams(ElementaryStreamLoop::from(entries.as_slice()));
+            self.writer
+                .write_ts_program_map_section(self.program_map_pid, &pmt, &mut self.bytes)
+                .unwrap();
+            self
+        }
+
+        /// Appends a section of `TS_program_map_section`'s `table_id` and
+        /// syntax for program 1, version `version_number`, whose body is
+        /// `body` as given
+        fn raw_program_map(mut self, version_number: u8, body: &[u8]) -> Self {
+            let section = Section::new(TableId::TS_PROGRAM_MAP, body)
+                .with_syntax(SectionSyntax::new(1, version(version_number), true, 0, 0));
+            self.writer
+                .write_section(self.program_map_pid, &section, &mut self.bytes)
+                .unwrap();
+            self
+        }
+
+        /// Appends a PES packet of three payload bytes with a PTS on `pid`
+        fn pes(mut self, elementary_pid: u16) -> Self {
+            let packet = PesPacket::new(StreamId::from(0xe0), &[0xaa; 3]).with_optional_header(
+                OptionalHeader::new().with_pts(Timestamp::try_from(90_000).unwrap()),
+            );
+            self.writer
+                .write_pes_packet(pid(elementary_pid), &packet, None, &mut self.bytes)
+                .unwrap();
+            self
+        }
+    }
+
+    #[test]
+    fn with_the_setting_the_elementary_streams_of_the_program_map_are_reassembled_unasked() {
+        let seen = demux_reacting(automatic(), STANDARD_188, STANDARD_188.len(), |_, _| {});
+
+        assert_eq!(pes_packets(seen), fixture_pes_packets(188, 0));
+    }
+
+    #[test]
+    fn the_setting_gives_the_events_of_subscribing_on_each_program_map_event() {
+        for stream in [STANDARD_188, TIMESTAMPED_192, REED_SOLOMON_204] {
+            for chunk_length in [1, 188, 1000, stream.len()] {
+                assert_eq!(
+                    demux_reacting(automatic(), stream, chunk_length, |_, _| {}),
+                    demux_reacting(DemuxerConfig::default(), stream, chunk_length, subscribing),
+                    "{} bytes in chunks of {chunk_length}",
+                    stream.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_stream_type_carried_in_sections_is_not_subscribed_to() {
+        let stream = Stream::new(0x1000)
+            .program_map(0, &[(0x02, 0x100), (0x05, 0x102)])
+            .pes(0x100)
+            .pes(0x102)
+            .bytes;
+
+        let seen = demux_reacting(automatic(), &stream, stream.len(), |_, _| {});
+
+        assert_eq!(
+            (of_pid(seen.clone(), 0x100).len(), of_pid(seen, 0x102)),
+            (1, Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_pid_the_next_program_map_leaves_out_stays_subscribed_to() {
+        let stream = Stream::new(0x1000)
+            .program_map(0, &[(0x02, 0x100)])
+            .program_map(1, &[(0x02, 0x101)])
+            .pes(0x100)
+            .pes(0x101)
+            .bytes;
+
+        let seen = demux_reacting(automatic(), &stream, stream.len(), |_, _| {});
+
+        assert_eq!(
+            (of_pid(seen.clone(), 0x100).len(), of_pid(seen, 0x101).len()),
+            (1, 1)
+        );
+    }
+
+    #[test]
+    fn a_pid_unsubscribed_from_on_the_program_map_event_gives_no_pes_packet() {
+        let stream = Stream::new(0x1000)
+            .program_map(0, &[(0x02, 0x100), (0x02, 0x101)])
+            .pes(0x100)
+            .pes(0x101)
+            .bytes;
+
+        let seen = demux_reacting(automatic(), &stream, stream.len(), |demuxer, _| {
+            demuxer.unsubscribe_pes(pid(0x100));
+        });
+
+        assert_eq!(
+            (of_pid(seen.clone(), 0x100), of_pid(seen, 0x101).len()),
+            (Vec::new(), 1)
+        );
+    }
+
+    #[test]
+    fn an_entry_that_cannot_be_read_ends_the_elementary_pids_taken() {
+        // PCR_PID 0x100, no program info, an entry of PID 0x100, then one cut
+        // before its ES_info_length naming PID 0x101
+        let body = [
+            0xe1, 0x00, 0xf0, 0x00, 0x02, 0xe1, 0x00, 0xf0, 0x00, 0x02, 0xe1, 0x01,
+        ];
+        let stream = Stream::new(0x1000)
+            .raw_program_map(0, &body)
+            .pes(0x100)
+            .pes(0x101)
+            .bytes;
+
+        let seen = demux_reacting(automatic(), &stream, stream.len(), |_, _| {});
+
+        assert_eq!(
+            (of_pid(seen.clone(), 0x100).len(), of_pid(seen, 0x101)),
+            (1, Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_section_that_fails_as_a_program_map_section_subscribes_to_nothing() {
+        // A body shorter than PCR_PID and program_info_length
+        let stream = Stream::new(0x1000)
+            .raw_program_map(0, &[0xe1])
+            .pes(0x100)
+            .bytes;
+
+        let seen = demux_reacting(automatic(), &stream, stream.len(), |_, _| {});
+
+        assert_eq!(
+            (
+                seen.iter()
+                    .any(|seen| matches!(seen, Seen::Error(Error::TsProgramMapSection { .. }))),
+                pes_packets(seen)
+            ),
+            (true, Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_pid_unsubscribed_from_is_subscribed_to_again_by_the_next_version_naming_it() {
+        let stream = Stream::new(0x1000)
+            .program_map(0, &[(0x02, 0x100)])
+            .pes(0x100)
+            .program_map(1, &[(0x02, 0x100)])
+            .pes(0x100)
+            .bytes;
+        let unsubscribed_once = core::cell::Cell::new(false);
+
+        let seen = demux_reacting(automatic(), &stream, stream.len(), |demuxer, _| {
+            if !unsubscribed_once.replace(true) {
+                demuxer.unsubscribe_pes(pid(0x100));
+            }
+        });
+
+        assert_eq!(of_pid(seen, 0x100).len(), 1);
     }
 }

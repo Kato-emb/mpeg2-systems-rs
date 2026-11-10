@@ -55,7 +55,8 @@ pub(crate) enum Seen {
         last_section_number: u8,
         pcr_pid: Option<u16>,
         program_info: Vec<u8>,
-        /// `stream_type`, `elementary_PID` and `ES_info` of each stream
+        /// `stream_type`, `elementary_PID` and `ES_info` of each stream, up
+        /// to the first that cannot be read
         elementary_streams: Vec<(u8, u16, Vec<u8>)>,
     },
     CaSection {
@@ -128,7 +129,7 @@ pub(crate) fn seen_event(event: Event<'_>) -> Seen {
             elementary_streams: section
                 .elementary_streams
                 .iter()
-                .map(Result::unwrap)
+                .map_while(Result::ok)
                 .map(|stream| {
                     (
                         stream.stream_type.get(),
