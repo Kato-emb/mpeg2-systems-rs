@@ -1,5 +1,6 @@
-//! This crate's reading of the fixtures, and what its muxers write, checked
-//! against TSDuck and ffprobe, which read the same bytes independently
+//! This crate's reading of the fixtures, and what its multiplexing and
+//! packetizing layers write, checked against TSDuck and ffprobe, which read
+//! the same bytes independently
 //!
 //! The tests run `tstables`, `tsanalyze` and `ffprobe` from `PATH`, so they
 //! are ignored unless asked for; once asked for, a tool missing is a failure.

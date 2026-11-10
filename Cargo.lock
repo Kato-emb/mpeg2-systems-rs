@@ -29,6 +29,7 @@ name = "examples"
 version = "0.0.0"
 dependencies = [
  "mpeg2-systems",
+ "serde_json",
 ]
 
 [[package]]

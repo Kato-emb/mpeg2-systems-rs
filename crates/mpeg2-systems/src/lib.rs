@@ -15,7 +15,16 @@
 //!   allocation.
 //! - With the `alloc` feature, [`ts::demux`] and [`ps::demux`] read a stream
 //!   handed over in pieces of any length, and [`ts::mux`] and [`ps::mux`]
-//!   write one.
+//!   write one through either of two entry points:
+//!   - The multiplexing layer, [`ts::mux::Muxer`] and [`ps::mux::Muxer`],
+//!     takes the PES packets of the streams registered with it and builds
+//!     the stream around them: the PAT, the PMT and the PCRs of a Transport
+//!     Stream, or the packs, their SCRs, the system header and the program
+//!     stream map of a Program Stream.
+//!   - The packetizing layer, [`ts::mux::PacketWriter`] and
+//!     [`ps::mux::PackWriter`], writes each element it is given in the order
+//!     given; when to send the PSI and the PCRs, and where a pack starts, are
+//!     up to the caller.
 //!
 //! Each layer is usable alone: a reader of its own is made of the syntax
 //! layer, as the demuxers are.
@@ -107,8 +116,61 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! Writing a Transport Stream of one program, a PAT, a PMT, a PCR on its own
-//! and an access unit, and reading it back:
+//! Multiplexing an access unit into a Transport Stream through the
+//! multiplexing layer, and reading it back:
+//!
+//! ```
+//! # #[cfg(feature = "alloc")]
+//! # {
+//! use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
+//! use mpeg2_systems::stream_type::StreamType;
+//! use mpeg2_systems::time::Timestamp;
+//! use mpeg2_systems::ts::Pid;
+//! use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event};
+//! use mpeg2_systems::ts::mux::{Muxer, MuxerConfig};
+//!
+//! let (pmt_pid, video_pid) = (Pid::try_from(0x1000)?, Pid::try_from(0x0100)?);
+//! let mut muxer = Muxer::new(MuxerConfig::new())?;
+//! let mut stream = Vec::new();
+//! // Register the program and its stream before the first PES packet
+//! muxer.add_program(1, pmt_pid, None, &[])?;
+//! muxer.add_stream(1, video_pid, StreamType::ISO_IEC_13818_2_VIDEO, &[])?;
+//! // Give an access unit in a PES packet, and take the Transport Packets
+//! let access_unit = vec![0xaa; 1_000];
+//! let mut header = OptionalHeader::new();
+//! header.pts = Some(Timestamp::try_from(90_000)?);
+//! let mut packet = PesPacket::new(StreamId::from(0xe0), &access_unit);
+//! packet.optional_header = Some(header);
+//! muxer.handle_pes_packet(video_pid, &packet)?;
+//! muxer.poll_output(&mut stream);
+//! // End the stream, and take what the muxer still holds
+//! muxer.finish();
+//! muxer.poll_output(&mut stream);
+//!
+//! // Read back, subscribing to the PIDs the PMT names
+//! let mut demuxer = Demuxer::new(DemuxerConfig::default());
+//! demuxer.handle_input(&stream);
+//! demuxer.finish();
+//! let (mut pids, mut payloads) = (Vec::new(), Vec::new());
+//! while let Some(event) = demuxer.poll_event() {
+//!     if let Event::TsProgramMapSection { section, .. } = &event {
+//!         pids.extend(section.elementary_streams.iter().flatten().map(|stream| stream.elementary_pid));
+//!     } else if let Event::PesPacket { packet, .. } = &event {
+//!         payloads.push(packet.payload.to_vec());
+//!     }
+//!     drop(event);
+//!     for pid in pids.drain(..) {
+//!         demuxer.subscribe_pes(pid);
+//!     }
+//! }
+//! assert_eq!(payloads, [access_unit]);
+//! # }
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! Writing a Transport Stream element by element through the packetizing
+//! layer, a PAT, a PMT, a PCR on its own and an access unit, and reading it
+//! back:
 //!
 //! ```
 //! # #[cfg(feature = "alloc")]
@@ -202,19 +264,22 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! The programs `examples/` holds dump a stream event by event and remux one
-//! through the muxers: `cargo run -p examples --example ts_dump -- <file>`.
+//! The programs `examples/` holds dump a stream event by event, write one
+//! back through the packetizing layer, and multiplex the PES packets of a
+//! Program Stream into a Transport Stream through the multiplexing layer:
+//! `cargo run -p examples --example ts_dump -- <file>`.
 //!
 //! # Modules
 //!
 //! - [`ts`]: the Transport Packet, its adaptation field, the PID and the
-//!   continuity counter, and the Transport Stream demuxer and muxer
+//!   continuity counter, and the Transport Stream demuxer, muxer and packet
+//!   writer
 //! - [`pes`]: the PES packet and its optional header
 //! - [`psi`]: the section, and the PAT, the PMT and the CAT
 //! - [`descriptor`]: the descriptor loop, and the descriptors read into their
 //!   fields
 //! - [`ps`]: the pack header, the system header and the program stream map,
-//!   and the Program Stream demuxer and muxer
+//!   and the Program Stream demuxer, muxer and pack writer
 //! - [`time`]: the PTS and DTS, and the PCR and SCR
 //! - [`crc`]: the `CRC_32` of a section
 //! - [`field`]: the bit-field reader and writer the syntax types are made of
@@ -222,8 +287,9 @@
 //!
 //! # Features
 //!
-//! - `alloc` (default): the demuxers and the muxers, and the writers of the
-//!   syntax types. Without it, the syntax layer reads with no allocator.
+//! - `alloc` (default): the demuxers, the multiplexing and packetizing
+//!   layers, and the writers of the syntax types. Without it, the syntax
+//!   layer reads with no allocator.
 
 #![no_std]
 
@@ -241,3 +307,8 @@ pub mod psi;
 pub mod stream_type;
 pub mod time;
 pub mod ts;
+
+/// The Rust examples of the workspace's `README.md`, run as doctests
+#[cfg(all(doctest, feature = "alloc"))]
+#[doc = include_str!("../../../README.md")]
+struct ReadmeDoctests;

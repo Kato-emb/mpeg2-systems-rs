@@ -40,10 +40,6 @@ jobs:
       - run: cargo fmt --manifest-path benches/Cargo.toml --check
       - run: cargo fmt --manifest-path fuzz/Cargo.toml --check
       - uses: crate-ci/typos@4c8b7f51ca60df14e3c5ca82770dfbbe6c3dae85 # v1.52.0
-      # The README's examples are not run themselves; the crate doc runs the
-      # same code as doctests, so the two must not drift apart.
-      - name: Keep the README's examples those of the crate doc
-        run: scripts/check-readme-examples.sh
       # A TODO/FIXME must carry an issue link or owner: `TODO(#12):`, `TODO(name):`, or a URL.
       - name: Forbid bare TODO/FIXME markers
         run: |
@@ -275,7 +271,8 @@ jobs:
       - run: cargo fuzz run "$TARGET" --target x86_64-unknown-linux-gnu --sanitizer leak "$RUNNER_TEMP/corpus" "$RUNNER_TEMP/seeds" -- -max_total_time=180
 
   # The ignored tests, which compare this crate's reading of the fixtures, and
-  # what its muxer writes, with TSDuck's and ffprobe's.
+  # what its multiplexing and packetizing layers write, with TSDuck's and
+  # ffprobe's.
   conformance:
     # Not ubuntu-latest: the TSDuck package is built for Ubuntu 24.04, and the
     # libraries it links to are taken from the runner's release.
