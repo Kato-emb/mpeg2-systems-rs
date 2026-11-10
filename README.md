@@ -19,31 +19,28 @@ Rust: the Transport Stream and the Program Stream.
 ## Reading a Transport Stream
 
 No type does I/O: the caller hands the bytes it has read to a demuxer in
-pieces of any length, takes the events after each piece, and at the end of
-the input calls `finish` and takes the events left. Handing input over never
-fails; what the demuxer cannot read is reported in an event. An event
+pieces of any length, calls `finish` at the end of the input, and takes the
+events. Handing input over never fails; what the demuxer cannot read is
+reported in an event. The demuxer reads the bytes as the events are taken,
+so a subscription made at a PMT applies from the packet after it. An event
 borrows the bytes it reports from the demuxer, so the PIDs of a PMT are
-copied out of it before they are subscribed to.
+copied out of it before they are subscribed to. This one hands over a whole
+file at once.
 
 ```rust
 use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event};
 
 let stream = std::fs::read("tests/fixtures/188.ts")?;
 let mut demuxer = Demuxer::new(DemuxerConfig::default());
+demuxer.handle_input(&stream);
+demuxer.finish();
 let mut payloads = Vec::new();
-// Each piece of input, then the end of it
-for piece in stream.chunks(7 * 188).map(Some).chain([None]) {
-    match piece {
-        Some(bytes) => demuxer.handle_input(bytes),
-        None => demuxer.finish(),
-    }
-    while let Some(event) = demuxer.poll_event() {
-        if let Event::TsProgramMapSection { section, .. } = &event {
-            let pids: Vec<_> = section.elementary_streams.iter().flatten().map(|stream| stream.elementary_pid).collect();
-            pids.into_iter().for_each(|pid| demuxer.subscribe_pes(pid));
-        } else if let Event::PesPacket { packet, .. } = &event {
-            payloads.push(packet.payload.to_vec());
-        }
+while let Some(event) = demuxer.poll_event() {
+    if let Event::TsProgramMapSection { section, .. } = &event {
+        let pids: Vec<_> = section.elementary_streams.iter().flatten().map(|stream| stream.elementary_pid).collect();
+        pids.into_iter().for_each(|pid| demuxer.subscribe_pes(pid));
+    } else if let Event::PesPacket { packet, .. } = &event {
+        payloads.push(packet.payload.to_vec());
     }
 }
 assert_eq!(payloads.len(), 5);
