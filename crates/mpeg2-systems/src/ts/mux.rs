@@ -636,11 +636,8 @@ impl Muxer {
         let pcr_due = on_pcr_pid && pcr_times.last() == Some(clock);
         let pcr_at_clock = clock.to_clock_reference(config.mux_delay);
         let after_last_pcr = schedule.is_none_or(|schedule| clock > schedule.pcr_sent_at);
-        let pcr_in_packet = fields.pcr_in_first_packet(
-            pid,
-            (on_pcr_pid, pcr_due),
-            (pcr_at_clock, after_last_pcr),
-        )?;
+        let pcr_in_packet =
+            fields.pcr_in_first_packet(pid, on_pcr_pid, pcr_due, pcr_at_clock, after_last_pcr)?;
         let adaptation_field = fields.adaptation_field(pcr_in_packet.then_some(pcr_at_clock));
         let pcrs_alone = pcr_times
             .count

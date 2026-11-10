@@ -118,8 +118,10 @@ impl<'a> TransportPacketFields<'a> {
     pub(super) fn pcr_in_first_packet(
         &self,
         pid: Pid,
-        (on_pcr_pid, pcr_due): (bool, bool),
-        (program_clock_reference, after_last_pcr): (ClockReference, bool),
+        on_pcr_pid: bool,
+        pcr_due: bool,
+        program_clock_reference: ClockReference,
+        after_last_pcr: bool,
     ) -> Result<bool, Error> {
         let length = self.transport_private_data.map_or(0, <[u8]>::len);
         let random_access_pcr = on_pcr_pid && self.random_access_indicator;
