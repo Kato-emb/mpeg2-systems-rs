@@ -8,10 +8,14 @@
 //! of a Program Stream reuse what was allocated before. Writing the same PES
 //! packets, or PCRs on their own, again reuses the output buffer and the
 //! continuity counters of the PIDs written before, and multiplexing PES
-//! packets with either muxer reuses its output held and its scratch buffer.
+//! packets with either muxer reuses its output held and its scratch buffer,
+//! the Program Stream one also when it sends the system header and the
+//! program stream map with every PES packet.
 //! A stream whose descriptors could not fit the program stream map, or a
 //! program or a stream whose descriptors could not fit the PMT, is refused
 //! before they are copied.
+
+use core::time::Duration;
 
 use mpeg2_systems::descriptor::DescriptorLoop;
 use mpeg2_systems::pes::StreamId;
@@ -26,7 +30,8 @@ use mpeg2_systems::ts::mux::{Muxer, MuxerConfig, PacketWriter};
 use mpeg2_systems_bench::{
     ACCESS_UNIT_LENGTH, CountingAllocator, PES_PACKETS, PROGRAM, STREAMS, allocations_once_grown,
     demux_events, multiplex_pes_packets, multiplex_program_stream_pes_packets, mux_pes_packets,
-    program_stream_events, registered_muxer, registered_program_stream_muxer, subscribed_demuxer,
+    program_stream_events, registered_muxer, registered_program_stream_muxer,
+    registered_program_stream_muxer_of, subscribed_demuxer,
 };
 
 #[global_allocator]
@@ -104,6 +109,26 @@ fn a_pass_over_an_input_allocates_nothing_once_the_buffers_have_grown() {
     });
     allocations.push(("pes packets", ACCESS_UNIT_LENGTH, "ps muxer", counted));
     none.push(("pes packets", ACCESS_UNIT_LENGTH, "ps muxer", 0));
+    let mut muxer = registered_program_stream_muxer_of(
+        ps::mux::MuxerConfig::new(25_200).with_header_interval(Duration::ZERO),
+    );
+    let mut first_dts = 90_000;
+    let counted = allocations_once_grown(&ALLOCATOR, || {
+        multiplex_program_stream_pes_packets(&mut muxer, &access_unit, first_dts, &mut out);
+        first_dts += 3_600 * u64::try_from(PES_PACKETS).unwrap();
+    });
+    allocations.push((
+        "pes packets",
+        ACCESS_UNIT_LENGTH,
+        "ps muxer, headers each",
+        counted,
+    ));
+    none.push((
+        "pes packets",
+        ACCESS_UNIT_LENGTH,
+        "ps muxer, headers each",
+        0,
+    ));
     let es_info = vec![0x80; 8 << 20];
     let mut muxer = registered_program_stream_muxer();
     let counted = allocations_once_grown(&ALLOCATOR, || {

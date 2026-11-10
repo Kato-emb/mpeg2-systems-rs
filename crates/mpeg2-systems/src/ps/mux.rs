@@ -200,6 +200,15 @@ pub struct Muxer {
     // Why not a flag for a change of the map besides it: a change makes the
     // map due in the next pack, as no sending at all does.
     headers_sent_at: Option<SystemTimeClock>,
+    /// The system header and the program stream map the PES packet being
+    /// taken carries
+    // Why not a Vec per PES packet: at a short `header_interval` every PES
+    // packet carries them, and that path allocates nothing.
+    headers: Vec<u8>,
+    /// The stream bound loop and the elementary stream loop of `headers`, as
+    /// they are written
+    // Why not a Vec per PES packet: as for `headers`.
+    header_loops: Vec<u8>,
     /// The last pack written, `None` before the first PES packet
     last_pack: Option<Pack>,
     /// The packs [`poll_output`](Self::poll_output) gives next
@@ -267,6 +276,8 @@ impl Muxer {
             program_stream_info: Vec::new(),
             map_version: VersionNumber(0),
             headers_sent_at: None,
+            headers: Vec::new(),
+            header_loops: Vec::new(),
             last_pack: None,
             pending: Vec::new(),
             end: End::Open,
@@ -543,6 +554,8 @@ impl Muxer {
             program_stream_info,
             map_version,
             headers_sent_at,
+            headers,
+            header_loops,
             last_pack,
             pending,
             ..
@@ -565,14 +578,15 @@ impl Muxer {
         let headers_due = headers_sent_at.zip(first_at).is_none_or(|(sent_at, at)| {
             at.ticks_since(sent_at) >= SystemTimeClock::ticks_in(config.header_interval)
         });
-        let mut headers = Vec::new();
+        headers.clear();
         if headers_due {
             stream_definition::write_headers(
                 streams,
                 program_stream_info,
                 *map_version,
                 config.program_mux_rate,
-                &mut headers,
+                header_loops,
+                headers,
             )?;
         }
         let largest_pack = largest_pack(config);
@@ -638,7 +652,7 @@ impl Muxer {
                 let start = out.len();
                 write_pack_header(at, out)?;
                 if index == 0 {
-                    out.extend_from_slice(&headers);
+                    out.extend_from_slice(headers);
                 }
                 writer.write_pes_packets(&piece, out)?;
                 written = Some(Pack {

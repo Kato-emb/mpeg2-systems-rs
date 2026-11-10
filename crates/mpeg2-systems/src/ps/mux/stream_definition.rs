@@ -97,12 +97,14 @@ pub(super) fn check_map_length<'stream>(
 
 /// Appends the system header of `streams`, `rate_bound`
 /// `program_mux_rate`, and the program stream map of `program_stream_info`
-/// and `streams`, `program_stream_map_version` `version`, to `out`
+/// and `streams`, `program_stream_map_version` `version`, to `out`, writing
+/// their loops in `entries`
 pub(super) fn write_headers(
     streams: &[Stream],
     program_stream_info: &[u8],
     version: VersionNumber,
     program_mux_rate: u32,
+    entries: &mut Vec<u8>,
     out: &mut Vec<u8>,
 ) -> Result<(), Error> {
     let writer = PackWriter::new();
@@ -111,14 +113,14 @@ pub(super) fn write_headers(
     // which keeps both within a byte; the system header refuses the rest.
     let [audio_bound, video_bound] =
         [audio_bound, video_bound].map(|bound| u8::try_from(bound).unwrap_or(u8::MAX));
-    let mut entries = Vec::new();
-    StreamBoundLoop::write_from(streams.iter().map(Stream::stream_bound), &mut entries)
+    entries.clear();
+    StreamBoundLoop::write_from(streams.iter().map(Stream::stream_bound), entries)
         .map_err(|error| Error::SystemHeader { error })?;
     let mut system_header = SystemHeader::new(program_mux_rate, audio_bound, video_bound);
     system_header.stream_bounds = StreamBoundLoop::from(entries.as_slice());
     writer.write_system_header(&system_header, out)?;
     entries.clear();
-    ElementaryStreamLoop::write_from(streams.iter().map(Stream::elementary_stream), &mut entries)
+    ElementaryStreamLoop::write_from(streams.iter().map(Stream::elementary_stream), entries)
         .map_err(|error| Error::ProgramStreamMap { error })?;
     let mut map = ProgramStreamMap::new(version);
     map.program_stream_info = DescriptorLoop::from(program_stream_info);
@@ -323,6 +325,7 @@ pub(super) fn check_headers(
         program_stream_info,
         version,
         config.program_mux_rate,
+        &mut Vec::new(),
         &mut headers,
     )?;
     let length = shortest_pack(headers.len());
