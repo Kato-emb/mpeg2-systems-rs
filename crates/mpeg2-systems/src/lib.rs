@@ -37,12 +37,13 @@
 //! events left. An event borrows the bytes it reports from the demuxer, so
 //! the demuxer cannot be used until the event is dropped; a Transport Stream
 //! demuxer reassembles the PES packets of the PIDs subscribed to, which the
-//! caller learns from the PMTs it reads.
+//! caller learns from the PMTs it reads, or which the demuxer subscribes to
+//! itself with [`ts::demux::DemuxerConfig::subscribe_elementary_pids`].
 //!
 //! # Examples
 //!
-//! Reading a Transport Stream, subscribing to the elementary streams each
-//! PMT names, and counting the PES packets:
+//! Reading a Transport Stream, with the demuxer subscribing to the
+//! elementary streams each PMT names, and counting the PES packets:
 //!
 //! ```
 //! # #[cfg(feature = "alloc")]
@@ -50,7 +51,7 @@
 //! use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event};
 //!
 //! let stream = std::fs::read("tests/fixtures/188.ts")?;
-//! let mut demuxer = Demuxer::new(DemuxerConfig::default());
+//! let mut demuxer = Demuxer::new(DemuxerConfig::default().with_subscribe_elementary_pids(true));
 //! let mut pes_packets = 0;
 //! // Hand over the input in pieces of any length, taking the events after each
 //! for chunk in stream.chunks(7 * 188) {
@@ -58,19 +59,6 @@
 //!     while let Some(event) = demuxer.poll_event() {
 //!         if let Event::PesPacket { .. } = event {
 //!             pes_packets += 1;
-//!         }
-//!         // Copy the PIDs out of a PMT, as the event borrows the demuxer
-//!         let Event::TsProgramMapSection { section, .. } = event else {
-//!             continue;
-//!         };
-//!         let pids: Vec<_> = section
-//!             .elementary_streams
-//!             .iter()
-//!             .flatten()
-//!             .map(|stream| stream.elementary_pid)
-//!             .collect();
-//!         for pid in pids {
-//!             demuxer.subscribe_pes(pid);
 //!         }
 //!     }
 //! }
@@ -138,30 +126,22 @@
 //! muxer.add_stream(1, ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, video_pid))?;
 //! // Give an access unit in a PES packet, and take the Transport Packets
 //! let access_unit = vec![0xaa; 1_000];
-//! let mut header = OptionalHeader::new();
-//! header.pts = Some(Timestamp::try_from(90_000)?);
-//! let mut packet = PesPacket::new(StreamId::from(0xe0), &access_unit);
-//! packet.optional_header = Some(header);
+//! let packet = PesPacket::new(StreamId::from(0xe0), &access_unit)
+//!     .with_optional_header(OptionalHeader::new().with_pts(Timestamp::try_from(90_000)?));
 //! muxer.handle_pes_packet(video_pid, &packet)?;
 //! muxer.poll_output(&mut stream);
 //! // End the stream, and take what the muxer still holds
 //! muxer.finish();
 //! muxer.poll_output(&mut stream);
 //!
-//! // Read back, subscribing to the PIDs the PMT names
-//! let mut demuxer = Demuxer::new(DemuxerConfig::default());
+//! // Read back, the demuxer subscribing to the PIDs the PMT names
+//! let mut demuxer = Demuxer::new(DemuxerConfig::default().with_subscribe_elementary_pids(true));
 //! demuxer.handle_input(&stream);
 //! demuxer.finish();
-//! let (mut pids, mut payloads) = (Vec::new(), Vec::new());
+//! let mut payloads = Vec::new();
 //! while let Some(event) = demuxer.poll_event() {
-//!     if let Event::TsProgramMapSection { section, .. } = &event {
-//!         pids.extend(section.elementary_streams.iter().flatten().map(|stream| stream.elementary_pid));
-//!     } else if let Event::PesPacket { packet, .. } = &event {
+//!     if let Event::PesPacket { packet, .. } = event {
 //!         payloads.push(packet.payload.to_vec());
-//!     }
-//!     drop(event);
-//!     for pid in pids.drain(..) {
-//!         demuxer.subscribe_pes(pid);
 //!     }
 //! }
 //! assert_eq!(payloads, [access_unit]);
@@ -195,25 +175,23 @@
 //!     [Program::ProgramMap { program_number: 1.try_into()?, program_map_pid: pmt_pid }],
 //!     &mut programs,
 //! )?;
-//! let mut pat = ProgramAssociationSection::new(1, VersionNumber::try_from(0)?);
-//! pat.programs = ProgramLoop::from(&programs[..]);
+//! let pat = ProgramAssociationSection::new(1, VersionNumber::try_from(0)?)
+//!     .with_programs(ProgramLoop::from(&programs[..]));
 //! writer.write_program_association_section(&pat, &mut stream)?;
 //! let mut streams = Vec::new();
 //! ElementaryStreamLoop::write_from(
 //!     [ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, video_pid)],
 //!     &mut streams,
 //! )?;
-//! let mut pmt = TsProgramMapSection::new(1, VersionNumber::try_from(0)?);
-//! pmt.pcr_pid = Some(video_pid);
-//! pmt.elementary_streams = ElementaryStreamLoop::from(&streams[..]);
+//! let pmt = TsProgramMapSection::new(1, VersionNumber::try_from(0)?)
+//!     .with_pcr_pid(video_pid)
+//!     .with_elementary_streams(ElementaryStreamLoop::from(&streams[..]));
 //! writer.write_ts_program_map_section(pmt_pid, &pmt, &mut stream)?;
 //! // A PCR on its own, then an access unit in a PES packet
 //! writer.write_program_clock_reference(video_pid, ClockReference::new(81_000, 0)?, &mut stream)?;
 //! let access_unit = vec![0xaa; 1_000];
-//! let mut header = OptionalHeader::new();
-//! header.pts = Some(Timestamp::try_from(90_000)?);
-//! let mut packet = PesPacket::new(StreamId::from(0xe0), &access_unit);
-//! packet.optional_header = Some(header);
+//! let packet = PesPacket::new(StreamId::from(0xe0), &access_unit)
+//!     .with_optional_header(OptionalHeader::new().with_pts(Timestamp::try_from(90_000)?));
 //! writer.write_pes_packet(video_pid, &packet, None, &mut stream)?;
 //!
 //! // Read back, the access unit is the payload of the one PES packet

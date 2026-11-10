@@ -218,34 +218,16 @@ mod tests {
 
         let (transport_stream, left_out) = converted();
         let mut from_transport_stream: BTreeMap<u8, Vec<Read>> = BTreeMap::new();
-        let mut demuxer = Demuxer::new(DemuxerConfig::default());
+        let mut demuxer =
+            Demuxer::new(DemuxerConfig::default().with_subscribe_elementary_pids(true));
         demuxer.handle_input(&transport_stream);
         demuxer.finish();
-        loop {
-            // Why not subscribe where the PMT is read: its event borrows the
-            // demuxer until it is dropped at the end of the block.
-            let pids: Vec<_> = {
-                let Some(event) = demuxer.poll_event() else {
-                    break;
-                };
-                if let Event::PesPacket { packet, .. } = &event {
-                    from_transport_stream
-                        .entry(packet.stream_id.get())
-                        .or_default()
-                        .push(read(packet));
-                }
-                let Event::TsProgramMapSection { section, .. } = event else {
-                    continue;
-                };
-                section
-                    .elementary_streams
-                    .iter()
-                    .flatten()
-                    .map(|stream| stream.elementary_pid)
-                    .collect()
-            };
-            for pid in pids {
-                demuxer.subscribe_pes(pid);
+        while let Some(event) = demuxer.poll_event() {
+            if let Event::PesPacket { packet, .. } = event {
+                from_transport_stream
+                    .entry(packet.stream_id.get())
+                    .or_default()
+                    .push(read(&packet));
             }
         }
 
