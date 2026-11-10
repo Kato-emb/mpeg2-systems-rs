@@ -165,9 +165,10 @@ impl From<section::Error> for Error {
 /// # Examples
 ///
 /// ```
-/// use mpeg2_systems::psi::pmt::TsProgramMapSection;
+/// use mpeg2_systems::psi::VersionNumber;
+/// use mpeg2_systems::psi::pmt::{ElementaryStreamLoop, TsProgramMapSection};
 /// use mpeg2_systems::psi::section::Section;
-/// use mpeg2_systems::stream_type::StreamType;
+/// use mpeg2_systems::ts::Pid;
 ///
 /// // A program of one MPEG-2 video stream on PID 0x0100, which carries the
 /// // PCR
@@ -177,12 +178,14 @@ impl From<section::Error> for Error {
 /// ];
 /// let section = Section::read(&bytes)?;
 /// let pmt = TsProgramMapSection::try_from(&section)?;
-/// assert_eq!(pmt.program_number, 1);
-/// assert_eq!(pmt.pcr_pid.map(|pid| pid.get()), Some(0x0100));
-///
-/// let stream = pmt.elementary_streams.iter().next().unwrap()?;
-/// assert_eq!(stream.stream_type, StreamType::ISO_IEC_13818_2_VIDEO);
-/// assert_eq!(stream.elementary_pid.get(), 0x0100);
+/// // stream_type 0x02 on PID 0x0100, with no descriptors
+/// let streams = [0x02, 0xe1, 0x00, 0xf0, 0x00];
+/// assert_eq!(
+///     pmt,
+///     TsProgramMapSection::new(1, VersionNumber::try_from(0)?)
+///         .with_pcr_pid(Pid::try_from(0x0100)?)
+///         .with_elementary_streams(ElementaryStreamLoop::from(streams.as_slice()))
+/// );
 ///
 /// // Written back (with the `alloc` feature), it gives the same bytes
 /// # #[cfg(feature = "alloc")]

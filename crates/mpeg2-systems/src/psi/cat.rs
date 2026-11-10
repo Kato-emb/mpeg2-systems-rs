@@ -91,7 +91,8 @@ impl From<section::Error> for Error {
 /// # Examples
 ///
 /// ```
-/// use mpeg2_systems::descriptor::DescriptorTag;
+/// use mpeg2_systems::descriptor::DescriptorLoop;
+/// use mpeg2_systems::psi::VersionNumber;
 /// use mpeg2_systems::psi::cat::CaSection;
 /// use mpeg2_systems::psi::section::Section;
 ///
@@ -103,9 +104,12 @@ impl From<section::Error> for Error {
 /// ];
 /// let section = Section::read(&bytes)?;
 /// let cat = CaSection::try_from(&section)?;
-/// let ca_descriptor = cat.descriptors.iter().next().unwrap()?;
-/// assert_eq!(ca_descriptor.descriptor_tag, DescriptorTag::CA);
-/// assert_eq!(ca_descriptor.body, [0x00, 0x05, 0xe1, 0x00]);
+/// let ca_descriptor = [0x09, 0x04, 0x00, 0x05, 0xe1, 0x00];
+/// assert_eq!(
+///     cat,
+///     CaSection::new(VersionNumber::try_from(0)?)
+///         .with_descriptors(DescriptorLoop::from(ca_descriptor.as_slice()))
+/// );
 ///
 /// // Written back (with the `alloc` feature), it gives the same bytes
 /// # #[cfg(feature = "alloc")]

@@ -21,9 +21,14 @@ const FORMAT_IDENTIFIER_LENGTH: usize = 4;
 /// use mpeg2_systems::descriptor::RawDescriptor;
 /// use mpeg2_systems::descriptor::registration::RegistrationDescriptor;
 ///
-/// let bytes = [0x05, 0x04, 0x48, 0x44, 0x4d, 0x56];
+/// // "HDMV", with two bytes of additional identification info
+/// let bytes = [0x05, 0x06, 0x48, 0x44, 0x4d, 0x56, 0x01, 0x02];
 /// let descriptor = RegistrationDescriptor::try_from(&RawDescriptor::read(&bytes)?)?;
-/// assert_eq!(descriptor.format_identifier.to_be_bytes(), *b"HDMV");
+/// assert_eq!(
+///     descriptor,
+///     RegistrationDescriptor::new(u32::from_be_bytes(*b"HDMV"))
+///         .with_additional_identification_info(&[0x01, 0x02])
+/// );
 ///
 /// # #[cfg(feature = "alloc")]
 /// # {
