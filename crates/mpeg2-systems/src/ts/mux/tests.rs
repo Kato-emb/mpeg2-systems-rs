@@ -7,6 +7,7 @@ use crate::pes::OptionalHeader;
 use crate::psi::VersionNumber;
 use crate::psi::pat::{Program as PatProgram, ProgramAssociationSection, ProgramLoop};
 use crate::psi::pmt::{ElementaryStream, ElementaryStreamLoop, TsProgramMapSection};
+use crate::psi::section;
 use crate::stream_type::StreamType;
 use crate::time::Timestamp;
 use crate::ts::packet::TransportPacket;
