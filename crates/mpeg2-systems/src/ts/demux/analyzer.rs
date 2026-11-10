@@ -7,7 +7,7 @@
 //! on a subscribed PID. A PAT, PMT or CAT section is queued only at a version
 //! not reported before.
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::VecDeque;
 use core::mem;
 use core::ops::Range;
 
@@ -29,7 +29,7 @@ mod version_gate;
 use continuity::{ContinuityTracker, Verdict};
 use pes_reassembly::{PesReassembly, Sequence};
 use program_map_routes::ProgramMapRoutes;
-use section_reassembly::{Completed, SectionReassembler};
+use section_reassembly::{Completed, SectionReassembler, SectionReassembly};
 use version_gate::{Admission, TableSection, VersionGate};
 
 /// Continuity, section reassembly and table version state of the PIDs a
@@ -41,39 +41,9 @@ use version_gate::{Admission, TableSection, VersionGate};
 #[derive(Debug, Clone)]
 pub(super) struct PacketAnalyzer {
     continuity: ContinuityTracker,
-    section_pids: BTreeMap<Pid, SectionPid>,
+    sections: SectionReassembly,
     tables: Tables,
     pes: PesReassembly,
-}
-
-/// A PID whose sections are reassembled
-///
-/// A PID has one for the PAT and CAT PIDs, for a PID the PAT names for a
-/// program map, and for a PID the caller subscribed to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SectionPid {
-    reassembler: SectionReassembler,
-    /// Whether [`Demuxer::subscribe_sections`](super::Demuxer::subscribe_sections) names the PID
-    // Why not a set of the PIDs subscribed to beside the map: each of them
-    // has an entry here, and the two would have to be kept in step wherever
-    // an entry is added or dropped.
-    subscribed: bool,
-}
-
-impl SectionPid {
-    const fn new() -> Self {
-        Self {
-            reassembler: SectionReassembler::new(),
-            subscribed: false,
-        }
-    }
-
-    /// Returns whether the sections of `pid`, whose entry this is, are still
-    /// to be reassembled: on the PAT and CAT PIDs, on a PID the routes
-    /// follow, and on a PID subscribed to
-    fn is_reassembled(&self, pid: Pid, routes: &ProgramMapRoutes) -> bool {
-        [Pid::PAT, Pid::CAT].contains(&pid) || self.subscribed || routes.follows(pid)
-    }
 }
 
 /// What the analyzer knows of the PAT, PMTs and CAT on air
@@ -115,7 +85,7 @@ impl PacketAnalyzer {
     pub(super) const fn new(pes_buffer_limit: usize) -> Self {
         Self {
             continuity: ContinuityTracker::new(),
-            section_pids: BTreeMap::new(),
+            sections: SectionReassembly::new(),
             tables: Tables {
                 routes: ProgramMapRoutes::new(),
                 gate: VersionGate::new(),
@@ -133,38 +103,12 @@ impl PacketAnalyzer {
     }
 
     pub(super) fn subscribe_sections(&mut self, pid: Pid) {
-        self.section_pids
-            .entry(pid)
-            .or_insert_with(SectionPid::new)
-            .subscribed = true;
+        self.sections.subscribe(pid);
     }
 
-    /// Drops the subscription to the sections of `pid`, and, unless the PID
-    /// is reassembled for the PSI, its reassembler and the events it queued
     pub(super) fn unsubscribe_sections(&mut self, pid: Pid, pending: &mut VecDeque<Pending>) {
-        let Some(section_pid) = self
-            .section_pids
-            .get_mut(&pid)
-            .filter(|section_pid| section_pid.subscribed)
-        else {
-            return;
-        };
-        section_pid.subscribed = false;
-        if section_pid.is_reassembled(pid, &self.tables.routes) {
-            return;
-        }
-        // Why drop the queued events too: a section that crossed packets
-        // lends the buffer dropped here.
-        self.section_pids.remove(&pid);
-        pending.retain(|pending| match pending {
-            Pending::Section { pid: queued, .. }
-            | Pending::Ready(Event::Error(Error::Section { pid: queued, .. })) => *queued != pid,
-            Pending::Ready(_)
-            | Pending::Unsynchronized(_)
-            | Pending::PesPacket { .. }
-            | Pending::ScrambledPesPacket { .. }
-            | Pending::TruncatedPesPacket { .. } => true,
-        });
+        self.sections
+            .unsubscribe(pid, self.tables.routes.carries_psi(pid), pending);
     }
 
     /// Returns the bytes of a [`Lent::Reassembled`] range of a PES packet on
@@ -193,9 +137,7 @@ impl PacketAnalyzer {
         // would read as a change, and a version names the same programs
         // before and after the gap.
         self.continuity.reset();
-        for section_pid in self.section_pids.values_mut() {
-            section_pid.reassembler.clear();
-        }
+        self.sections.discard_in_flight();
         self.pes.discard_in_flight();
     }
 
@@ -207,10 +149,7 @@ impl PacketAnalyzer {
 
     /// Returns the bytes of a [`Lent::Reassembled`] range of `pid`
     pub(super) fn reassembled(&self, pid: Pid, range: Range<usize>) -> &[u8] {
-        self.section_pids
-            .get(&pid)
-            .map(|section_pid| section_pid.reassembler.section(range))
-            .unwrap_or_default()
+        self.sections.bytes(pid, range)
     }
 
     /// Analyzes one packet, which starts at `packet_start` in the framer's
@@ -267,41 +206,33 @@ impl PacketAnalyzer {
         });
         match pid {
             Pid::PAT => {
-                // Why not keep the PAT's reassembler in the map while it
-                // pushes: the program maps a PAT names are added to the map
-                // as its sections are read. Putting it back in the entry,
-                // which the routes always keep, allocates nothing.
-                let mut reassembler = mem::replace(
-                    &mut self
-                        .section_pids
-                        .entry(pid)
-                        .or_insert_with(SectionPid::new)
-                        .reassembler,
-                    SectionReassembler::new(),
-                );
+                // Why not keep the PAT's reassembler in place while it
+                // pushes: the program maps a PAT names are added to the
+                // sections reassembled as its sections are read. Putting it
+                // back in the entry, which the routes always keep, allocates
+                // nothing.
+                let mut reassembler =
+                    mem::replace(self.sections.for_psi(pid), SectionReassembler::new());
                 reassemble(
                     &mut reassembler,
                     &mut self.tables,
-                    Some(&mut self.section_pids),
+                    Some(&mut self.sections),
                     verdict,
                     &packet,
                     payload_start,
                     pending,
                 );
-                self.section_pids
-                    .entry(pid)
-                    .or_insert_with(SectionPid::new)
-                    .reassembler = reassembler;
+                *self.sections.for_psi(pid) = reassembler;
             }
             _ => {
-                let section_pid = if pid == Pid::CAT {
-                    Some(self.section_pids.entry(pid).or_insert_with(SectionPid::new))
+                let reassembler = if pid == Pid::CAT {
+                    Some(self.sections.for_psi(pid))
                 } else {
-                    self.section_pids.get_mut(&pid)
+                    self.sections.reassembler_mut(pid)
                 };
-                if let Some(section_pid) = section_pid {
+                if let Some(reassembler) = reassembler {
                     reassemble(
-                        &mut section_pid.reassembler,
+                        reassembler,
                         &mut self.tables,
                         None,
                         verdict,
@@ -322,11 +253,11 @@ impl PacketAnalyzer {
 /// completes
 ///
 /// With `program_maps`, the packet is on the PAT PID, and the routes follow
-/// the program maps its sections name in the map of the PIDs reassembled.
+/// the program maps its sections name in the sections reassembled.
 fn reassemble(
     reassembler: &mut SectionReassembler,
     tables: &mut Tables,
-    mut program_maps: Option<&mut BTreeMap<Pid, SectionPid>>,
+    mut program_maps: Option<&mut SectionReassembly>,
     verdict: Verdict,
     packet: &TransportPacket<'_>,
     payload_start: usize,
