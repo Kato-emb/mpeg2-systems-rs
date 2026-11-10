@@ -54,10 +54,14 @@ The multiplexing layer, `ts::mux::Muxer` and `ps::mux::Muxer`, takes the PES
 packets of the streams registered with it and builds the stream around them:
 the PAT, the PMT and the PCRs of a Transport Stream, or the packs, their
 SCRs, the system header and the program stream map of a Program Stream. The
-caller gives the PES packets in the order of their DTS across the streams;
-both `Muxer`s are driven the same way.
+crate does not parse elementary streams: this function takes the AVC video
+and AAC audio access units an encoder or another demuxer gave, with their
+PTS, in the order of their time across the streams, and writes the
+Transport Stream to any `std::io::Write`.
 
 ```rust
+use std::io::Write;
+
 use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
 use mpeg2_systems::psi::pmt::ElementaryStream;
 use mpeg2_systems::stream_type::StreamType;
@@ -65,18 +69,38 @@ use mpeg2_systems::time::Timestamp;
 use mpeg2_systems::ts::Pid;
 use mpeg2_systems::ts::mux::{Muxer, MuxerConfig};
 
-let video = Pid::try_from(0x0100)?;
-let mut muxer = Muxer::new(MuxerConfig::new())?;
-muxer.add_program(1, Pid::try_from(0x1000)?)?;
-muxer.add_stream(1, ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, video))?;
-let access_unit = [0xaa; 1_000];
-let packet = PesPacket::new(StreamId::from(0xe0), &access_unit)
-    .with_optional_header(OptionalHeader::new().with_pts(Timestamp::try_from(90_000)?));
+fn write_transport_stream<'a>(
+    access_units: impl IntoIterator<Item = (StreamId, Timestamp, &'a [u8])>,
+    out: &mut impl Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (video, audio) = (Pid::try_from(0x0100)?, Pid::try_from(0x0101)?);
+    let mut muxer = Muxer::new(MuxerConfig::new())?;
+    muxer.add_program(1, Pid::try_from(0x1000)?)?;
+    muxer.add_stream(1, ElementaryStream::new(StreamType::AVC_VIDEO, video))?;
+    muxer.add_stream(1, ElementaryStream::new(StreamType::ISO_IEC_13818_7_AUDIO, audio))?;
+    let mut buffer = Vec::new();
+    for (stream_id, pts, access_unit) in access_units {
+        // Video with B-frames gives each picture its DTS too: `.with_dts(dts)`
+        let header = OptionalHeader::new().with_pts(pts);
+        let packet = PesPacket::new(stream_id, access_unit).with_optional_header(header);
+        let pid = if stream_id == StreamId::from(0xe0) { video } else { audio };
+        muxer.handle_pes_packet(pid, &packet)?;
+        muxer.poll_output(&mut buffer);
+        out.write_all(&buffer)?;
+        buffer.clear();
+    }
+    muxer.finish();
+    muxer.poll_output(&mut buffer);
+    out.write_all(&buffer)?;
+    Ok(())
+}
+
+// Three pictures 3003 ticks apart, and the audio frames 1920 ticks apart among them
+let (video, audio, access_unit) = (StreamId::from(0xe0), StreamId::from(0xc0), [0u8; 1_000]);
+let times = [(video, 0), (audio, 0), (audio, 1_920), (video, 3_003), (audio, 3_840), (video, 6_006)];
+let units = times.map(|(id, pts)| Timestamp::try_from(90_000 + pts).map(|pts| (id, pts, &access_unit[..])));
 let mut stream = Vec::new();
-muxer.handle_pes_packet(video, &packet)?;
-muxer.poll_output(&mut stream);
-muxer.finish();
-muxer.poll_output(&mut stream);
+write_transport_stream(units.into_iter().collect::<Result<Vec<_>, _>>()?, &mut stream)?;
 assert_eq!(stream.len() % 188, 0);
 Ok::<(), Box<dyn std::error::Error>>(())
 ```

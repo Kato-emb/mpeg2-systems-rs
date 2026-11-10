@@ -104,12 +104,16 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! Multiplexing an access unit into a Transport Stream through the
-//! multiplexing layer, and reading it back:
+//! Multiplexing AVC video and AAC audio access units, as an encoder or
+//! another demuxer gives them in the order of their time, into a Transport
+//! Stream through the multiplexing layer, writing it to any
+//! [`std::io::Write`], and reading it back:
 //!
 //! ```
 //! # #[cfg(feature = "alloc")]
 //! # {
+//! use std::io::Write;
+//!
 //! use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
 //! use mpeg2_systems::psi::pmt::ElementaryStream;
 //! use mpeg2_systems::stream_type::StreamType;
@@ -118,33 +122,54 @@
 //! use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event};
 //! use mpeg2_systems::ts::mux::{Muxer, MuxerConfig};
 //!
-//! let (pmt_pid, video_pid) = (Pid::try_from(0x1000)?, Pid::try_from(0x0100)?);
-//! let mut muxer = Muxer::new(MuxerConfig::new())?;
+//! fn write_transport_stream<'a>(
+//!     access_units: impl IntoIterator<Item = (StreamId, Timestamp, &'a [u8])>,
+//!     out: &mut impl Write,
+//! ) -> Result<(), Box<dyn std::error::Error>> {
+//!     // Register the program and its streams before the first PES packet
+//!     let (video, audio) = (Pid::try_from(0x0100)?, Pid::try_from(0x0101)?);
+//!     let mut muxer = Muxer::new(MuxerConfig::new())?;
+//!     muxer.add_program(1, Pid::try_from(0x1000)?)?;
+//!     muxer.add_stream(1, ElementaryStream::new(StreamType::AVC_VIDEO, video))?;
+//!     muxer.add_stream(1, ElementaryStream::new(StreamType::ISO_IEC_13818_7_AUDIO, audio))?;
+//!     // Give each access unit in a PES packet, and write out the Transport Packets
+//!     let mut buffer = Vec::new();
+//!     for (stream_id, pts, access_unit) in access_units {
+//!         // Video with B-frames gives each picture its DTS too: `.with_dts(dts)`
+//!         let header = OptionalHeader::new().with_pts(pts);
+//!         let packet = PesPacket::new(stream_id, access_unit).with_optional_header(header);
+//!         let pid = if stream_id == StreamId::from(0xe0) { video } else { audio };
+//!         muxer.handle_pes_packet(pid, &packet)?;
+//!         muxer.poll_output(&mut buffer);
+//!         out.write_all(&buffer)?;
+//!         buffer.clear();
+//!     }
+//!     // End the stream, and write out what the muxer still holds
+//!     muxer.finish();
+//!     muxer.poll_output(&mut buffer);
+//!     out.write_all(&buffer)?;
+//!     Ok(())
+//! }
+//!
+//! // Three pictures 3003 ticks apart, and the audio frames 1920 ticks apart among them
+//! let (video, audio, access_unit) = (StreamId::from(0xe0), StreamId::from(0xc0), [0u8; 1_000]);
+//! let times = [(video, 0), (audio, 0), (audio, 1_920), (video, 3_003), (audio, 3_840), (video, 6_006)];
+//! let units = times.map(|(id, pts)| Timestamp::try_from(90_000 + pts).map(|pts| (id, pts, &access_unit[..])));
 //! let mut stream = Vec::new();
-//! // Register the program and its stream before the first PES packet
-//! muxer.add_program(1, pmt_pid)?;
-//! muxer.add_stream(1, ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, video_pid))?;
-//! // Give an access unit in a PES packet, and take the Transport Packets
-//! let access_unit = vec![0xaa; 1_000];
-//! let packet = PesPacket::new(StreamId::from(0xe0), &access_unit)
-//!     .with_optional_header(OptionalHeader::new().with_pts(Timestamp::try_from(90_000)?));
-//! muxer.handle_pes_packet(video_pid, &packet)?;
-//! muxer.poll_output(&mut stream);
-//! // End the stream, and take what the muxer still holds
-//! muxer.finish();
-//! muxer.poll_output(&mut stream);
+//! write_transport_stream(units.into_iter().collect::<Result<Vec<_>, _>>()?, &mut stream)?;
 //!
 //! // Read back, the demuxer subscribing to the PIDs the PMT names
 //! let mut demuxer = Demuxer::new(DemuxerConfig::default().with_subscribe_elementary_pids(true));
 //! demuxer.handle_input(&stream);
 //! demuxer.finish();
-//! let mut payloads = Vec::new();
+//! let mut stream_ids = Vec::new();
 //! while let Some(event) = demuxer.poll_event() {
 //!     if let Event::PesPacket { packet, .. } = event {
-//!         payloads.push(packet.payload.to_vec());
+//!         stream_ids.push(packet.stream_id.get());
 //!     }
 //! }
-//! assert_eq!(payloads, [access_unit]);
+//! stream_ids.sort_unstable();
+//! assert_eq!(stream_ids, [0xc0, 0xc0, 0xc0, 0xe0, 0xe0, 0xe0]);
 //! # }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
