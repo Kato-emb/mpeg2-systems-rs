@@ -37,15 +37,26 @@ pub struct MuxerConfig {
     /// taken, 0 included: the SCR of the first pack is then the DTS of its
     /// PES packet.
     pub mux_delay: Duration,
-    /// The most bytes the output held for [`Muxer::poll_output`](super::Muxer::poll_output) may grow to
-    /// (4 MiB by default)
+    /// The most bytes the output held for
+    /// [`Muxer::poll_output`](super::Muxer::poll_output) may grow to (4 MiB by
+    /// default)
     ///
     /// Any value is taken: at 0 every PES packet is refused, and at
     /// [`usize::MAX`] none for its length. An input that would grow the
     /// output held past it is refused, so the limit must be larger than the
     /// packs of the largest PES packet given, with the system header and the
-    /// program stream map before the first.
+    /// program stream map they carry.
     pub buffer_limit: usize,
+    /// The time from one sending of the system header and the program stream
+    /// map to the next ([`Duration::MAX`] by default)
+    ///
+    /// They go in the first pack of a PES packet whose SCR is
+    /// `header_interval` or more after that of the last pack that carried
+    /// them. Any value is taken, both ends included: 0 sends them in the pack
+    /// of every PES packet, and [`Duration::MAX`] only in the first pack.
+    /// ISO/IEC 13818-1 places no requirement on how often they are sent
+    /// (§2.7.8, §2.5.4).
+    pub header_interval: Duration,
 }
 
 impl MuxerConfig {
@@ -57,6 +68,7 @@ impl MuxerConfig {
             pack_size: 2048,
             mux_delay: Duration::from_millis(700),
             buffer_limit: 4 * 1024 * 1024,
+            header_interval: Duration::MAX,
         }
     }
 
@@ -78,6 +90,13 @@ impl MuxerConfig {
     #[must_use]
     pub const fn with_buffer_limit(mut self, buffer_limit: usize) -> Self {
         self.buffer_limit = buffer_limit;
+        self
+    }
+
+    /// Returns the value with the given `header_interval`
+    #[must_use]
+    pub const fn with_header_interval(mut self, header_interval: Duration) -> Self {
+        self.header_interval = header_interval;
         self
     }
 }

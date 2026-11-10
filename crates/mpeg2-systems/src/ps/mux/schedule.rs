@@ -96,8 +96,18 @@ impl Filling {
         Some(Self { first, count })
     }
 
+    /// Returns the time of the last of the packs
+    pub(super) fn last(self) -> SystemTimeClock {
+        self.at(self.count.saturating_sub(1))
+    }
+
     pub(super) fn iter(self) -> impl Iterator<Item = SystemTimeClock> {
-        let longest = longest_scr_interval();
-        (0..self.count).map(move |index| self.first.add_ticks(index.saturating_mul(longest)))
+        (0..self.count).map(move |index| self.at(index))
+    }
+
+    /// Returns the time of the pack at `index`
+    fn at(self, index: u64) -> SystemTimeClock {
+        self.first
+            .add_ticks(index.saturating_mul(longest_scr_interval()))
     }
 }

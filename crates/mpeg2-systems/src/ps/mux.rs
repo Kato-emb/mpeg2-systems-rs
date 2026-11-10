@@ -61,6 +61,7 @@ use crate::pes::extension::{PStdBuffer, PesExtension};
 use crate::pes::{self, PesPacket, StreamId};
 use crate::ps::psm::ElementaryStream;
 use crate::ps::{PackHeader, pack_header, system_header};
+use crate::psi::VersionNumber;
 use crate::time::SystemTimeClock;
 use pack_writer::PesPacketPieces;
 use schedule::{Filling, Pack, bytes_within_longest_scr_interval};
@@ -98,15 +99,21 @@ const PROGRAM_MUX_RATE_LIMIT: u32 = 1 << 22;
 ///   optional header given, the ones after it the same header without its
 ///   PTS, DTS and ESCR.
 /// - The first pack has the system header immediately after its pack
-///   header (ISO/IEC 13818-1 §2.7.8); the muxer then writes the program
-///   stream map in that pack. The system header has
-///   `rate_bound` [`MuxerConfig::program_mux_rate`], no flag set, an
-///   `audio_bound` of the streams of `stream_type` 0x03 and 0x04, a
-///   `video_bound` of the video streams, and the bound of each stream
-///   registered. The program stream map, `program_stream_map_version` 0,
-///   names each stream with its `stream_type` and descriptors. The muxer
-///   takes for video the streams of `stream_type` 0x01, 0x02, 0x10, 0x1B,
-///   0x21, 0x24, 0x32, 0x33 and 0x35.
+///   header (ISO/IEC 13818-1 §2.7.8), then the program stream map. Both go
+///   again in the first pack of a PES packet [`MuxerConfig::header_interval`]
+///   or more after the last pack that carried them, and in the first pack of
+///   the next PES packet after the map changes
+///   ([`update_stream`](Self::update_stream),
+///   [`set_program_stream_info`](Self::set_program_stream_info)). Every
+///   system header is the same: `rate_bound`
+///   [`MuxerConfig::program_mux_rate`], no flag set, an `audio_bound` of the
+///   streams of `stream_type` 0x03 and 0x04, a `video_bound` of the video
+///   streams, and the bound of each stream registered. The program stream
+///   map has the `program_stream_info` set and names each stream with its
+///   `stream_type` and descriptors; its `program_stream_map_version` is 0,
+///   incremented by 1 modulo 32 when the map changes after it has been sent
+///   (§2.5.4.2). The muxer takes for video the streams of `stream_type` 0x01,
+///   0x02, 0x10, 0x1B, 0x21, 0x24, 0x32, 0x33 and 0x35.
 /// - The first PES packet of a stream that carries the optional header has
 ///   the P-STD buffer size registered in its PES extension, unless it has
 ///   one of its own (§2.7.7). A P-STD buffer size a PES packet carries is
@@ -130,7 +137,8 @@ const PROGRAM_MUX_RATE_LIMIT: u32 = 1 << 22;
 /// its SCRs give.
 /// It does not check the order of the PES packets across the streams; the
 /// caller gives them in the order of their DTS.
-/// It does not send the system header or the program stream map again.
+/// It does not send a program stream map ahead of when it applies;
+/// `current_next_indicator` is `'1'`.
 /// It does not write padding or pack stuffing.
 ///
 /// ```
@@ -180,6 +188,18 @@ const PROGRAM_MUX_RATE_LIMIT: u32 = 1 << 22;
 pub struct Muxer {
     config: MuxerConfig,
     streams: Vec<Stream>,
+    /// `program_stream_info` of the program stream map
+    program_stream_info: Vec<u8>,
+    /// `program_stream_map_version` of the program stream map as it stands
+    // Why not count the changes: those made before the next PES packet are
+    // one change of the map a receiver sees.
+    map_version: VersionNumber,
+    /// The time of the STC the SCR of the last pack that carried the system
+    /// header and the program stream map as it stands samples, before
+    /// [`MuxerConfig::mux_delay`] is taken off, `None` when no pack has
+    // Why not a flag for a change of the map besides it: a change makes the
+    // map due in the next pack, as no sending at all does.
+    headers_sent_at: Option<SystemTimeClock>,
     /// The last pack written, `None` before the first PES packet
     last_pack: Option<Pack>,
     /// The packs [`poll_output`](Self::poll_output) gives next
@@ -244,6 +264,9 @@ impl Muxer {
         Ok(Self {
             config,
             streams: Vec::new(),
+            program_stream_info: Vec::new(),
+            map_version: VersionNumber(0),
+            headers_sent_at: None,
             last_pack: None,
             pending: Vec::new(),
             end: End::Open,
@@ -292,7 +315,9 @@ impl Muxer {
     ///
     /// # Panics
     ///
-    /// Panics if a PES packet has been taken already.
+    /// Panics if a PES packet has been taken already: every system header,
+    /// the first included, names every stream of the Program Stream
+    /// (§2.5.3.6, §2.7.8), and the muxer makes it of the streams registered.
     #[expect(
         clippy::panic_in_result_fn,
         reason = "a call out of order is the caller's mistake, which panics as documented"
@@ -320,7 +345,13 @@ impl Muxer {
                 stream_id_extension,
             });
         }
-        stream_definition::check_map_length(&self.streams, stream)?;
+        stream_definition::check_map_length(
+            &self.program_stream_info,
+            self.streams
+                .iter()
+                .map(Stream::elementary_stream)
+                .chain(core::iter::once(stream)),
+        )?;
         let stream = Stream {
             stream_id,
             stream_id_extension,
@@ -330,7 +361,9 @@ impl Muxer {
             last_timestamp: None,
         };
         let (audio_bound, video_bound) = stream_definition::bounds(&self.streams);
-        if stream.is_audio() && audio_bound >= system_header::MAX_AUDIO_BOUND.into() {
+        if stream_definition::is_audio(stream.stream_type)
+            && audio_bound >= system_header::MAX_AUDIO_BOUND.into()
+        {
             return Err(Error::AudioBound {
                 audio_bound: audio_bound.saturating_add(1),
             });
@@ -341,18 +374,15 @@ impl Muxer {
             });
         }
         self.streams.push(stream);
-        let mut headers = Vec::new();
-        stream_definition::write_headers(&self.streams, self.config.program_mux_rate, &mut headers)
-            .and_then(|()| {
-                let length = shortest_pack(headers.len());
-                if length > largest_pack(&self.config) {
-                    return Err(Error::PackLength { length });
-                }
-                Ok(())
-            })
-            .inspect_err(|_| {
-                self.streams.pop();
-            })
+        stream_definition::check_headers(
+            &self.streams,
+            &self.program_stream_info,
+            self.map_version,
+            &self.config,
+        )
+        .inspect_err(|_| {
+            self.streams.pop();
+        })
     }
 
     /// Returns the stream registered of `stream_id` and `stream_id_extension`,
@@ -510,15 +540,41 @@ impl Muxer {
         let Self {
             config,
             streams,
+            program_stream_info,
+            map_version,
+            headers_sent_at,
             last_pack,
             pending,
             ..
         } = self;
-        let mut headers = Vec::new();
-        if last_pack.is_none() {
-            stream_definition::write_headers(streams, config.program_mux_rate, &mut headers)?;
-        }
         let pack_header_length = pack_header::FIXED_LENGTH;
+        let filling = last_pack.zip(time).and_then(|(last_pack, time)| {
+            Filling::across(last_pack, time, config.program_mux_rate)
+        });
+        let before = filling
+            .map(|filling| Pack {
+                at: filling.last(),
+                length: pack_header_length,
+            })
+            .or(*last_pack);
+        // Why not `None` as the earliest: before the first pack there is no
+        // pack to follow, and the first PES packet has a time.
+        let first_at = before
+            .map(|pack| pack.arrived(config.program_mux_rate))
+            .max(time);
+        let headers_due = headers_sent_at.zip(first_at).is_none_or(|(sent_at, at)| {
+            at.ticks_since(sent_at) >= SystemTimeClock::ticks_in(config.header_interval)
+        });
+        let mut headers = Vec::new();
+        if headers_due {
+            stream_definition::write_headers(
+                streams,
+                program_stream_info,
+                *map_version,
+                config.program_mux_rate,
+                &mut headers,
+            )?;
+        }
         let largest_pack = largest_pack(config);
         let room = largest_pack.saturating_sub(pack_header_length);
         let longest_continued = room.min(pes::LONGEST_PES_PACKET);
@@ -533,9 +589,6 @@ impl Muxer {
             return Err(Error::PackLength { length });
         }
         let pieces = PesPacketPieces::new(packet, longest, longest_continued);
-        let filling = last_pack.zip(time).and_then(|(last_pack, time)| {
-            Filling::across(last_pack, time, config.program_mux_rate)
-        });
         let filling_length = filling.map_or(0, |filling| {
             usize::try_from(filling.count)
                 .unwrap_or(usize::MAX)
@@ -574,11 +627,12 @@ impl Muxer {
                 });
             }
             for (index, piece) in pieces.enumerate() {
-                let arrived = written.map(|pack| pack.arrived(program_mux_rate));
-                let due = if index == 0 { time } else { None };
-                // Why not `None` as the earliest: before the first pack there
-                // is no pack to follow, and the first PES packet has a time.
-                let Some(at) = arrived.max(due) else {
+                let at = if index == 0 {
+                    first_at
+                } else {
+                    written.map(|pack| pack.arrived(program_mux_rate))
+                };
+                let Some(at) = at else {
                     return Err(missing_pts);
                 };
                 let start = out.len();
@@ -595,6 +649,9 @@ impl Muxer {
             Ok(())
         })?;
         *last_pack = written;
+        if headers_due {
+            *headers_sent_at = first_at;
+        }
         if let (Some(time), Some(stream)) = (time, streams.get_mut(index)) {
             stream.last_timestamp = Some(time);
         }

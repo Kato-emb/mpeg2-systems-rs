@@ -74,7 +74,7 @@ pub enum Error {
         stream_id_extension: Option<u8>,
     },
     /// No stream is registered of the `stream_id`, and the
-    /// `stream_id_extension`, of the PES packet given
+    /// `stream_id_extension`, of the PES packet or the stream given
     UnregisteredStream {
         /// The `stream_id` of the PES packet
         stream_id: StreamId,
@@ -97,6 +97,15 @@ pub enum Error {
     VideoBound {
         /// The video streams there would be
         video_bound: usize,
+    },
+    /// The `stream_type` given to a stream after the first PES packet would
+    /// add it to, or take it from, those that `audio_bound` or `video_bound`
+    /// counts in the system header written, which the muxer does not change
+    SystemHeaderChange {
+        /// The `stream_id` of the stream
+        stream_id: StreamId,
+        /// The `stream_id_extension` of the stream, if it has one
+        stream_id_extension: Option<u8>,
     },
     /// The first PES packet supplied for a stream that carries the optional
     /// header has no PTS, which this muxer requires to initialize the
@@ -183,6 +192,16 @@ impl fmt::Display for Error {
                 formatter,
                 "the shortest pack to write takes {length} bytes, past pack_size or what \
                  program_mux_rate delivers in 0.7 s"
+            ),
+            Self::SystemHeaderChange {
+                stream_id,
+                stream_id_extension,
+            } => write!(
+                formatter,
+                "the stream_type given to the stream of stream_id {:#04x}{} would change \
+                 audio_bound or video_bound of the system header",
+                stream_id.get(),
+                ExtensionOf(*stream_id_extension)
             ),
             Self::StreamInUse {
                 stream_id,
@@ -291,6 +310,7 @@ impl core::error::Error for Error {
             | Self::StreamIdExtension { .. }
             | Self::AudioBound { .. }
             | Self::VideoBound { .. }
+            | Self::SystemHeaderChange { .. }
             | Self::MissingPts { .. }
             | Self::PStdBufferSize { .. }
             | Self::DecreasingTimestamp { .. }
