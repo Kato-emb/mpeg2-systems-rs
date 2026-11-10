@@ -28,6 +28,22 @@ pub(crate) const PREFIX_LENGTH: usize = 6;
 #[cfg(feature = "alloc")]
 pub(crate) const LONGEST_PES_PACKET: usize = PREFIX_LENGTH + 0xffff;
 
+/// Appends a PES packet of `padding_stream` whose `PES_packet_length` is
+/// `pes_packet_length`, its `padding_byte`s 0xFF (ISO/IEC 13818-1 §2.4.3.6,
+/// §2.4.3.7)
+#[cfg(feature = "alloc")]
+pub(crate) fn write_padding_packet(pes_packet_length: u16, out: &mut Vec<u8>) {
+    // Why not `PesPacket::write`: it takes the padding bytes as a slice,
+    // which a writer of padding would have to hold.
+    let start_code = (PACKET_START_CODE_PREFIX << 8) | u32::from(StreamId::PADDING_STREAM.get());
+    out.extend_from_slice(&start_code.to_be_bytes());
+    out.extend_from_slice(&pes_packet_length.to_be_bytes());
+    out.resize(
+        out.len().saturating_add(usize::from(pes_packet_length)),
+        0xff,
+    );
+}
+
 /// Failure to read or write a PES packet
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

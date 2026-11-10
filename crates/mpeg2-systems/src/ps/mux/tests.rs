@@ -134,18 +134,56 @@ fn pes_packets(bytes: &[u8]) -> Vec<PesPacket<'_>> {
         .collect()
 }
 
+/// What a pack carries: the index in the stream of the byte that carries
+/// the last bit of its SCR, its SCR in 27 MHz ticks, its bytes, its system
+/// header, its program stream map, and the `stream_id` of each PES packet
+#[derive(Debug, PartialEq)]
+struct Carried<'a> {
+    scr_byte: u64,
+    scr: u64,
+    length: usize,
+    system_header: Option<&'a [u8]>,
+    map: Option<ProgramStreamMap<'a>>,
+    stream_ids: Vec<u8>,
+}
+
+/// What each pack of `bytes` carries
+fn carried(bytes: &[u8]) -> Vec<Carried<'_>> {
+    let mut packs: Vec<Carried<'_>> = Vec::new();
+    let mut position: u64 = 0;
+    for (element, length) in elements(bytes) {
+        if let Element::PackHeader(header) = element {
+            packs.push(Carried {
+                scr_byte: position.saturating_add(8),
+                scr: header.system_clock_reference.ticks(),
+                length: 0,
+                system_header: None,
+                map: None,
+                stream_ids: Vec::new(),
+            });
+        }
+        position = position.saturating_add(u64::try_from(length).unwrap());
+        let Some(pack) = packs.last_mut() else {
+            continue;
+        };
+        if element != Element::ProgramEnd {
+            pack.length = pack.length.saturating_add(length);
+        }
+        match element {
+            Element::SystemHeader(bytes) => pack.system_header = Some(bytes),
+            Element::ProgramStreamMap(bytes) => {
+                pack.map = Some(ProgramStreamMap::read(bytes).unwrap());
+            }
+            Element::PesPacket(packet) => pack.stream_ids.push(packet.stream_id.get()),
+            Element::PackHeader(_) | Element::ProgramEnd => {}
+        }
+    }
+    packs
+}
+
 /// The SCR of each pack of `bytes`, in 27 MHz ticks
 fn scrs(bytes: &[u8]) -> Vec<u64> {
-    elements(bytes)
-        .into_iter()
-        .filter_map(|(element, _)| {
-            if let Element::PackHeader(header) = element {
-                Some(header.system_clock_reference.ticks())
-            } else {
-                None
-            }
-        })
-        .collect()
+    carried(bytes).into_iter().map(|pack| pack.scr).collect()
 }
 
 /// The P-STD buffer of each PES packet of `bytes`, by `stream_id`
@@ -977,4 +1015,5 @@ fn a_p_std_buffer_size_past_the_bound_registered_is_refused_on_any_pes_packet() 
     );
 }
 
+mod fixed_rate;
 mod headers;

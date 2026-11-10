@@ -16,6 +16,11 @@ use crate::time::{ClockReference, read_marked_clock_reference};
 /// Bytes from `pack_start_code` to `pack_stuffing_length`
 pub(crate) const FIXED_LENGTH: usize = 14;
 
+/// The most `stuffing_byte`s a pack header may have, ISO/IEC 13818-1
+/// §2.5.3.4
+#[cfg(feature = "alloc")]
+pub(super) const MAX_PACK_STUFFING_LENGTH: u8 = 7;
+
 /// Failure to read or write a pack header
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

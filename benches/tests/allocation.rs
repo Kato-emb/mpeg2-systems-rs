@@ -10,7 +10,8 @@
 //! continuity counters of the PIDs written before, and multiplexing PES
 //! packets with either muxer reuses its output held and its scratch buffer,
 //! the Program Stream one also when it sends the system header and the
-//! program stream map with every PES packet.
+//! program stream map with every PES packet, and when it writes padding at a
+//! fixed rate.
 //! A stream whose descriptors could not fit the program stream map, or a
 //! program or a stream whose descriptors could not fit the PMT, is refused
 //! before they are copied.
@@ -129,6 +130,20 @@ fn a_pass_over_an_input_allocates_nothing_once_the_buffers_have_grown() {
         "ps muxer, headers each",
         0,
     ));
+    let mut muxer =
+        registered_program_stream_muxer_of(ps::mux::MuxerConfig::new(25_200).with_fixed_rate(true));
+    let mut first_dts = 90_000;
+    let counted = allocations_once_grown(&ALLOCATOR, || {
+        multiplex_program_stream_pes_packets(&mut muxer, &access_unit, first_dts, &mut out);
+        first_dts += 3_600 * u64::try_from(PES_PACKETS).unwrap();
+    });
+    allocations.push((
+        "pes packets",
+        ACCESS_UNIT_LENGTH,
+        "ps muxer, fixed rate",
+        counted,
+    ));
+    none.push(("pes packets", ACCESS_UNIT_LENGTH, "ps muxer, fixed rate", 0));
     let es_info = vec![0x80; 8 << 20];
     let mut muxer = registered_program_stream_muxer();
     let counted = allocations_once_grown(&ALLOCATOR, || {
