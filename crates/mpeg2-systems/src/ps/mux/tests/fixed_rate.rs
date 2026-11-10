@@ -2,7 +2,7 @@
 //! padding that fills the time before a PES packet
 
 use super::*;
-use crate::ps::mux::schedule::{Gap, PackFill, line_bytes, line_ticks, pack_fill};
+use crate::ps::mux::schedule::{FixedRate, Line};
 use crate::time::SystemTimeClock;
 
 /// Ticks of the STC that 7 bytes take to arrive at [`RATE`], 1 260 000 bytes
@@ -183,20 +183,6 @@ fn at_a_fixed_rate_the_payloads_join_back_into_the_access_units() {
 }
 
 #[test]
-fn a_pack_of_padding_takes_stuffing_up_to_7_bytes_and_a_padding_packet_past_them() {
-    assert_eq!(
-        [14, 21, 22, 23, 14 + 65_541].map(pack_fill),
-        [
-            PackFill::Stuffing(0),
-            PackFill::Stuffing(7),
-            PackFill::PaddingPacket(2),
-            PackFill::PaddingPacket(3),
-            PackFill::PaddingPacket(65_535),
-        ]
-    );
-}
-
-#[test]
 fn the_padding_fills_the_bytes_missing_exactly_in_packs_of_at_most_the_longest_from_a_pack_header_on()
  {
     let before = Pack {
@@ -205,14 +191,18 @@ fn the_padding_fills_the_bytes_missing_exactly_in_packs_of_at_most_the_longest_f
         offset: 0,
     };
     let lengths = |bytes: u64| {
-        let time = before.on_line(100 + bytes, RATE);
-        Gap::padding(before, time, RATE, 2_048).map(|padding| {
-            (
-                padding.iter().map(|pack| pack.length).collect::<Vec<_>>(),
-                padding.bytes(),
-                padding.last().next_offset() - 100,
-            )
-        })
+        let time = before
+            .at
+            .add_ticks((100 + bytes) * TICKS_OF_SEVEN_BYTES / 7);
+        FixedRate::new(RATE, 2_048)
+            .gap(before, time)
+            .map(|padding| {
+                (
+                    padding.iter().map(|pack| pack.length).collect::<Vec<_>>(),
+                    padding.bytes(),
+                    padding.last().next_offset() - 100,
+                )
+            })
     };
 
     // Below a pack header, none; from it on, the bytes missing
@@ -240,9 +230,9 @@ fn the_line_is_taken_in_whole_ticks_rounded_down_past_the_width_of_u64() {
 
     assert_eq!(
         (
-            [0, 1, 6, 7, far].map(|bytes| line_ticks(bytes, RATE)),
-            line_ticks(u64::MAX, 1),
-            [128, 129, 150, 151].map(|ticks| line_bytes(ticks, RATE)),
+            [0, 1, 6, 7, far].map(|bytes| Line::new(RATE).ticks(bytes)),
+            Line::new(1).ticks(u64::MAX),
+            [128, 129, 150, 151].map(|ticks| Line::new(RATE).bytes(ticks)),
         ),
         ([0, 21, 128, 150, far_ticks], u64::MAX, [6, 7, 7, 8])
     );

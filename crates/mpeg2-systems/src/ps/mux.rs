@@ -65,7 +65,7 @@ use crate::ps::{PackHeader, pack_header, system_header};
 use crate::psi::VersionNumber;
 use crate::time::SystemTimeClock;
 use pack_writer::PesPacketPieces;
-use schedule::{Gap, Pack, PackFill, bytes_within_longest_scr_interval, pack_fill};
+use schedule::{FixedRate, Gap, Pack, VariableRate, bytes_within_longest_scr_interval};
 use stream_definition::Stream;
 
 mod config;
@@ -252,6 +252,65 @@ fn shortest_pack(headers: usize) -> usize {
         .saturating_add(1)
 }
 
+/// The rate the settings of a [`Muxer`] ask for, which decides the SCR of
+/// each pack and the packs that fill the time before a PES packet
+// Why not a field of the muxer: it follows from the settings, each time.
+#[derive(Debug, Clone, Copy)]
+enum Rate {
+    Variable(VariableRate),
+    Fixed(FixedRate),
+}
+
+impl Rate {
+    /// Returns the rate of `config`
+    fn of(config: &MuxerConfig) -> Self {
+        if config.fixed_rate {
+            Self::Fixed(FixedRate::new(
+                config.program_mux_rate,
+                largest_pack(config),
+            ))
+        } else {
+            Self::Variable(VariableRate::new(config.program_mux_rate))
+        }
+    }
+
+    /// Returns `fixed_flag` of the system header at the rate
+    fn fixed_flag(self) -> bool {
+        matches!(self, Self::Fixed(_))
+    }
+
+    /// Returns the SCR of the first pack of a PES packet of `time` after
+    /// `before`, the last pack written
+    fn first_scr(
+        self,
+        before: Option<Pack>,
+        time: Option<SystemTimeClock>,
+    ) -> Option<SystemTimeClock> {
+        match self {
+            Self::Variable(rate) => rate.first_scr(before, time),
+            Self::Fixed(rate) => rate.first_scr(before, time),
+        }
+    }
+
+    /// Returns the SCR of the pack after `pack` that carries the rest of a
+    /// PES packet
+    fn following(self, pack: Pack) -> SystemTimeClock {
+        match self {
+            Self::Variable(rate) => rate.following(pack),
+            Self::Fixed(rate) => rate.following(pack),
+        }
+    }
+
+    /// Returns the packs after `before`, the last pack written, that fill
+    /// the time to a PES packet due at `time`
+    fn gap(self, before: Pack, time: SystemTimeClock) -> Option<Gap> {
+        match self {
+            Self::Variable(rate) => rate.gap(before, time),
+            Self::Fixed(rate) => rate.gap(before, time),
+        }
+    }
+}
+
 impl Muxer {
     /// Returns a muxer of `config` with nothing registered
     ///
@@ -409,36 +468,9 @@ impl Muxer {
             program_stream_info,
             self.map_version,
             self.config.program_mux_rate,
-            self.config.fixed_rate,
+            Rate::of(&self.config).fixed_flag(),
             largest_pack(&self.config),
         )
-    }
-
-    /// Returns the earliest SCR under `config` of the pack after `pack`: once
-    /// its bytes have arrived, or at a fixed rate on the line through it
-    fn following(config: &MuxerConfig, pack: Pack) -> SystemTimeClock {
-        if config.fixed_rate {
-            pack.on_line(pack.next_offset(), config.program_mux_rate)
-        } else {
-            pack.arrived(config.program_mux_rate)
-        }
-    }
-
-    /// Returns the SCR of the first pack of a PES packet of `time` after
-    /// `before`, the pack written last: at a fixed rate on the line through
-    /// `before`, otherwise the later of `time` and the earliest SCR after
-    /// `before`
-    fn first_scr(
-        config: &MuxerConfig,
-        before: Option<Pack>,
-        time: Option<SystemTimeClock>,
-    ) -> Option<SystemTimeClock> {
-        match before {
-            Some(pack) if config.fixed_rate => Some(Self::following(config, pack)),
-            // Why not `None` as the earliest: before the first pack there is
-            // no pack to follow, and the first PES packet has a time.
-            before => before.map(|pack| Self::following(config, pack)).max(time),
-        }
     }
 
     /// Returns the stream registered of `stream_id` and `stream_id_extension`,
@@ -609,17 +641,11 @@ impl Muxer {
         let pack_header_length = pack_header::FIXED_LENGTH;
         let program_mux_rate = config.program_mux_rate;
         let largest_pack = largest_pack(config);
-        let gap = last_pack.zip(time).and_then(|(last, time)| {
-            if config.fixed_rate {
-                let longest =
-                    largest_pack.min(pack_header_length.saturating_add(pes::LONGEST_PES_PACKET));
-                Gap::padding(last, time, program_mux_rate, longest)
-            } else {
-                Gap::filling(last, time, program_mux_rate)
-            }
-        });
-        let following = |pack: Pack| Self::following(config, pack);
-        let first_at = Self::first_scr(config, gap.map(Gap::last).or(*last_pack), time);
+        let rate = Rate::of(config);
+        let gap = last_pack
+            .zip(time)
+            .and_then(|(last, time)| rate.gap(last, time));
+        let first_at = rate.first_scr(gap.map(Gap::last).or(*last_pack), time);
         let headers_due = headers_sent_at.zip(first_at).is_none_or(|(sent_at, at)| {
             at.ticks_since(sent_at) >= SystemTimeClock::ticks_in(config.header_interval)
         });
@@ -630,7 +656,7 @@ impl Muxer {
                 program_stream_info,
                 *map_version,
                 config.program_mux_rate,
-                config.fixed_rate,
+                rate.fixed_flag(),
                 header_loops,
                 headers,
             )?;
@@ -669,32 +695,24 @@ impl Muxer {
         let mux_delay = config.mux_delay;
         let mut written = *last_pack;
         write_or_truncate(pending, |out| {
-            let write_pack_header = |at: SystemTimeClock, stuffing: u8, out: &mut Vec<u8>| {
-                let header = PackHeader::new(at.to_clock_reference(mux_delay), program_mux_rate)
-                    .with_pack_stuffing_length(stuffing);
-                writer.write_pack_header(&header, out)
+            let pack_header = |at: SystemTimeClock| {
+                PackHeader::new(at.to_clock_reference(mux_delay), program_mux_rate)
             };
             for pack in gap.into_iter().flat_map(Gap::iter) {
-                match pack_fill(pack.length) {
-                    PackFill::Stuffing(stuffing) => write_pack_header(pack.at, stuffing, out)?,
-                    PackFill::PaddingPacket(pes_packet_length) => {
-                        write_pack_header(pack.at, 0, out)?;
-                        writer.write_padding_packet(pes_packet_length, out);
-                    }
-                }
+                writer.write_padding_pack(&pack_header(pack.at), pack.length, out)?;
                 written = Some(pack);
             }
             for (index, piece) in pieces.enumerate() {
                 let at = if index == 0 {
                     first_at
                 } else {
-                    written.map(following)
+                    written.map(|pack| rate.following(pack))
                 };
                 let Some(at) = at else {
                     return Err(missing_pts);
                 };
                 let start = out.len();
-                write_pack_header(at, 0, out)?;
+                writer.write_pack_header(&pack_header(at), out)?;
                 if index == 0 {
                     out.extend_from_slice(headers);
                 }

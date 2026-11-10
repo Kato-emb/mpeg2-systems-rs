@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use super::Error;
 use crate::field::write_or_truncate;
 use crate::pes::{self, OptionalHeader, PesPacket, StreamId};
-use crate::ps::{MPEG_PROGRAM_END_CODE, PackHeader, ProgramStreamMap, SystemHeader};
+use crate::ps::{MPEG_PROGRAM_END_CODE, PackHeader, ProgramStreamMap, SystemHeader, pack_header};
 
 /// Writer of the elements of a Program Stream, which appends each pack
 /// header, system header, program stream map, PES packet or end code, in the
@@ -168,19 +168,46 @@ impl PackWriter {
         Ok(written)
     }
 
-    /// Appends a PES packet of `padding_stream` whose `PES_packet_length` is
-    /// `pes_packet_length`, its `padding_byte`s 0xFF (§2.4.3.6, §2.4.3.7)
-    pub(crate) fn write_padding_packet(&self, pes_packet_length: u16, out: &mut Vec<u8>) {
-        // Why not `PesPacket::write`: it takes the padding bytes as a slice,
-        // which the muxer would have to hold.
-        let start_code =
-            (pes::PACKET_START_CODE_PREFIX << 8) | u32::from(StreamId::PADDING_STREAM.get());
-        out.extend_from_slice(&start_code.to_be_bytes());
-        out.extend_from_slice(&pes_packet_length.to_be_bytes());
-        out.resize(
-            out.len().saturating_add(usize::from(pes_packet_length)),
-            0xff,
-        );
+    /// Appends a pack of `length` bytes that carries nothing but padding:
+    /// `header` with `stuffing_byte`s where 7 or fewer fill the pack
+    /// (§2.5.3.4), or past that `header` without them and PES packets of
+    /// `padding_stream` (§2.4.3.6, §2.4.3.7), of as near the same length as
+    /// they can be
+    ///
+    /// # Errors
+    ///
+    /// * [`PackHeader`](Error::PackHeader): [`PackHeader::write`] refuses
+    ///   `header`.
+    pub(crate) fn write_padding_pack(
+        &self,
+        header: &PackHeader,
+        length: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<(), Error> {
+        let rest = length.saturating_sub(pack_header::FIXED_LENGTH);
+        match u8::try_from(rest) {
+            Ok(stuffing) if stuffing <= pack_header::MAX_PACK_STUFFING_LENGTH => {
+                self.write_pack_header(&header.with_pack_stuffing_length(stuffing), out)
+            }
+            _ => {
+                self.write_pack_header(&header.with_pack_stuffing_length(0), out)?;
+                // Why as many as the longest PES packet needs, split evenly:
+                // past 7 bytes of padding each packet gets at least 7, the
+                // shortest a padding packet of a Program Stream can be.
+                let count = rest.div_ceil(pes::LONGEST_PES_PACKET);
+                let share = rest.checked_div(count).unwrap_or(rest);
+                let longer = rest.checked_rem(count).unwrap_or(0);
+                for index in 0..count {
+                    let share = share.saturating_add(usize::from(index < longer));
+                    let pes_packet_length = share.saturating_sub(pes::PREFIX_LENGTH);
+                    pes::write_padding_packet(
+                        u16::try_from(pes_packet_length).unwrap_or(u16::MAX),
+                        out,
+                    );
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Appends `MPEG_program_end_code`, which ends the Program Stream, to
