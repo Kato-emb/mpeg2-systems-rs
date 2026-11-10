@@ -32,19 +32,21 @@ mod tests {
     use mpeg2_systems::ps::mux::PackWriter;
     use mpeg2_systems::ps::psm::{ElementaryStream, ElementaryStreamLoop};
     use mpeg2_systems::ps::{PackHeader, ProgramStreamMap, demux as ps_demux};
-    use mpeg2_systems::psi::VersionNumber;
     use mpeg2_systems::psi::pat::{Program, ProgramAssociationSection, ProgramLoop};
     use mpeg2_systems::psi::pmt::{self, TsProgramMapSection};
+    use mpeg2_systems::psi::section::{self, Section, SectionSyntax};
+    use mpeg2_systems::psi::{TableId, VersionNumber};
     use mpeg2_systems::stream_type::StreamType;
     use mpeg2_systems::time::ClockReference;
     use mpeg2_systems::ts::Pid;
-    use mpeg2_systems::ts::demux::{DemuxerConfig, Event, PacketSize};
+    use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event, PacketSize};
     use mpeg2_systems::ts::mux as ts_mux;
     use mpeg2_systems::ts::packet::TransportPacket;
 
     use crate::tools::{
         ProgramAssociation, ProgramMap, Timing, ffprobe, fixture_path, integer, pes_packet,
-        pes_packets_of_188, run, tables_tstables, timing, ts_events, ts_events_with,
+        pes_packets_of_188, run, run_for_output, tables_tstables, timing, ts_events,
+        ts_events_with,
     };
 
     /// A Transport Stream fixture: its name, the offset of its first
@@ -318,6 +320,65 @@ mod tests {
             (program_stream_id(VIDEO), "video".to_owned()),
         ]);
         assert_eq!((expected_streams, expected), (streams, probed));
+    }
+
+    #[test]
+    #[ignore = "runs tstables from TSDuck"]
+    fn the_sections_of_a_subscribed_pid_are_the_ones_tstables_reads() {
+        let pid = Pid::try_from(0x0300).unwrap();
+        let version = |value: u8| VersionNumber::try_from(value).unwrap();
+        let long_body = [0xAA; 300];
+        let long = Section::new(TableId::from(0x80), &long_body).with_syntax(SectionSyntax::new(
+            0x1234,
+            version(3),
+            true,
+            0,
+            0,
+        ));
+        let next = Section::new(TableId::from(0x80), &long_body[..20])
+            .with_syntax(SectionSyntax::new(0x1234, version(4), false, 0, 0));
+        let short = Section::new(TableId::from(0x81), &[0xBB; 20]);
+        let mut writer = ts_mux::PacketWriter::new();
+        let mut written = Vec::new();
+        for section in [&long, &short, &long, &next] {
+            writer.write_section(pid, section, &mut written).unwrap();
+        }
+        let path = format!("{}/private-sections.ts", env!("CARGO_TARGET_TMPDIR"));
+        let sections_path = format!("{}/private-sections.bin", env!("CARGO_TARGET_TMPDIR"));
+        std::fs::write(&path, &written).unwrap();
+        run_for_output(
+            "tstables",
+            &[
+                "--all-sections",
+                "--include-next",
+                "--pid",
+                "0x0300",
+                "--binary-output",
+                &sections_path,
+                &path,
+            ],
+        );
+        let mut tstables = Vec::new();
+        let mut rest = &std::fs::read(&sections_path).unwrap()[..];
+        while let Some(length) = section::encoded_len(rest) {
+            let (bytes, after) = rest.split_at(length);
+            tstables.push(bytes.to_vec());
+            rest = after;
+        }
+
+        let mut demuxer = Demuxer::new(DemuxerConfig::default());
+        demuxer.subscribe_sections(pid);
+        demuxer.handle_input(&written);
+        demuxer.finish();
+        let mut read = Vec::new();
+        while let Some(event) = demuxer.poll_event() {
+            if let Event::Section { section, .. } = event {
+                let mut bytes = Vec::new();
+                section.write(&mut bytes).unwrap();
+                read.push(bytes);
+            }
+        }
+        assert_eq!((read, rest.len()), (tstables, 0));
     }
 
     /// Writes the PAT naming program 1 on PMT PID 0x1000, then its PMT

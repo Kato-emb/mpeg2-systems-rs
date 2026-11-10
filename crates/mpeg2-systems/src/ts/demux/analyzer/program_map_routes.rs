@@ -1,6 +1,6 @@
 //! The program maps a PAT names, version by version
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::mem;
 
@@ -66,18 +66,30 @@ impl ProgramMapRoutes {
         })
     }
 
+    /// Returns whether the latest whole version, or a section of the version
+    /// being gathered, names a program map on `pid`
+    pub(super) fn follows(&self, pid: Pid) -> bool {
+        [&self.named, &self.gathered].into_iter().any(|programs| {
+            programs
+                .binary_search_by_key(&pid, |&(named, _)| named)
+                .is_ok()
+        })
+    }
+
     /// Takes a PAT section in force, and follows the program maps it names
     ///
     /// Each program a section names is named at once, and its program map
     /// gains a reassembler. Once every section of the version is in, the
     /// version's programs replace those of the previous one: a program map
-    /// PID the version no longer names loses its reassembler, and a program
+    /// PID the version no longer names loses its reassembler unless it is in
+    /// `subscribed`, and a program
     /// it no longer names, or a PAT section past its `last_section_number`,
     /// loses its version memory.
     pub(super) fn follow(
         &mut self,
         pat: &ProgramAssociationSection<'_>,
         reassemblers: &mut BTreeMap<Pid, SectionReassembler>,
+        subscribed: &BTreeSet<Pid>,
         gate: &mut VersionGate,
     ) {
         let gathering = match (observe(self.gathering.as_ref(), pat), &mut self.gathering) {
@@ -144,11 +156,7 @@ impl ProgramMapRoutes {
         mem::swap(&mut self.named, &mut self.gathered);
         self.gathered.clear();
         reassemblers.retain(|pid, _| {
-            [Pid::PAT, Pid::CAT].contains(pid)
-                || self
-                    .named
-                    .binary_search_by_key(pid, |&(named, _)| named)
-                    .is_ok()
+            [Pid::PAT, Pid::CAT].contains(pid) || subscribed.contains(pid) || self.follows(*pid)
         });
         gate.retain(
             pat.transport_stream_id,
@@ -186,7 +194,7 @@ fn observe(gathering: Option<&Gathering>, pat: &ProgramAssociationSection<'_>) -
 
 #[cfg(test)]
 mod tests {
-    use alloc::collections::BTreeMap;
+    use alloc::collections::{BTreeMap, BTreeSet};
     use alloc::vec;
     use alloc::vec::Vec;
 
@@ -254,8 +262,12 @@ mod tests {
         fn follow(&mut self, bytes: &[u8]) -> &mut Self {
             let section = Section::read(bytes).unwrap();
             let pat = ProgramAssociationSection::try_from(&section).unwrap();
-            self.routes
-                .follow(&pat, &mut self.reassemblers, &mut self.gate);
+            self.routes.follow(
+                &pat,
+                &mut self.reassemblers,
+                &BTreeSet::new(),
+                &mut self.gate,
+            );
             self
         }
 

@@ -7,7 +7,7 @@
 //! on a subscribed PID. A PAT, PMT or CAT section is queued only at a version
 //! not reported before.
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use core::mem;
 use core::ops::Range;
 
@@ -35,12 +35,19 @@ use version_gate::{Admission, TableSection, VersionGate};
 /// Continuity, section reassembly and table version state of the PIDs a
 /// demuxer follows
 ///
-/// Sections are reassembled on the PAT and CAT PIDs, and on every PID the
-/// PAT names for a program map; PES packets on the PIDs subscribed to.
+/// Sections are reassembled on the PAT and CAT PIDs, on every PID the PAT
+/// names for a program map and on the PIDs subscribed to for sections; PES
+/// packets on the PIDs subscribed to for PES packets.
 #[derive(Debug, Clone)]
 pub(super) struct PacketAnalyzer {
     continuity: ContinuityTracker,
     reassemblers: BTreeMap<Pid, SectionReassembler>,
+    /// The PIDs [`Demuxer::subscribe_sections`](super::Demuxer::subscribe_sections) names
+    // Why not read the subscriptions off the keys of `reassemblers`: a PID
+    // the PAT names has a reassembler too, and a PAT that stops naming it
+    // must not drop a subscription, nor an unsubscription the program map it
+    // carries.
+    section_subscriptions: BTreeSet<Pid>,
     tables: Tables,
     pes: PesReassembly,
 }
@@ -84,6 +91,7 @@ impl PacketAnalyzer {
         Self {
             continuity: ContinuityTracker::new(),
             reassemblers: BTreeMap::new(),
+            section_subscriptions: BTreeSet::new(),
             tables: Tables {
                 routes: ProgramMapRoutes::new(),
                 gate: VersionGate::new(),
@@ -98,6 +106,34 @@ impl PacketAnalyzer {
 
     pub(super) fn unsubscribe_pes(&mut self, pid: Pid, pending: &mut VecDeque<Pending>) {
         self.pes.unsubscribe(pid, pending);
+    }
+
+    pub(super) fn subscribe_sections(&mut self, pid: Pid) {
+        self.section_subscriptions.insert(pid);
+        self.reassemblers
+            .entry(pid)
+            .or_insert_with(SectionReassembler::new);
+    }
+
+    /// Drops the subscription to the sections of `pid`, and, unless the PID
+    /// is reassembled for the PSI, its reassembler and the events it queued
+    pub(super) fn unsubscribe_sections(&mut self, pid: Pid, pending: &mut VecDeque<Pending>) {
+        self.section_subscriptions.remove(&pid);
+        if [Pid::PAT, Pid::CAT].contains(&pid) || self.tables.routes.follows(pid) {
+            return;
+        }
+        // Why drop the queued events too: a section that crossed packets
+        // lends the buffer dropped here.
+        self.reassemblers.remove(&pid);
+        pending.retain(|pending| match pending {
+            Pending::Section { pid: queued, .. }
+            | Pending::Ready(Event::Error(Error::Section { pid: queued, .. })) => *queued != pid,
+            Pending::Ready(_)
+            | Pending::Unsynchronized(_)
+            | Pending::PesPacket { .. }
+            | Pending::ScrambledPesPacket { .. }
+            | Pending::TruncatedPesPacket { .. } => true,
+        });
     }
 
     /// Returns the bytes of a [`Lent::Reassembled`] range of a PES packet on
@@ -213,7 +249,7 @@ impl PacketAnalyzer {
                 reassemble(
                     &mut reassembler,
                     &mut self.tables,
-                    Some(&mut self.reassemblers),
+                    Some((&mut self.reassemblers, &self.section_subscriptions)),
                     verdict,
                     &packet,
                     payload_start,
@@ -254,11 +290,12 @@ impl PacketAnalyzer {
 /// completes
 ///
 /// With `program_maps`, the packet is on the PAT PID, and the routes follow
-/// the program maps its sections name in the reassembler map.
+/// the program maps its sections name in the reassembler map, keeping the
+/// reassemblers of the PIDs subscribed to.
 fn reassemble(
     reassembler: &mut SectionReassembler,
     tables: &mut Tables,
-    mut program_maps: Option<&mut BTreeMap<Pid, SectionReassembler>>,
+    mut program_maps: Option<(&mut BTreeMap<Pid, SectionReassembler>, &BTreeSet<Pid>)>,
     verdict: Verdict,
     packet: &TransportPacket<'_>,
     payload_start: usize,
@@ -325,10 +362,12 @@ fn reassemble(
                 pending.push_back(Pending::Ready(Event::Error(error)));
                 return;
             }
-            if let (Event::ProgramAssociationSection(pat), Some(program_maps)) =
-                (&event, program_maps.as_deref_mut())
+            if let (Event::ProgramAssociationSection(pat), Some((program_maps, subscribed))) =
+                (&event, program_maps.as_mut())
             {
-                tables.routes.follow(pat, program_maps, &mut tables.gate);
+                tables
+                    .routes
+                    .follow(pat, program_maps, subscribed, &mut tables.gate);
             }
             let header_length = if section.syntax.is_some() {
                 PREFIX_LENGTH.saturating_add(SYNTAX_LENGTH)

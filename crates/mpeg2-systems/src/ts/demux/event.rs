@@ -77,13 +77,14 @@ pub enum Event<'a> {
     /// Reported by version, as [`Event::ProgramAssociationSection`] is.
     #[doc(alias = "CAT")]
     CaSection(CaSection<'a>),
-    /// A section of another table, reassembled on a PID that carries PSI,
-    /// its `CRC_32` verified
+    /// A section of another table, reassembled on a PID that carries PSI or
+    /// that [`Demuxer::subscribe_sections`](super::Demuxer::subscribe_sections)
+    /// named, its `CRC_32` verified
     ///
-    /// Sections are reassembled on the PAT and CAT PIDs, and on each PID a
-    /// PAT names for a program map; the PAT and CAT sections among them, and
-    /// the PMT sections of the programs the PAT names, come as their own
-    /// events. A section with `section_syntax_indicator`
+    /// Sections are reassembled on the PAT and CAT PIDs, on each PID a PAT
+    /// names for a program map, and on each PID subscribed to for sections;
+    /// the PAT and CAT sections among them, and the PMT sections of the
+    /// programs the PAT names, come as their own events. A section with `section_syntax_indicator`
     /// `'0'` has no `CRC_32` and is reported as read. The demuxer reports
     /// every such section, a repeated one included; reading a table from it
     /// is up to the caller.
