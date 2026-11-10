@@ -54,17 +54,26 @@ fn not_for_management(parameter: DataUnitParameter) -> bool {
 /// # Examples
 ///
 /// ```
-/// use mpeg2_systems_arib::caption::Tmd;
 /// use mpeg2_systems_arib::caption::data_group::{DataGroup, DataGroupId};
-/// use mpeg2_systems_arib::caption::management::CaptionManagementData;
+/// use mpeg2_systems_arib::caption::data_unit::DataUnitLoop;
+/// use mpeg2_systems_arib::caption::management::{CaptionManagementData, LanguageLoop};
+/// use mpeg2_systems_arib::caption::{BcdTime, Tmd};
 ///
-/// // One language, jpn, and no data unit
-/// let bytes = [0x3f, 0x01, 0x1a, 0x6a, 0x70, 0x6e, 0x80, 0x00, 0x00, 0x00];
+/// // Offset time 01:23:45.678, one language, jpn, and no data unit
+/// let bytes = [
+///     0xbf, 0x01, 0x23, 0x45, 0x67, 0x8f, 0x01, 0x1a, 0x6a, 0x70, 0x6e, 0x80, 0x00, 0x00, 0x00,
+/// ];
 /// let group = DataGroup::new(DataGroupId::try_from(0x00)?, &bytes);
 /// let data = CaptionManagementData::try_from(&group)?;
-/// assert_eq!(data.tmd, Tmd::FREE);
-/// let language = data.languages.iter().next().transpose()?;
-/// assert_eq!(language.map(|language| language.iso_639_language_code), Some(*b"jpn"));
+/// assert_eq!(
+///     data,
+///     CaptionManagementData::new(
+///         Tmd::OFFSET_TIME,
+///         LanguageLoop::from(&bytes[7..12]),
+///         DataUnitLoop::from(&[][..])
+///     )
+///     .with_otm(BcdTime::new(1, 23, 45, 678)?)
+/// );
 ///
 /// // Written back (with the `alloc` feature) as the data of a data group
 /// # #[cfg(feature = "alloc")]

@@ -28,14 +28,19 @@ const CRC_16_LENGTH: usize = 2;
 /// ```
 /// use mpeg2_systems_arib::caption::data_group::{DataGroup, DataGroupId};
 ///
-/// // A data group of caption management data, group A
+/// // A data group of caption management data, group A, the second of two
+/// // linked data groups
 /// let bytes = [
-///     0x00, 0x00, 0x00, 0x00, 0x0a, 0x3f, 0x01, 0x1a, 0x6a, 0x70, 0x6e, 0x80, 0x00, 0x00, 0x00,
-///     0xb0, 0x78,
+///     0x00, 0x01, 0x01, 0x00, 0x0a, 0x3f, 0x01, 0x1a, 0x6a, 0x70, 0x6e, 0x80, 0x00, 0x00, 0x00,
+///     0x8e, 0x7a,
 /// ];
 /// let group = DataGroup::read(&bytes)?;
-/// assert_eq!(group.data_group_id, DataGroupId::try_from(0)?);
-/// assert_eq!(group.data_group_data_byte, &bytes[5..15]);
+/// assert_eq!(
+///     group,
+///     DataGroup::new(DataGroupId::try_from(0)?, &bytes[5..15])
+///         .with_data_group_link_number(1)
+///         .with_last_data_group_link_number(1)
+/// );
 ///
 /// // Written back (with the `alloc` feature), it gives the same bytes
 /// # #[cfg(feature = "alloc")]
