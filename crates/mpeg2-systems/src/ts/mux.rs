@@ -88,6 +88,7 @@ use crate::ts::adaptation_field::AdaptationField;
 use crate::ts::packet::PACKET_LENGTH;
 use packet_writer::{Stuffing, packet_count, section_packets_length};
 use program_definition::{ProgramDefinition, Stream};
+use schedule::{Schedule, Times};
 
 /// The longest time from one PCR to the next, ISO/IEC 13818-1 §2.7.2
 const LONGEST_PCR_INTERVAL: Duration = Duration::from_millis(100);
@@ -96,6 +97,7 @@ mod config;
 mod error;
 mod packet_writer;
 mod program_definition;
+mod schedule;
 
 pub use config::MuxerConfig;
 pub use error::Error;
@@ -211,65 +213,6 @@ pub struct Muxer {
     // the input.
     section_bodies: Vec<u8>,
     finished: bool,
-}
-
-/// The times the PAT and the PMT and the PCR were last sent, before
-/// [`MuxerConfig::mux_delay`] is taken off
-// Why not a field of the time the input has reached: it is the latest
-// `last_timestamp` of the streams, which every time stamp taken sets.
-#[derive(Debug, Clone, Copy)]
-struct Schedule {
-    psi_sent_at: SystemTimeClock,
-    pcr_sent_at: SystemTimeClock,
-    /// Whether more than one PCR has been sent
-    // Why not compare pcr_sent_at with the time of the first PCR: that time
-    // is kept nowhere else, so it would be a field for this alone.
-    several_pcrs: bool,
-}
-
-/// The times at which the PAT and the PMT, or the PCR, are sent before a
-/// PES packet: `count` times `step` ticks of the STC apart from `first`
-#[derive(Debug, Clone, Copy)]
-struct Times {
-    first: SystemTimeClock,
-    count: u64,
-    step: u64,
-}
-
-impl Times {
-    /// Returns the one time `at`
-    const fn once(at: SystemTimeClock) -> Self {
-        Self {
-            first: at,
-            count: 1,
-            step: 0,
-        }
-    }
-
-    /// Returns the times `interval` apart after `sent_at` up to `clock`, or
-    /// `clock` alone when `interval` is 0
-    const fn due(sent_at: SystemTimeClock, clock: SystemTimeClock, interval: u64) -> Self {
-        match clock.ticks_since(sent_at).checked_div(interval) {
-            // Why not skip sending at an interval of 0: the API promises PSI
-            // before every PES packet, including when the clock has not advanced.
-            None => Self::once(clock),
-            Some(count) => Self {
-                first: sent_at.add_ticks(interval),
-                count,
-                step: interval,
-            },
-        }
-    }
-
-    /// Returns the last of the times, `None` when there are none
-    fn last(self) -> Option<SystemTimeClock> {
-        let steps = self.count.checked_sub(1)?;
-        Some(self.first.add_ticks(steps.saturating_mul(self.step)))
-    }
-
-    fn iter(self) -> impl Iterator<Item = SystemTimeClock> {
-        (0..self.count).map(move |index| self.first.add_ticks(index.saturating_mul(self.step)))
-    }
 }
 
 impl Muxer {
