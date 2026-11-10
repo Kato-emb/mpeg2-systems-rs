@@ -67,6 +67,13 @@ impl SectionPid {
             subscribed: false,
         }
     }
+
+    /// Returns whether the sections of `pid`, whose entry this is, are still
+    /// to be reassembled: on the PAT and CAT PIDs, on a PID the routes
+    /// follow, and on a PID subscribed to
+    fn is_reassembled(&self, pid: Pid, routes: &ProgramMapRoutes) -> bool {
+        [Pid::PAT, Pid::CAT].contains(&pid) || self.subscribed || routes.follows(pid)
+    }
 }
 
 /// What the analyzer knows of the PAT, PMTs and CAT on air
@@ -91,13 +98,14 @@ impl Tables {
             (Pid::PAT, TableId::PROGRAM_ASSOCIATION) => Some(Typed::ProgramAssociation),
             (Pid::CAT, TableId::CONDITIONAL_ACCESS) => Some(Typed::ConditionalAccess),
             (Pid::PAT | Pid::CAT, _) => None,
-            // Why type a PMT section that lacks the syntax: it then fails as
-            // a PMT section and is reported as an error, rather than passing
-            // as a section of another table.
-            (_, TableId::TS_PROGRAM_MAP) => section
-                .syntax
-                .is_none_or(|syntax| self.routes.names(pid, syntax.table_id_extension))
-                .then_some(Typed::TsProgramMap),
+            // Why type a PMT section that lacks the syntax on a program map
+            // PID: it then fails as a PMT section and is reported as an
+            // error, rather than passing as a section of another table.
+            (_, TableId::TS_PROGRAM_MAP) => (self.routes.follows(pid)
+                && section
+                    .syntax
+                    .is_none_or(|syntax| self.routes.names(pid, syntax.table_id_extension)))
+            .then_some(Typed::TsProgramMap),
             _ => None,
         }
     }
@@ -134,11 +142,15 @@ impl PacketAnalyzer {
     /// Drops the subscription to the sections of `pid`, and, unless the PID
     /// is reassembled for the PSI, its reassembler and the events it queued
     pub(super) fn unsubscribe_sections(&mut self, pid: Pid, pending: &mut VecDeque<Pending>) {
-        let Some(section_pid) = self.section_pids.get_mut(&pid) else {
+        let Some(section_pid) = self
+            .section_pids
+            .get_mut(&pid)
+            .filter(|section_pid| section_pid.subscribed)
+        else {
             return;
         };
         section_pid.subscribed = false;
-        if [Pid::PAT, Pid::CAT].contains(&pid) || self.tables.routes.follows(pid) {
+        if section_pid.is_reassembled(pid, &self.tables.routes) {
             return;
         }
         // Why drop the queued events too: a section that crossed packets

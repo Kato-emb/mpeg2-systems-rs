@@ -82,9 +82,9 @@ impl ProgramMapRoutes {
     /// gains a reassembler. Once every section of the version is in, the
     /// version's programs replace those of the previous one: a program map
     /// PID the version no longer names loses its entry in `section_pids`
-    /// unless the caller subscribed to it, and a program
-    /// it no longer names, or a PAT section past its `last_section_number`,
-    /// loses its version memory.
+    /// unless the caller subscribed to it, and a program it no longer names,
+    /// or a PAT section past its `last_section_number`, loses its version
+    /// memory.
     pub(super) fn follow(
         &mut self,
         pat: &ProgramAssociationSection<'_>,
@@ -154,9 +154,7 @@ impl ProgramMapRoutes {
         }
         mem::swap(&mut self.named, &mut self.gathered);
         self.gathered.clear();
-        section_pids.retain(|pid, section_pid| {
-            [Pid::PAT, Pid::CAT].contains(pid) || section_pid.subscribed || self.follows(*pid)
-        });
+        section_pids.retain(|pid, section_pid| section_pid.is_reassembled(*pid, self));
         gate.retain(
             pat.transport_stream_id,
             Some(pat.last_section_number),

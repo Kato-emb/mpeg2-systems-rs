@@ -34,7 +34,7 @@ mod tests {
     use mpeg2_systems::ps::{PackHeader, ProgramStreamMap, demux as ps_demux};
     use mpeg2_systems::psi::pat::{Program, ProgramAssociationSection, ProgramLoop};
     use mpeg2_systems::psi::pmt::{self, TsProgramMapSection};
-    use mpeg2_systems::psi::section::{self, Section, SectionSyntax};
+    use mpeg2_systems::psi::section::{Section, SectionSyntax};
     use mpeg2_systems::psi::{TableId, VersionNumber};
     use mpeg2_systems::stream_type::StreamType;
     use mpeg2_systems::time::ClockReference;
@@ -358,11 +358,27 @@ mod tests {
                 &path,
             ],
         );
+        // Why cut the sections and read their headers here rather than with
+        // the crate: the comparison would then lean on the crate's own
+        // reading of the syntax, and a mistake it shares with the demuxer
+        // would cancel out.
         let mut tstables = Vec::new();
         let mut rest = &std::fs::read(&sections_path).unwrap()[..];
-        while let Some(length) = section::encoded_len(rest) {
+        while rest.len() >= 3 {
+            let length = 3 + (usize::from(rest[1] & 0x0F) << 8 | usize::from(rest[2]));
             let (bytes, after) = rest.split_at(length);
-            tstables.push(bytes.to_vec());
+            tstables.push(if bytes[1] & 0x80 == 0 {
+                (bytes[0], None, bytes[3..].to_vec())
+            } else {
+                let syntax = (
+                    u16::from_be_bytes([bytes[3], bytes[4]]),
+                    (bytes[5] >> 1) & 0x1F,
+                    bytes[5] & 0x01 == 1,
+                    bytes[6],
+                    bytes[7],
+                );
+                (bytes[0], Some(syntax), bytes[8..length - 4].to_vec())
+            });
             rest = after;
         }
 
@@ -373,9 +389,19 @@ mod tests {
         let mut read = Vec::new();
         while let Some(event) = demuxer.poll_event() {
             if let Event::Section { section, .. } = event {
-                let mut bytes = Vec::new();
-                section.write(&mut bytes).unwrap();
-                read.push(bytes);
+                read.push((
+                    section.table_id.get(),
+                    section.syntax.map(|syntax| {
+                        (
+                            syntax.table_id_extension,
+                            syntax.version_number.get(),
+                            syntax.current_next_indicator,
+                            syntax.section_number,
+                            syntax.last_section_number,
+                        )
+                    }),
+                    section.body.to_vec(),
+                ));
             }
         }
         assert_eq!((read, rest.len()), (tstables, 0));

@@ -84,10 +84,10 @@ pub enum Event<'a> {
     /// Sections are reassembled on the PAT and CAT PIDs, on each PID a PAT
     /// names for a program map, and on each PID subscribed to for sections;
     /// the PAT and CAT sections among them, and the PMT sections of the
-    /// programs the PAT names, come as their own events. A section with `section_syntax_indicator`
-    /// `'0'` has no `CRC_32` and is reported as read. The demuxer reports
-    /// every such section, a repeated one included; reading a table from it
-    /// is up to the caller.
+    /// programs the PAT names, come as their own events. A section with
+    /// `section_syntax_indicator` `'0'` has no `CRC_32` and is reported as
+    /// read. The demuxer reports every such section, a repeated one included;
+    /// reading a table from it is up to the caller.
     Section {
         /// The PID the section was carried on
         pid: Pid,

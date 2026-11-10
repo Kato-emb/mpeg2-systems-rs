@@ -651,4 +651,149 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn the_sections_of_a_pid_not_subscribed_to_are_not_reported_beside_one_subscribed_to() {
+        let section = private_section(0, true, &[0xAA; 10]);
+        let payload = [&[0x00][..], &section].concat();
+        let stream = behind_null_packets(&[
+            packet(0x0300, true, 0, None, Some(&payload)),
+            packet(0x0400, true, 0, None, Some(&payload)),
+        ]);
+        assert_eq!(
+            demux_subscribed(&stream, &[0x0400]),
+            acquired_then(
+                PacketSize::Standard188,
+                vec![seen_section(0x0400, &read(&section))]
+            )
+        );
+    }
+
+    #[test]
+    fn subscribing_the_pat_and_program_map_pids_keeps_their_resends_unreported_and_the_pmt_typed() {
+        assert_eq!(
+            demux_in_turn(
+                subscribed_to(&[0x0000, 0x1000]),
+                &[STANDARD_188, STANDARD_188]
+            ),
+            [
+                acquired_then(PacketSize::Standard188, fixture_events()),
+                pcrs()
+            ]
+        );
+    }
+
+    #[test]
+    fn unsubscribing_drops_the_section_errors_not_yet_polled() {
+        let good = private_section(0, true, &[0xAA; 10]);
+        let mut broken = private_section(1, true, &[0xBB; 10]);
+        *broken.last_mut().unwrap() ^= 0x01;
+        let stream = behind_null_packets(&[packet(
+            0x0300,
+            true,
+            0,
+            None,
+            Some(&[&[0x00][..], &good, &broken].concat()),
+        )]);
+        let mut demuxer = subscribed_to(&[0x0300]);
+        demuxer.handle_input(&stream);
+        let mut seen = vec![
+            seen_event(demuxer.poll_event().unwrap()),
+            seen_event(demuxer.poll_event().unwrap()),
+        ];
+        demuxer.unsubscribe_sections(Pid::try_from(0x0300).unwrap());
+        drain(&mut demuxer, &mut seen);
+        demuxer.finish();
+        drain(&mut demuxer, &mut seen);
+        assert_eq!(
+            seen,
+            acquired_then(
+                PacketSize::Standard188,
+                vec![seen_section(0x0300, &read(&good))]
+            )
+        );
+    }
+
+    /// A PAT section of `transport_stream_id` 1, section 0 of 2, naming
+    /// `programs`
+    fn first_of_two_pat_sections(version_number: u8, programs: &[(u16, u16)]) -> Vec<u8> {
+        let mut bytes = pat_section(version_number, programs);
+        bytes[7] = 0x01;
+        let crc_start = bytes.len() - 4;
+        let crc = mpeg2_systems::crc::crc_32(&bytes[..crc_start]).to_be_bytes();
+        bytes[crc_start..].copy_from_slice(&crc);
+        bytes
+    }
+
+    #[test]
+    fn unsubscribing_a_pid_not_subscribed_changes_nothing_on_a_pid_left_from_a_pat_version_dropped()
+    {
+        let section = short_section(0x80, &[0xAA; 10]);
+        let pat_packet = |version_number: u8, programs: &[(u16, u16)], continuity_counter: u8| {
+            let pat = first_of_two_pat_sections(version_number, programs);
+            packet(
+                0x0000,
+                true,
+                continuity_counter,
+                None,
+                Some(&[&[0x00][..], &pat].concat()),
+            )
+        };
+        let stream = behind_null_packets(&[
+            pat_packet(0, &[(1, 0x1000)], 0),
+            pat_packet(1, &[], 1),
+            packet(
+                0x1000,
+                true,
+                0,
+                None,
+                Some(&[&[0x00][..], &section].concat()),
+            ),
+        ]);
+        let run = |unsubscribe: bool| {
+            let mut demuxer = Demuxer::new(DemuxerConfig::default());
+            demuxer.handle_input(&stream);
+            let mut seen = Vec::new();
+            for _ in 0..3 {
+                seen.push(seen_event(demuxer.poll_event().unwrap()));
+            }
+            if unsubscribe {
+                demuxer.unsubscribe_sections(Pid::try_from(0x1000).unwrap());
+            }
+            drain(&mut demuxer, &mut seen);
+            demuxer.finish();
+            drain(&mut demuxer, &mut seen);
+            seen
+        };
+        let unchanged = run(false);
+        assert_eq!(
+            (run(true), unchanged.last().cloned()),
+            (unchanged, Some(seen_section(0x1000, &read(&section))))
+        );
+    }
+
+    #[test]
+    fn a_program_map_table_id_without_the_syntax_is_reported_as_read_on_a_pid_the_pat_does_not_name()
+     {
+        let section = short_section(0x02, &[0xAA; 10]);
+        let payload = [&[0x00][..], &section].concat();
+        let on = |pid: u16| {
+            behind_null_packets(&[
+                pat_packet(0, &[(1, 0x1000)], 0),
+                packet(pid, true, 0, None, Some(&payload)),
+            ])
+        };
+        let section_on_0x0300 = demux_subscribed(&on(0x0300), &[0x0300]);
+        let section_on_the_program_map_pid = demux_subscribed(&on(0x1000), &[]);
+        assert_eq!(
+            (
+                section_on_0x0300.last().cloned(),
+                matches!(
+                    section_on_the_program_map_pid.last(),
+                    Some(Seen::Error(Error::TsProgramMapSection { .. }))
+                )
+            ),
+            (Some(seen_section(0x0300, &read(&section))), true)
+        );
+    }
 }
