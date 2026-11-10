@@ -430,18 +430,20 @@ mod tests {
     }
 
     /// What `tsp -P dump` prints of a Transport Packet: its PID,
-    /// `payload_unit_start_indicator`, `transport_priority`,
-    /// `random_access_indicator`, `elementary_stream_priority_indicator`,
-    /// whether it carries a PCR, and the bytes of its transport private data
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    /// `payload_unit_start_indicator`, `transport_priority`, whether it has
+    /// a payload, `random_access_indicator`,
+    /// `elementary_stream_priority_indicator`, whether it carries a PCR, and
+    /// its transport private data
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     struct Dumped {
         pid: u64,
         payload_unit_start_indicator: bool,
         transport_priority: bool,
+        payload: bool,
         random_access_indicator: bool,
         elementary_stream_priority_indicator: bool,
         program_clock_reference: bool,
-        transport_private_data: Option<u64>,
+        transport_private_data: Option<Vec<u8>>,
     }
 
     /// The value after `key: ` in a line `tsp -P dump` prints, up to the next
@@ -456,6 +458,7 @@ mod tests {
     /// Each Transport Packet of the file at `path`, as `tsp -P dump` reads it
     fn dumped(path: &str) -> Vec<Dumped> {
         let mut packets: Vec<Dumped> = Vec::new();
+        let mut private_data_left = 0;
         for line in tsp(
             path,
             &["-P", "dump", "--headers-only", "--adaptation-field"],
@@ -473,14 +476,28 @@ mod tests {
             } else if line.starts_with("Error: ") {
                 packet.payload_unit_start_indicator = after(line, "unit start") == "1";
                 packet.transport_priority = after(line, "priority") == "1";
+            } else if line.starts_with("Adaptation field: ") {
+                packet.payload = after(line, "payload") == "yes";
             } else if line.starts_with("Discontinuity: ") {
                 packet.random_access_indicator = after(line, "random access") == "1";
                 packet.elementary_stream_priority_indicator = after(line, "ES priority") == "1";
             } else if line.starts_with("PCR: ") {
                 packet.program_clock_reference = true;
             } else if let Some(rest) = line.strip_prefix("Private data (") {
-                packet.transport_private_data =
-                    Some(rest.split(' ').next().unwrap().parse().unwrap());
+                private_data_left = rest.split(' ').next().unwrap().parse().unwrap();
+                packet.transport_private_data = Some(Vec::new());
+            } else if let (Some((offset, bytes)), Some(data)) =
+                (line.split_once(':'), packet.transport_private_data.as_mut())
+                && private_data_left > 0
+                && offset.len() == 4
+            {
+                // Why take no more than a line holds, and no more than are
+                // left: the hexadecimal bytes of a line, 16 at most, are
+                // followed by the same bytes in ASCII
+                for byte in bytes.split_whitespace().take(private_data_left.min(16)) {
+                    data.push(u8::from_str_radix(byte, 16).unwrap());
+                    private_data_left -= 1;
+                }
             }
         }
         packets
@@ -490,14 +507,33 @@ mod tests {
     #[ignore = "runs tsp from TSDuck"]
     fn the_carriage_set_on_each_pes_packet_reads_in_tsp_dump_on_its_transport_packets() {
         let pid = |value: u16| Pid::try_from(value).unwrap();
-        let private_data = [0x5a; 4];
-        let carriage_of = |index: usize| match index % 4 {
-            0 => PesPacketCarriage::new().with_random_access_indicator(true),
-            1 => PesPacketCarriage::new()
-                .with_elementary_stream_priority_indicator(true)
-                .with_transport_private_data(&private_data),
-            2 => PesPacketCarriage::new().with_transport_priority(true),
-            _ => PesPacketCarriage::new(),
+        let inputs = inputs();
+        let private_data: Vec<Vec<u8>> = (0..inputs.len())
+            .map(|index| match index % 6 {
+                1 => vec![u8::try_from(index % 256).unwrap(); 4],
+                4 => (0..180)
+                    .map(|byte| u8::try_from((byte + index) % 256).unwrap())
+                    .collect(),
+                5 => vec![u8::try_from(index % 256).unwrap(); 174],
+                _ => Vec::new(),
+            })
+            .collect();
+        let carriage_of = |index: usize| {
+            let data = private_data[index].as_slice();
+            match index % 6 {
+                0 => PesPacketCarriage::new().with_random_access_indicator(true),
+                1 => PesPacketCarriage::new()
+                    .with_elementary_stream_priority_indicator(true)
+                    .with_transport_private_data(data),
+                2 => PesPacketCarriage::new().with_transport_priority(true),
+                3 => PesPacketCarriage::new(),
+                4 => PesPacketCarriage::new()
+                    .with_transport_priority(true)
+                    .with_transport_private_data(data),
+                _ => PesPacketCarriage::new()
+                    .with_random_access_indicator(true)
+                    .with_transport_private_data(data),
+            }
         };
         let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
         muxer.add_program(1, pid(PMT_PID)).unwrap();
@@ -506,7 +542,6 @@ mod tests {
                 .add_stream(1, ElementaryStream::new(stream_type, pid(stream_pid)))
                 .unwrap();
         }
-        let inputs = inputs();
         let mut stream = Vec::new();
         for (index, (pid_value, stream_id, timing, payload)) in inputs.iter().enumerate() {
             muxer
@@ -522,8 +557,6 @@ mod tests {
         let path = format!("{}/muxer_carriage.ts", env!("CARGO_TARGET_TMPDIR"));
         std::fs::write(&path, &stream).unwrap();
 
-        // Each Transport Packet of the PES packets, as the carriage given with
-        // its PES packet sets it: the fields of the first, the priority of all
         let mut expected = Vec::new();
         let mut read = Vec::new();
         let mut starts = 0..;
@@ -539,7 +572,11 @@ mod tests {
             expected.push(Dumped {
                 pid: packet.pid,
                 payload_unit_start_indicator: first,
-                transport_priority: carriage.transport_priority,
+                // Why not set the priority on a packet without a payload:
+                // that is a PCR the muxer sends alone, not a packet of the
+                // PES packet
+                transport_priority: carriage.transport_priority && packet.payload,
+                payload: packet.payload,
                 random_access_indicator: first && carriage.random_access_indicator,
                 elementary_stream_priority_indicator: first
                     && carriage.elementary_stream_priority_indicator,
@@ -550,7 +587,7 @@ mod tests {
                 transport_private_data: carriage
                     .transport_private_data
                     .filter(|_| first)
-                    .map(|data| data.len() as u64),
+                    .map(<[u8]>::to_vec),
             });
             read.push(packet);
         }
@@ -562,13 +599,18 @@ mod tests {
                     && !packet.program_clock_reference
             })
             .count();
+        let pcrs_alone_on_the_pcr_pid = read
+            .iter()
+            .filter(|packet| packet.pid == u64::from(VIDEO_PID) && !packet.payload)
+            .count();
         assert_eq!(
             (
                 read,
                 starts.next(),
-                random_access_on_the_pcr_pid_without_a_pcr
+                random_access_on_the_pcr_pid_without_a_pcr,
+                pcrs_alone_on_the_pcr_pid > 0
             ),
-            (expected, Some(inputs.len()), 0)
+            (expected, Some(inputs.len()), 0, true)
         );
     }
 }
