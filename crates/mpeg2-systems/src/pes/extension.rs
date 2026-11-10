@@ -106,6 +106,44 @@ impl<'input> PesExtension<'input> {
         }
     }
 
+    /// Returns the value with `pes_private_data` present, set to the one given
+    #[must_use]
+    pub const fn with_pes_private_data(mut self, pes_private_data: &'input [u8; 16]) -> Self {
+        self.pes_private_data = Some(pes_private_data);
+        self
+    }
+
+    /// Returns the value with `pack_header_field` present, set to the one given
+    #[must_use]
+    pub const fn with_pack_header_field(mut self, pack_header_field: &'input [u8]) -> Self {
+        self.pack_header_field = Some(pack_header_field);
+        self
+    }
+
+    /// Returns the value with `program_packet_sequence_counter` present, set to the one given
+    #[must_use]
+    pub const fn with_program_packet_sequence_counter(
+        mut self,
+        program_packet_sequence_counter: ProgramPacketSequenceCounter,
+    ) -> Self {
+        self.program_packet_sequence_counter = Some(program_packet_sequence_counter);
+        self
+    }
+
+    /// Returns the value with `p_std_buffer` present, set to the one given
+    #[must_use]
+    pub const fn with_p_std_buffer(mut self, p_std_buffer: PStdBuffer) -> Self {
+        self.p_std_buffer = Some(p_std_buffer);
+        self
+    }
+
+    /// Returns the value with `pes_extension_field` present, set to the one given
+    #[must_use]
+    pub const fn with_pes_extension_field(mut self, pes_extension_field: &'input [u8]) -> Self {
+        self.pes_extension_field = Some(pes_extension_field);
+        self
+    }
+
     /// Returns the number of bytes the extension occupies
     pub(super) fn encoded_len(&self) -> usize {
         let runs = [self.pack_header_field, self.pes_extension_field]

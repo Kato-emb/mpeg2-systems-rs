@@ -34,10 +34,8 @@
 //! let map = ProgramStreamMap::new(VersionNumber::try_from(0)?);
 //! writer.write_program_stream_map(&map, &mut stream)?;
 //! let access_unit = vec![0xaa; 100_000];
-//! let mut header = OptionalHeader::new();
-//! header.pts = Some(Timestamp::try_from(90_000)?);
-//! let mut packet = PesPacket::new(StreamId::from(0xe0), &access_unit);
-//! packet.optional_header = Some(header);
+//! let packet = PesPacket::new(StreamId::from(0xe0), &access_unit)
+//!     .with_optional_header(OptionalHeader::new().with_pts(Timestamp::try_from(90_000)?));
 //! assert_eq!(writer.write_pes_packets(&packet, &mut stream)?, 2);
 //! // The end of the Program Stream
 //! writer.write_program_end_code(&mut stream);
@@ -92,8 +90,7 @@ const PROGRAM_MUX_RATE_LIMIT: u32 = 1 << 22;
 /// use mpeg2_systems::ps::mux::MuxerConfig;
 ///
 /// // 1 260 000 bytes a second
-/// let mut config = MuxerConfig::new(25_200);
-/// config.mux_delay = Duration::from_millis(500);
+/// let config = MuxerConfig::new(25_200).with_mux_delay(Duration::from_millis(500));
 /// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -139,6 +136,27 @@ impl MuxerConfig {
             mux_delay: Duration::from_millis(700),
             buffer_limit: 4 * 1024 * 1024,
         }
+    }
+
+    /// Returns the value with the given `pack_size`
+    #[must_use]
+    pub const fn with_pack_size(mut self, pack_size: usize) -> Self {
+        self.pack_size = pack_size;
+        self
+    }
+
+    /// Returns the value with the given `mux_delay`
+    #[must_use]
+    pub const fn with_mux_delay(mut self, mux_delay: Duration) -> Self {
+        self.mux_delay = mux_delay;
+        self
+    }
+
+    /// Returns the value with the given `buffer_limit`
+    #[must_use]
+    pub const fn with_buffer_limit(mut self, buffer_limit: usize) -> Self {
+        self.buffer_limit = buffer_limit;
+        self
     }
 }
 
@@ -213,10 +231,8 @@ impl MuxerConfig {
 /// muxer.add_stream(video, None, StreamType::ISO_IEC_13818_2_VIDEO, buffer, &[])?;
 /// // Give an access unit a second in, and take the packs
 /// let access_unit = vec![0xaa; 5_000];
-/// let mut header = OptionalHeader::new();
-/// header.pts = Some(Timestamp::try_from(90_000)?);
-/// let mut packet = PesPacket::new(video, &access_unit);
-/// packet.optional_header = Some(header);
+/// let packet = PesPacket::new(video, &access_unit)
+///     .with_optional_header(OptionalHeader::new().with_pts(Timestamp::try_from(90_000)?));
 /// muxer.handle_pes_packet(&packet)?;
 /// muxer.poll_output(&mut stream);
 /// // The end, and what is still held

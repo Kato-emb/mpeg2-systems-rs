@@ -120,7 +120,8 @@ impl From<section::Error> for Error {
 /// # Examples
 ///
 /// ```
-/// use mpeg2_systems::psi::pat::{Program, ProgramAssociationSection};
+/// use mpeg2_systems::psi::VersionNumber;
+/// use mpeg2_systems::psi::pat::{ProgramAssociationSection, ProgramLoop};
 /// use mpeg2_systems::psi::section::Section;
 ///
 /// // The program association section of a stream of one program
@@ -130,11 +131,13 @@ impl From<section::Error> for Error {
 /// ];
 /// let section = Section::read(&bytes)?;
 /// let pat = ProgramAssociationSection::try_from(&section)?;
-/// assert_eq!(pat.transport_stream_id, 1);
-///
-/// let program = pat.programs.iter().next().unwrap()?;
-/// assert_eq!(program.program_number(), 1);
-/// assert_eq!(program.pid().get(), 0x1000);
+/// // Program 1, its program map table on PID 0x1000
+/// let programs = [0x00, 0x01, 0xf0, 0x00];
+/// assert_eq!(
+///     pat,
+///     ProgramAssociationSection::new(1, VersionNumber::try_from(0)?)
+///         .with_programs(ProgramLoop::from(programs.as_slice()))
+/// );
 ///
 /// // Written back (with the `alloc` feature), it gives the same bytes
 /// # #[cfg(feature = "alloc")]
@@ -176,6 +179,34 @@ impl<'input> ProgramAssociationSection<'input> {
             last_section_number: 0,
             programs: ProgramLoop(&[]),
         }
+    }
+
+    /// Returns the value with the given `current_next_indicator`
+    #[must_use]
+    pub const fn with_current_next_indicator(mut self, current_next_indicator: bool) -> Self {
+        self.current_next_indicator = current_next_indicator;
+        self
+    }
+
+    /// Returns the value with the given `section_number`
+    #[must_use]
+    pub const fn with_section_number(mut self, section_number: u8) -> Self {
+        self.section_number = section_number;
+        self
+    }
+
+    /// Returns the value with the given `last_section_number`
+    #[must_use]
+    pub const fn with_last_section_number(mut self, last_section_number: u8) -> Self {
+        self.last_section_number = last_section_number;
+        self
+    }
+
+    /// Returns the value with the given `programs`
+    #[must_use]
+    pub const fn with_programs(mut self, programs: ProgramLoop<'input>) -> Self {
+        self.programs = programs;
+        self
     }
 
     /// Returns the number of bytes [`write`](Self::write) appends

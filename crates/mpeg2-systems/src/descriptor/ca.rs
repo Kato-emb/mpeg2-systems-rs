@@ -26,13 +26,14 @@ const FIXED_LENGTH: usize = 4;
 /// ```
 /// use mpeg2_systems::descriptor::RawDescriptor;
 /// use mpeg2_systems::descriptor::ca::CaDescriptor;
+/// use mpeg2_systems::ts::Pid;
 ///
-/// // CA_system_ID 0x0005, EMMs on PID 0x0100
-/// let bytes = [0x09, 0x04, 0x00, 0x05, 0xe1, 0x00];
+/// // CA_system_ID 0x0005, EMMs on PID 0x0100, with two private data bytes
+/// let bytes = [0x09, 0x06, 0x00, 0x05, 0xe1, 0x00, 0xab, 0xcd];
 /// let descriptor = CaDescriptor::try_from(&RawDescriptor::read(&bytes)?)?;
 /// assert_eq!(
-///     (descriptor.ca_system_id, descriptor.ca_pid.get()),
-///     (0x0005, 0x0100)
+///     descriptor,
+///     CaDescriptor::new(0x0005, Pid::try_from(0x0100)?).with_private_data_byte(&[0xab, 0xcd])
 /// );
 ///
 /// # #[cfg(feature = "alloc")]
@@ -41,7 +42,7 @@ const FIXED_LENGTH: usize = 4;
 /// descriptor.write(&mut written)?;
 /// assert_eq!(written, bytes);
 /// # }
-/// # Ok::<(), mpeg2_systems::descriptor::Error>(())
+/// # Ok::<(), Box<dyn core::error::Error>>(())
 /// ```
 #[doc(alias("CA_descriptor", "conditional_access_descriptor"))]
 #[non_exhaustive]
@@ -64,6 +65,13 @@ impl<'input> CaDescriptor<'input> {
             ca_pid,
             private_data_byte: &[],
         }
+    }
+
+    /// Returns the value with the given `private_data_byte`
+    #[must_use]
+    pub const fn with_private_data_byte(mut self, private_data_byte: &'input [u8]) -> Self {
+        self.private_data_byte = private_data_byte;
+        self
     }
 
     /// Returns the number of bytes [`write`](Self::write) appends

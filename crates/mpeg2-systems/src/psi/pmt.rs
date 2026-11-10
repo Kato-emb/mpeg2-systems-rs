@@ -165,9 +165,10 @@ impl From<section::Error> for Error {
 /// # Examples
 ///
 /// ```
-/// use mpeg2_systems::psi::pmt::TsProgramMapSection;
+/// use mpeg2_systems::psi::VersionNumber;
+/// use mpeg2_systems::psi::pmt::{ElementaryStreamLoop, TsProgramMapSection};
 /// use mpeg2_systems::psi::section::Section;
-/// use mpeg2_systems::stream_type::StreamType;
+/// use mpeg2_systems::ts::Pid;
 ///
 /// // A program of one MPEG-2 video stream on PID 0x0100, which carries the
 /// // PCR
@@ -177,12 +178,14 @@ impl From<section::Error> for Error {
 /// ];
 /// let section = Section::read(&bytes)?;
 /// let pmt = TsProgramMapSection::try_from(&section)?;
-/// assert_eq!(pmt.program_number, 1);
-/// assert_eq!(pmt.pcr_pid.map(|pid| pid.get()), Some(0x0100));
-///
-/// let stream = pmt.elementary_streams.iter().next().unwrap()?;
-/// assert_eq!(stream.stream_type, StreamType::ISO_IEC_13818_2_VIDEO);
-/// assert_eq!(stream.elementary_pid.get(), 0x0100);
+/// // stream_type 0x02 on PID 0x0100, with no descriptors
+/// let streams = [0x02, 0xe1, 0x00, 0xf0, 0x00];
+/// assert_eq!(
+///     pmt,
+///     TsProgramMapSection::new(1, VersionNumber::try_from(0)?)
+///         .with_pcr_pid(Pid::try_from(0x0100)?)
+///         .with_elementary_streams(ElementaryStreamLoop::from(streams.as_slice()))
+/// );
 ///
 /// // Written back (with the `alloc` feature), it gives the same bytes
 /// # #[cfg(feature = "alloc")]
@@ -231,6 +234,51 @@ impl<'input> TsProgramMapSection<'input> {
             program_info: DescriptorLoop(&[]),
             elementary_streams: ElementaryStreamLoop(&[]),
         }
+    }
+
+    /// Returns the value with the given `current_next_indicator`
+    #[must_use]
+    pub const fn with_current_next_indicator(mut self, current_next_indicator: bool) -> Self {
+        self.current_next_indicator = current_next_indicator;
+        self
+    }
+
+    /// Returns the value with the given `section_number`
+    #[must_use]
+    pub const fn with_section_number(mut self, section_number: u8) -> Self {
+        self.section_number = section_number;
+        self
+    }
+
+    /// Returns the value with the given `last_section_number`
+    #[must_use]
+    pub const fn with_last_section_number(mut self, last_section_number: u8) -> Self {
+        self.last_section_number = last_section_number;
+        self
+    }
+
+    /// Returns the value with `pcr_pid` present, set to the one given
+    #[must_use]
+    pub const fn with_pcr_pid(mut self, pcr_pid: Pid) -> Self {
+        self.pcr_pid = Some(pcr_pid);
+        self
+    }
+
+    /// Returns the value with the given `program_info`
+    #[must_use]
+    pub const fn with_program_info(mut self, program_info: DescriptorLoop<'input>) -> Self {
+        self.program_info = program_info;
+        self
+    }
+
+    /// Returns the value with the given `elementary_streams`
+    #[must_use]
+    pub const fn with_elementary_streams(
+        mut self,
+        elementary_streams: ElementaryStreamLoop<'input>,
+    ) -> Self {
+        self.elementary_streams = elementary_streams;
+        self
     }
 
     /// Returns the number of bytes [`write`](Self::write) appends
@@ -485,6 +533,38 @@ mod tests {
             video,
             ElementaryStream::new(StreamType::ISO_IEC_13818_7_AUDIO, pid(0x0101)),
         ]
+    }
+
+    #[test]
+    fn an_entry_built_from_new_and_every_with_method_equals_one_with_every_field_assigned() {
+        let mut assigned = ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x0100));
+        assigned.es_info = DescriptorLoop::from(ES_INFO.as_slice());
+
+        let built = ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x0100))
+            .with_es_info(DescriptorLoop::from(ES_INFO.as_slice()));
+
+        assert_eq!(built, assigned);
+    }
+
+    #[test]
+    fn a_section_built_from_new_and_every_with_method_equals_one_with_every_field_assigned() {
+        let mut assigned = TsProgramMapSection::new(100, VersionNumber::try_from(2).unwrap());
+        assigned.current_next_indicator = false;
+        assigned.section_number = 1;
+        assigned.last_section_number = 2;
+        assigned.pcr_pid = Some(pid(0x0100));
+        assigned.program_info = DescriptorLoop::from(PROGRAM_INFO.as_slice());
+        assigned.elementary_streams = ElementaryStreamLoop::from(ES_INFO.as_slice());
+
+        let built = TsProgramMapSection::new(100, VersionNumber::try_from(2).unwrap())
+            .with_current_next_indicator(false)
+            .with_section_number(1)
+            .with_last_section_number(2)
+            .with_pcr_pid(pid(0x0100))
+            .with_program_info(DescriptorLoop::from(PROGRAM_INFO.as_slice()))
+            .with_elementary_streams(ElementaryStreamLoop::from(ES_INFO.as_slice()));
+
+        assert_eq!(built, assigned);
     }
 
     /// A section of `body` with the syntax fields of program 1

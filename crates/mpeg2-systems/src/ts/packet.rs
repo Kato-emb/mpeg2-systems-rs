@@ -221,8 +221,8 @@ impl TryFrom<u8> for AdaptationFieldControl {
 /// assert_eq!(packet.pid, Pid::NULL);
 ///
 /// // The same packet, made and written (with the `alloc` feature)
-/// let mut made = TransportPacket::new(Pid::NULL, ContinuityCounter::try_from(0).unwrap());
-/// made.payload = Some(&bytes[4..]);
+/// let made = TransportPacket::new(Pid::NULL, ContinuityCounter::try_from(0).unwrap())
+///     .with_payload(&bytes[4..]);
 /// # #[cfg(feature = "alloc")]
 /// # {
 /// let mut written = Vec::new();
@@ -269,6 +269,57 @@ impl<'input> TransportPacket<'input> {
             adaptation_field: None,
             payload: None,
         }
+    }
+
+    /// Returns the value with the given `transport_error_indicator`
+    #[must_use]
+    pub const fn with_transport_error_indicator(mut self, transport_error_indicator: bool) -> Self {
+        self.transport_error_indicator = transport_error_indicator;
+        self
+    }
+
+    /// Returns the value with the given `payload_unit_start_indicator`
+    #[must_use]
+    pub const fn with_payload_unit_start_indicator(
+        mut self,
+        payload_unit_start_indicator: bool,
+    ) -> Self {
+        self.payload_unit_start_indicator = payload_unit_start_indicator;
+        self
+    }
+
+    /// Returns the value with the given `transport_priority`
+    #[must_use]
+    pub const fn with_transport_priority(mut self, transport_priority: bool) -> Self {
+        self.transport_priority = transport_priority;
+        self
+    }
+
+    /// Returns the value with the given `transport_scrambling_control`
+    #[must_use]
+    pub const fn with_transport_scrambling_control(
+        mut self,
+        transport_scrambling_control: TransportScramblingControl,
+    ) -> Self {
+        self.transport_scrambling_control = transport_scrambling_control;
+        self
+    }
+
+    /// Returns the value with `adaptation_field` present, set to the one given
+    #[must_use]
+    pub const fn with_adaptation_field(
+        mut self,
+        adaptation_field: AdaptationField<'input>,
+    ) -> Self {
+        self.adaptation_field = Some(adaptation_field);
+        self
+    }
+
+    /// Returns the value with `payload` present, set to the one given
+    #[must_use]
+    pub const fn with_payload(mut self, payload: &'input [u8]) -> Self {
+        self.payload = Some(payload);
+        self
     }
 
     /// Returns the `adaptation_field_control` that the adaptation field and

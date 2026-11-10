@@ -260,12 +260,20 @@ pub fn encoded_len(prefix: &[u8]) -> EncodedLen {
 /// # Examples
 ///
 /// ```
-/// use mpeg2_systems::pes::{Error, PesPacket, StreamId};
+/// use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
+/// use mpeg2_systems::time::Timestamp;
 ///
-/// // A padding stream packet of three padding bytes
-/// let bytes = [0x00, 0x00, 0x01, 0xbe, 0x00, 0x03, 0xff, 0xff, 0xff];
+/// // A video packet of two bytes with a PTS of one second
+/// let bytes = [
+///     0x00, 0x00, 0x01, 0xe0, 0x00, 0x0a, 0x80, 0x80, 0x05, 0x21, 0x00, 0x05, 0xbf, 0x21, 0xaa,
+///     0xbb,
+/// ];
 /// let packet = PesPacket::read(&bytes)?;
-/// assert_eq!(packet, PesPacket::new(StreamId::PADDING_STREAM, &[0xff; 3]));
+/// assert_eq!(
+///     packet,
+///     PesPacket::new(StreamId::from(0xe0), &[0xaa, 0xbb])
+///         .with_optional_header(OptionalHeader::new().with_pts(Timestamp::try_from(90_000)?))
+/// );
 ///
 /// // Written back (with the `alloc` feature), it gives the same bytes
 /// # #[cfg(feature = "alloc")]
@@ -274,7 +282,7 @@ pub fn encoded_len(prefix: &[u8]) -> EncodedLen {
 /// packet.write(&mut written)?;
 /// assert_eq!(written, bytes);
 /// # }
-/// # Ok::<(), Error>(())
+/// # Ok::<(), Box<dyn core::error::Error>>(())
 /// ```
 #[doc(alias("PES_packet", "PES"))]
 #[non_exhaustive]
@@ -303,6 +311,20 @@ impl<'input> PesPacket<'input> {
             optional_header: None,
             payload,
         }
+    }
+
+    /// Returns the value with the given `length_unspecified`
+    #[must_use]
+    pub const fn with_length_unspecified(mut self, length_unspecified: bool) -> Self {
+        self.length_unspecified = length_unspecified;
+        self
+    }
+
+    /// Returns the value with `optional_header` present, set to the one given
+    #[must_use]
+    pub const fn with_optional_header(mut self, optional_header: OptionalHeader<'input>) -> Self {
+        self.optional_header = Some(optional_header);
+        self
     }
 
     /// Returns the number of bytes after `PES_packet_length`
@@ -456,6 +478,19 @@ mod tests {
 
     use super::{EncodedLen, Error, OptionalHeader, PesPacket, StreamId};
     use crate::pes;
+
+    #[test]
+    fn a_packet_built_from_new_and_every_with_method_equals_one_with_every_field_assigned() {
+        let mut assigned = PesPacket::new(StreamId::from(0xe0), &[0xaa, 0xbb]);
+        assigned.length_unspecified = true;
+        assigned.optional_header = Some(OptionalHeader::new());
+
+        let built = PesPacket::new(StreamId::from(0xe0), &[0xaa, 0xbb])
+            .with_length_unspecified(true)
+            .with_optional_header(OptionalHeader::new());
+
+        assert_eq!(built, assigned);
+    }
 
     #[test]
     fn a_stream_without_an_optional_header_has_every_byte_as_payload() {

@@ -24,8 +24,11 @@ const COPYRIGHT_IDENTIFIER_LENGTH: usize = 4;
 /// // An identifier with two bytes of additional copyright info
 /// let bytes = [0x0d, 0x06, 0x49, 0x53, 0x41, 0x4e, 0x01, 0x02];
 /// let descriptor = CopyrightDescriptor::try_from(&RawDescriptor::read(&bytes)?)?;
-/// assert_eq!(descriptor.copyright_identifier.to_be_bytes(), *b"ISAN");
-/// assert_eq!(descriptor.additional_copyright_info, [0x01, 0x02]);
+/// assert_eq!(
+///     descriptor,
+///     CopyrightDescriptor::new(u32::from_be_bytes(*b"ISAN"))
+///         .with_additional_copyright_info(&[0x01, 0x02])
+/// );
 ///
 /// // Written back (with the `alloc` feature), it gives the same bytes
 /// # #[cfg(feature = "alloc")]
@@ -55,6 +58,16 @@ impl<'input> CopyrightDescriptor<'input> {
             copyright_identifier,
             additional_copyright_info: &[],
         }
+    }
+
+    /// Returns the value with the given `additional_copyright_info`
+    #[must_use]
+    pub const fn with_additional_copyright_info(
+        mut self,
+        additional_copyright_info: &'input [u8],
+    ) -> Self {
+        self.additional_copyright_info = additional_copyright_info;
+        self
     }
 
     /// Returns the number of bytes [`write`](Self::write) appends

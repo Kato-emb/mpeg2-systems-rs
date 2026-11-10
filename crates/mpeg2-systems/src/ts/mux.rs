@@ -54,10 +54,8 @@
 //! writer.write_ts_program_map_section(pmt_pid, &pmt, &mut stream)?;
 //! // An access unit, with the PCR of the program
 //! let access_unit = vec![0xaa; 1_000];
-//! let mut header = OptionalHeader::new();
-//! header.pts = Some(Timestamp::try_from(90_000)?);
-//! let mut packet = PesPacket::new(StreamId::from(0xe0), &access_unit);
-//! packet.optional_header = Some(header);
+//! let packet = PesPacket::new(StreamId::from(0xe0), &access_unit)
+//!     .with_optional_header(OptionalHeader::new().with_pts(Timestamp::try_from(90_000)?));
 //! let pcr = ClockReference::new(81_000, 0)?;
 //! assert_eq!(writer.write_pes_packet(video_pid, &packet, Some(pcr), &mut stream)?, 6);
 //!
@@ -317,9 +315,9 @@ impl core::error::Error for Error {
 /// use core::time::Duration;
 /// use mpeg2_systems::ts::mux::MuxerConfig;
 ///
-/// let mut config = MuxerConfig::new();
-/// config.transport_stream_id = 0x7fe0;
-/// config.pcr_interval = Duration::from_millis(30);
+/// let config = MuxerConfig::new()
+///     .with_transport_stream_id(0x7fe0)
+///     .with_pcr_interval(Duration::from_millis(30));
 /// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -370,6 +368,41 @@ impl MuxerConfig {
             mux_delay: Duration::from_millis(700),
             buffer_limit: 4 * 1024 * 1024,
         }
+    }
+
+    /// Returns the value with the given `transport_stream_id`
+    #[must_use]
+    pub const fn with_transport_stream_id(mut self, transport_stream_id: u16) -> Self {
+        self.transport_stream_id = transport_stream_id;
+        self
+    }
+
+    /// Returns the value with the given `psi_interval`
+    #[must_use]
+    pub const fn with_psi_interval(mut self, psi_interval: Duration) -> Self {
+        self.psi_interval = psi_interval;
+        self
+    }
+
+    /// Returns the value with the given `pcr_interval`
+    #[must_use]
+    pub const fn with_pcr_interval(mut self, pcr_interval: Duration) -> Self {
+        self.pcr_interval = pcr_interval;
+        self
+    }
+
+    /// Returns the value with the given `mux_delay`
+    #[must_use]
+    pub const fn with_mux_delay(mut self, mux_delay: Duration) -> Self {
+        self.mux_delay = mux_delay;
+        self
+    }
+
+    /// Returns the value with the given `buffer_limit`
+    #[must_use]
+    pub const fn with_buffer_limit(mut self, buffer_limit: usize) -> Self {
+        self.buffer_limit = buffer_limit;
+        self
     }
 }
 
@@ -431,10 +464,8 @@ impl MuxerConfig {
 /// muxer.add_stream(1, video_pid, StreamType::ISO_IEC_13818_2_VIDEO, &[])?;
 /// // Give an access unit a second in, and take the Transport Packets
 /// let access_unit = vec![0xaa; 1_000];
-/// let mut header = OptionalHeader::new();
-/// header.pts = Some(Timestamp::try_from(90_000)?);
-/// let mut packet = PesPacket::new(StreamId::from(0xe0), &access_unit);
-/// packet.optional_header = Some(header);
+/// let packet = PesPacket::new(StreamId::from(0xe0), &access_unit)
+///     .with_optional_header(OptionalHeader::new().with_pts(Timestamp::try_from(90_000)?));
 /// muxer.handle_pes_packet(video_pid, &packet)?;
 /// muxer.poll_output(&mut stream);
 /// // The end, and what is still held

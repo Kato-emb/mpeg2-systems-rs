@@ -132,8 +132,8 @@ impl<'input> ProgramLoop<'input> {
     ///     }],
     ///     &mut programs,
     /// )?;
-    /// let mut pat = ProgramAssociationSection::new(1, VersionNumber::try_from(0)?);
-    /// pat.programs = ProgramLoop::from(programs.as_slice());
+    /// let pat = ProgramAssociationSection::new(1, VersionNumber::try_from(0)?)
+    ///     .with_programs(ProgramLoop::from(programs.as_slice()));
     ///
     /// let mut written = Vec::new();
     /// pat.write(&mut written)?;

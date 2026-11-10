@@ -67,6 +67,13 @@ impl StreamBound {
         }
     }
 
+    /// Returns the value with `stream_id_extension` present, set to the one given
+    #[must_use]
+    pub const fn with_stream_id_extension(mut self, stream_id_extension: u8) -> Self {
+        self.stream_id_extension = Some(stream_id_extension);
+        self
+    }
+
     /// Refuses a stream bound the specification does not allow
     #[cfg(feature = "alloc")]
     fn check(self) -> Result<Self, Error> {

@@ -207,8 +207,8 @@ pub fn encoded_len(prefix: &[u8]) -> Option<usize> {
 /// # Examples
 ///
 /// ```
-/// use mpeg2_systems::psi::section::{Error, Section};
-/// use mpeg2_systems::psi::TableId;
+/// use mpeg2_systems::psi::section::{Section, SectionSyntax};
+/// use mpeg2_systems::psi::{TableId, VersionNumber};
 ///
 /// // The program association section of a stream of one program
 /// let bytes = [
@@ -216,8 +216,11 @@ pub fn encoded_len(prefix: &[u8]) -> Option<usize> {
 ///     0x04, 0xb2,
 /// ];
 /// let section = Section::read(&bytes)?;
-/// assert_eq!(section.table_id, TableId::PROGRAM_ASSOCIATION);
-/// assert_eq!(section.body, [0x00, 0x01, 0xf0, 0x00]);
+/// assert_eq!(
+///     section,
+///     Section::new(TableId::PROGRAM_ASSOCIATION, &[0x00, 0x01, 0xf0, 0x00])
+///         .with_syntax(SectionSyntax::new(1, VersionNumber::try_from(0)?, true, 0, 0))
+/// );
 ///
 /// // Written back (with the `alloc` feature), it gives the same bytes
 /// # #[cfg(feature = "alloc")]
@@ -226,7 +229,7 @@ pub fn encoded_len(prefix: &[u8]) -> Option<usize> {
 /// section.write(&mut written)?;
 /// assert_eq!(written, bytes);
 /// # }
-/// # Ok::<(), Error>(())
+/// # Ok::<(), Box<dyn core::error::Error>>(())
 /// ```
 #[doc(alias("private_section", "PSI section"))]
 #[non_exhaustive]
@@ -259,6 +262,30 @@ impl<'input> Section<'input> {
             syntax: None,
             body,
         }
+    }
+
+    /// Returns the value with the given `private_indicator`
+    #[must_use]
+    pub const fn with_private_indicator(mut self, private_indicator: bool) -> Self {
+        self.private_indicator = private_indicator;
+        self
+    }
+
+    /// Returns the value with the given `reserved_before_section_length`
+    #[must_use]
+    pub const fn with_reserved_before_section_length(
+        mut self,
+        reserved_before_section_length: u8,
+    ) -> Self {
+        self.reserved_before_section_length = reserved_before_section_length;
+        self
+    }
+
+    /// Returns the value with `syntax` present, set to the one given
+    #[must_use]
+    pub const fn with_syntax(mut self, syntax: SectionSyntax) -> Self {
+        self.syntax = Some(syntax);
+        self
     }
 
     /// Returns whether the section has the fields from

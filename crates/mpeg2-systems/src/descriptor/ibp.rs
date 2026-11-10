@@ -26,9 +26,7 @@ const BODY_LENGTH: usize = 2;
 /// // Closed GOPs of at most 15 pictures
 /// let bytes = [0x12, 0x02, 0x80, 0x0f];
 /// let descriptor = IbpDescriptor::try_from(&RawDescriptor::read(&bytes)?)?;
-/// let mut expected = IbpDescriptor::new(15);
-/// expected.closed_gop_flag = true;
-/// assert_eq!(descriptor, expected);
+/// assert_eq!(descriptor, IbpDescriptor::new(15).with_closed_gop_flag(true));
 ///
 /// // Written back (with the `alloc` feature), it gives the same bytes
 /// # #[cfg(feature = "alloc")]
@@ -63,6 +61,20 @@ impl IbpDescriptor {
             identical_gop_flag: false,
             max_gop_length,
         }
+    }
+
+    /// Returns the value with the given `closed_gop_flag`
+    #[must_use]
+    pub const fn with_closed_gop_flag(mut self, closed_gop_flag: bool) -> Self {
+        self.closed_gop_flag = closed_gop_flag;
+        self
+    }
+
+    /// Returns the value with the given `identical_gop_flag`
+    #[must_use]
+    pub const fn with_identical_gop_flag(mut self, identical_gop_flag: bool) -> Self {
+        self.identical_gop_flag = identical_gop_flag;
+        self
     }
 
     /// Returns the number of bytes [`write`](Self::write) appends

@@ -21,9 +21,14 @@ const FORMAT_IDENTIFIER_LENGTH: usize = 4;
 /// use mpeg2_systems::descriptor::RawDescriptor;
 /// use mpeg2_systems::descriptor::registration::RegistrationDescriptor;
 ///
-/// let bytes = [0x05, 0x04, 0x48, 0x44, 0x4d, 0x56];
+/// // "HDMV", with two bytes of additional identification info
+/// let bytes = [0x05, 0x06, 0x48, 0x44, 0x4d, 0x56, 0x01, 0x02];
 /// let descriptor = RegistrationDescriptor::try_from(&RawDescriptor::read(&bytes)?)?;
-/// assert_eq!(descriptor.format_identifier.to_be_bytes(), *b"HDMV");
+/// assert_eq!(
+///     descriptor,
+///     RegistrationDescriptor::new(u32::from_be_bytes(*b"HDMV"))
+///         .with_additional_identification_info(&[0x01, 0x02])
+/// );
 ///
 /// # #[cfg(feature = "alloc")]
 /// # {
@@ -52,6 +57,16 @@ impl<'input> RegistrationDescriptor<'input> {
             format_identifier,
             additional_identification_info: &[],
         }
+    }
+
+    /// Returns the value with the given `additional_identification_info`
+    #[must_use]
+    pub const fn with_additional_identification_info(
+        mut self,
+        additional_identification_info: &'input [u8],
+    ) -> Self {
+        self.additional_identification_info = additional_identification_info;
+        self
     }
 
     /// Returns the number of bytes [`write`](Self::write) appends

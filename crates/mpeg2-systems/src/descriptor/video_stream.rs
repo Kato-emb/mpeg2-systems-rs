@@ -212,6 +212,13 @@ impl Mpeg2Fields {
             frame_rate_extension_flag: false,
         }
     }
+
+    /// Returns the value with the given `frame_rate_extension_flag`
+    #[must_use]
+    pub const fn with_frame_rate_extension_flag(mut self, frame_rate_extension_flag: bool) -> Self {
+        self.frame_rate_extension_flag = frame_rate_extension_flag;
+        self
+    }
 }
 
 /// Video stream descriptor, which identifies the coding parameters of an
@@ -234,13 +241,14 @@ impl Mpeg2Fields {
 /// // Main Profile at Main Level, 4:2:0, 29.97 frames a second
 /// let bytes = [0x02, 0x03, 0x22, 0x48, 0x5f];
 /// let descriptor = VideoStreamDescriptor::try_from(&RawDescriptor::read(&bytes)?)?;
-/// assert_eq!(descriptor.frame_rate_code, FrameRateCode::FRAME_RATE_29_97);
 /// assert_eq!(
-///     descriptor.mpeg_2,
-///     Some(Mpeg2Fields::new(
-///         ProfileAndLevelIndication::from(0x48),
-///         ChromaFormat::CHROMA_420
-///     ))
+///     descriptor,
+///     VideoStreamDescriptor::new(FrameRateCode::FRAME_RATE_29_97)
+///         .with_constrained_parameter_flag(true)
+///         .with_mpeg_2(Mpeg2Fields::new(
+///             ProfileAndLevelIndication::from(0x48),
+///             ChromaFormat::CHROMA_420
+///         ))
 /// );
 ///
 /// # #[cfg(feature = "alloc")]
@@ -280,6 +288,37 @@ impl VideoStreamDescriptor {
             still_picture_flag: false,
             mpeg_2: None,
         }
+    }
+
+    /// Returns the value with the given `multiple_frame_rate_flag`
+    #[must_use]
+    pub const fn with_multiple_frame_rate_flag(mut self, multiple_frame_rate_flag: bool) -> Self {
+        self.multiple_frame_rate_flag = multiple_frame_rate_flag;
+        self
+    }
+
+    /// Returns the value with the given `constrained_parameter_flag`
+    #[must_use]
+    pub const fn with_constrained_parameter_flag(
+        mut self,
+        constrained_parameter_flag: bool,
+    ) -> Self {
+        self.constrained_parameter_flag = constrained_parameter_flag;
+        self
+    }
+
+    /// Returns the value with the given `still_picture_flag`
+    #[must_use]
+    pub const fn with_still_picture_flag(mut self, still_picture_flag: bool) -> Self {
+        self.still_picture_flag = still_picture_flag;
+        self
+    }
+
+    /// Returns the value with `mpeg_2` present, set to the one given
+    #[must_use]
+    pub const fn with_mpeg_2(mut self, mpeg_2: Mpeg2Fields) -> Self {
+        self.mpeg_2 = Some(mpeg_2);
+        self
     }
 
     /// Returns whether the stream holds ISO/IEC 11172-2 data only

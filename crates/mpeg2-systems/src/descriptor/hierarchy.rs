@@ -81,8 +81,9 @@ impl TryFrom<u8> for HierarchyType {
 /// let bytes = [0x04, 0x04, 0xb3, 0xc1, 0x40, 0xc1];
 /// let descriptor = HierarchyDescriptor::try_from(&RawDescriptor::read(&bytes)?)?;
 /// assert_eq!(
-///     (descriptor.hierarchy_type, descriptor.hierarchy_layer_index),
-///     (HierarchyType::TEMPORAL_SCALABILITY, 1)
+///     descriptor,
+///     HierarchyDescriptor::new(HierarchyType::TEMPORAL_SCALABILITY, 1, 0, 1)
+///         .with_no_temporal_scalability_flag(false)
 /// );
 ///
 /// # #[cfg(feature = "alloc")]
@@ -138,6 +139,50 @@ impl HierarchyDescriptor {
             hierarchy_embedded_layer_index,
             hierarchy_channel,
         }
+    }
+
+    /// Returns the value with the given `no_view_scalability_flag`
+    #[must_use]
+    pub const fn with_no_view_scalability_flag(mut self, no_view_scalability_flag: bool) -> Self {
+        self.no_view_scalability_flag = no_view_scalability_flag;
+        self
+    }
+
+    /// Returns the value with the given `no_temporal_scalability_flag`
+    #[must_use]
+    pub const fn with_no_temporal_scalability_flag(
+        mut self,
+        no_temporal_scalability_flag: bool,
+    ) -> Self {
+        self.no_temporal_scalability_flag = no_temporal_scalability_flag;
+        self
+    }
+
+    /// Returns the value with the given `no_spatial_scalability_flag`
+    #[must_use]
+    pub const fn with_no_spatial_scalability_flag(
+        mut self,
+        no_spatial_scalability_flag: bool,
+    ) -> Self {
+        self.no_spatial_scalability_flag = no_spatial_scalability_flag;
+        self
+    }
+
+    /// Returns the value with the given `no_quality_scalability_flag`
+    #[must_use]
+    pub const fn with_no_quality_scalability_flag(
+        mut self,
+        no_quality_scalability_flag: bool,
+    ) -> Self {
+        self.no_quality_scalability_flag = no_quality_scalability_flag;
+        self
+    }
+
+    /// Returns the value with the given `tref_present_flag`
+    #[must_use]
+    pub const fn with_tref_present_flag(mut self, tref_present_flag: bool) -> Self {
+        self.tref_present_flag = tref_present_flag;
+        self
     }
 
     /// Returns the number of bytes [`write`](Self::write) appends

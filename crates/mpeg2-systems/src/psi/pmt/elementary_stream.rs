@@ -45,6 +45,13 @@ impl<'input> ElementaryStream<'input> {
         }
     }
 
+    /// Returns the value with the given `es_info`
+    #[must_use]
+    pub const fn with_es_info(mut self, es_info: DescriptorLoop<'input>) -> Self {
+        self.es_info = es_info;
+        self
+    }
+
     /// Returns the bytes the entry takes in the elementary stream loop
     #[cfg(feature = "alloc")]
     pub(super) const fn encoded_len(&self) -> usize {
@@ -107,9 +114,9 @@ impl<'input> ElementaryStreamLoop<'input> {
     ///     [ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, video)],
     ///     &mut streams,
     /// )?;
-    /// let mut pmt = TsProgramMapSection::new(1, VersionNumber::try_from(0)?);
-    /// pmt.pcr_pid = Some(video);
-    /// pmt.elementary_streams = ElementaryStreamLoop::from(streams.as_slice());
+    /// let pmt = TsProgramMapSection::new(1, VersionNumber::try_from(0)?)
+    ///     .with_pcr_pid(video)
+    ///     .with_elementary_streams(ElementaryStreamLoop::from(streams.as_slice()));
     ///
     /// let mut written = Vec::new();
     /// pmt.write(&mut written)?;

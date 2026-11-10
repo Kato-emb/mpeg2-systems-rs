@@ -49,6 +49,16 @@ impl SectionSyntax {
         }
     }
 
+    /// Returns the value with the given `reserved_before_version_number`
+    #[must_use]
+    pub const fn with_reserved_before_version_number(
+        mut self,
+        reserved_before_version_number: u8,
+    ) -> Self {
+        self.reserved_before_version_number = reserved_before_version_number;
+        self
+    }
+
     /// Refuses a `section_number` past `last_section_number`
     pub(super) const fn check_section_number(self) -> Result<Self, Error> {
         if self.section_number > self.last_section_number {

@@ -31,9 +31,10 @@ const BODY_LENGTH: usize = 2;
 /// // An external reference, accurate to 5 × 10^-2 ppm
 /// let bytes = [0x0b, 0x02, 0xc5, 0x5f];
 /// let descriptor = SystemClockDescriptor::try_from(&RawDescriptor::read(&bytes)?)?;
-/// let mut expected = SystemClockDescriptor::new(5, 2);
-/// expected.external_clock_reference_indicator = true;
-/// assert_eq!(descriptor, expected);
+/// assert_eq!(
+///     descriptor,
+///     SystemClockDescriptor::new(5, 2).with_external_clock_reference_indicator(true)
+/// );
 ///
 /// // Written back (with the `alloc` feature), it gives the same bytes
 /// # #[cfg(feature = "alloc")]
@@ -67,6 +68,16 @@ impl SystemClockDescriptor {
             clock_accuracy_integer,
             clock_accuracy_exponent,
         }
+    }
+
+    /// Returns the value with the given `external_clock_reference_indicator`
+    #[must_use]
+    pub const fn with_external_clock_reference_indicator(
+        mut self,
+        external_clock_reference_indicator: bool,
+    ) -> Self {
+        self.external_clock_reference_indicator = external_clock_reference_indicator;
+        self
     }
 
     /// Returns the number of bytes [`write`](Self::write) appends
