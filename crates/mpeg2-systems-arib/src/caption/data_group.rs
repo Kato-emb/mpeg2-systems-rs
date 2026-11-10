@@ -28,14 +28,19 @@ const CRC_16_LENGTH: usize = 2;
 /// ```
 /// use mpeg2_systems_arib::caption::data_group::{DataGroup, DataGroupId};
 ///
-/// // A data group of caption management data, group A
+/// // A data group of caption management data, group A, the second of two
+/// // linked data groups
 /// let bytes = [
-///     0x00, 0x00, 0x00, 0x00, 0x0a, 0x3f, 0x01, 0x1a, 0x6a, 0x70, 0x6e, 0x80, 0x00, 0x00, 0x00,
-///     0xb0, 0x78,
+///     0x00, 0x01, 0x01, 0x00, 0x0a, 0x3f, 0x01, 0x1a, 0x6a, 0x70, 0x6e, 0x80, 0x00, 0x00, 0x00,
+///     0x8e, 0x7a,
 /// ];
 /// let group = DataGroup::read(&bytes)?;
-/// assert_eq!(group.data_group_id, DataGroupId::try_from(0)?);
-/// assert_eq!(group.data_group_data_byte, &bytes[5..15]);
+/// assert_eq!(
+///     group,
+///     DataGroup::new(DataGroupId::try_from(0)?, &bytes[5..15])
+///         .with_data_group_link_number(1)
+///         .with_last_data_group_link_number(1)
+/// );
 ///
 /// // Written back (with the `alloc` feature), it gives the same bytes
 /// # #[cfg(feature = "alloc")]
@@ -74,6 +79,30 @@ impl<'input> DataGroup<'input> {
             last_data_group_link_number: 0,
             data_group_data_byte,
         }
+    }
+
+    /// Returns the value with the given `data_group_version`
+    #[must_use]
+    pub const fn with_data_group_version(mut self, data_group_version: DataGroupVersion) -> Self {
+        self.data_group_version = data_group_version;
+        self
+    }
+
+    /// Returns the value with the given `data_group_link_number`
+    #[must_use]
+    pub const fn with_data_group_link_number(mut self, data_group_link_number: u8) -> Self {
+        self.data_group_link_number = data_group_link_number;
+        self
+    }
+
+    /// Returns the value with the given `last_data_group_link_number`
+    #[must_use]
+    pub const fn with_last_data_group_link_number(
+        mut self,
+        last_data_group_link_number: u8,
+    ) -> Self {
+        self.last_data_group_link_number = last_data_group_link_number;
+        self
     }
 
     /// Reads a data group from `bytes`, which hold it whole and nothing more
@@ -260,7 +289,7 @@ mod tests {
 
     use mpeg2_systems::field;
 
-    use super::{DataGroup, DataGroupId};
+    use super::{DataGroup, DataGroupId, DataGroupVersion};
     use crate::caption::Error;
 
     /// The data group of caption management data (DGI 0, one language
@@ -283,6 +312,21 @@ mod tests {
             DataGroupId::try_from(id).unwrap(),
             bytes.get(5..bytes.len().saturating_sub(2)).unwrap(),
         )
+    }
+
+    #[test]
+    fn a_data_group_built_from_new_and_every_with_method_equals_one_with_every_field_assigned() {
+        let mut assigned = DataGroup::new(DataGroupId::try_from(1).unwrap(), &[0xaa]);
+        assigned.data_group_version = DataGroupVersion::try_from(2).unwrap();
+        assigned.data_group_link_number = 1;
+        assigned.last_data_group_link_number = 3;
+
+        let built = DataGroup::new(DataGroupId::try_from(1).unwrap(), &[0xaa])
+            .with_data_group_version(DataGroupVersion::try_from(2).unwrap())
+            .with_data_group_link_number(1)
+            .with_last_data_group_link_number(3);
+
+        assert_eq!(built, assigned);
     }
 
     #[test]

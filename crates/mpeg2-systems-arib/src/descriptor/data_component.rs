@@ -36,8 +36,11 @@ const MAX_BODY_LENGTH: usize = 255;
 ///
 /// let bytes = [0xfd, 0x03, 0x00, 0x08, 0xad];
 /// let descriptor = DataComponentDescriptor::try_from(&RawDescriptor::read(&bytes)?)?;
-/// assert_eq!(descriptor.data_component_id, DataComponentId::CAPTION_AND_SUPERIMPOSE);
-/// assert_eq!(descriptor.additional_data_component_info, [0xad]);
+/// assert_eq!(
+///     descriptor,
+///     DataComponentDescriptor::new(DataComponentId::CAPTION_AND_SUPERIMPOSE)
+///         .with_additional_data_component_info(&[0xad])
+/// );
 ///
 /// # #[cfg(feature = "alloc")]
 /// # {
@@ -66,6 +69,16 @@ impl<'input> DataComponentDescriptor<'input> {
             data_component_id,
             additional_data_component_info: &[],
         }
+    }
+
+    /// Returns the value with the given `additional_data_component_info`
+    #[must_use]
+    pub const fn with_additional_data_component_info(
+        mut self,
+        additional_data_component_info: &'input [u8],
+    ) -> Self {
+        self.additional_data_component_info = additional_data_component_info;
+        self
     }
 
     /// Returns the number of bytes [`write`](Self::write) appends

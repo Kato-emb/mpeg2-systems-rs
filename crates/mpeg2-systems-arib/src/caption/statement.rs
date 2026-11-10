@@ -30,18 +30,21 @@ fn has_stm(tmd: Tmd) -> bool {
 /// # Examples
 ///
 /// ```
-/// use mpeg2_systems_arib::caption::Tmd;
 /// use mpeg2_systems_arib::caption::data_group::{DataGroup, DataGroupId};
-/// use mpeg2_systems_arib::caption::data_unit::{DataUnit, DataUnitParameter};
+/// use mpeg2_systems_arib::caption::data_unit::DataUnitLoop;
 /// use mpeg2_systems_arib::caption::statement::CaptionData;
+/// use mpeg2_systems_arib::caption::{BcdTime, Tmd};
 ///
-/// // The statement body あ, in the first language
-/// let bytes = [0x3f, 0x00, 0x00, 0x07, 0x1f, 0x20, 0x00, 0x00, 0x02, 0x24, 0x22];
+/// // The statement body あ, in the first language, at offset time 00:00:01.000
+/// let bytes = [
+///     0xbf, 0x00, 0x00, 0x01, 0x00, 0x0f, 0x00, 0x00, 0x07, 0x1f, 0x20, 0x00, 0x00, 0x02, 0x24,
+///     0x22,
+/// ];
 /// let data = CaptionData::try_from(&DataGroup::new(DataGroupId::try_from(0x01)?, &bytes))?;
-/// assert_eq!(data.tmd, Tmd::FREE);
 /// assert_eq!(
-///     data.data_units.iter().next().transpose()?,
-///     Some(DataUnit::new(DataUnitParameter::STATEMENT_BODY, &[0x24, 0x22]))
+///     data,
+///     CaptionData::new(Tmd::OFFSET_TIME, DataUnitLoop::from(&bytes[9..]))
+///         .with_stm(BcdTime::new(0, 0, 1, 0)?)
 /// );
 ///
 /// # #[cfg(feature = "alloc")]
@@ -74,6 +77,13 @@ impl<'input> CaptionData<'input> {
             stm: None,
             data_units,
         }
+    }
+
+    /// Returns the value with `stm` present, set to the one given
+    #[must_use]
+    pub const fn with_stm(mut self, stm: BcdTime) -> Self {
+        self.stm = Some(stm);
+        self
     }
 
     /// Appends the caption statement data to `out`, as the

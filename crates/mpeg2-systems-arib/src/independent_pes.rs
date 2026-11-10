@@ -113,10 +113,17 @@ impl core::error::Error for Error {
 /// use mpeg2_systems::time::Timestamp;
 /// use mpeg2_systems_arib::independent_pes::SynchronizedPesData;
 ///
-/// // Synchronized PES data of 2 bytes, read from the payload of a PES packet
-/// let packet = PesPacket::new(StreamId::PRIVATE_STREAM_1, &[0x80, 0xff, 0xf0, 0x01, 0x02]);
+/// // Synchronized PES data of 2 bytes after 2 bytes of private data, read from
+/// // the payload of a PES packet
+/// let packet = PesPacket::new(
+///     StreamId::PRIVATE_STREAM_1,
+///     &[0x80, 0xff, 0xf2, 0xaa, 0xbb, 0x01, 0x02],
+/// );
 /// let data = SynchronizedPesData::try_from(&packet)?;
-/// assert_eq!(data.synchronized_pes_data_byte, [0x01, 0x02]);
+/// assert_eq!(
+///     data,
+///     SynchronizedPesData::new(&[0x01, 0x02]).with_pes_data_private_data_byte(&[0xaa, 0xbb])
+/// );
 ///
 /// // Written back (with the `alloc` feature) as the payload of a PES packet
 /// // the caller builds, with its PTS
@@ -124,10 +131,8 @@ impl core::error::Error for Error {
 /// # {
 /// let mut payload = Vec::new();
 /// data.write(&mut payload)?;
-/// let mut packet = PesPacket::new(StreamId::PRIVATE_STREAM_1, &payload);
-/// let mut header = OptionalHeader::new();
-/// header.pts = Some(Timestamp::try_from(90_000)?);
-/// packet.optional_header = Some(header);
+/// let packet = PesPacket::new(StreamId::PRIVATE_STREAM_1, &payload)
+///     .with_optional_header(OptionalHeader::new().with_pts(Timestamp::try_from(90_000)?));
 /// let mut written = Vec::new();
 /// packet.write(&mut written)?;
 /// assert_eq!(
@@ -156,6 +161,16 @@ impl<'input> SynchronizedPesData<'input> {
             pes_data_private_data_byte: &[],
             synchronized_pes_data_byte,
         }
+    }
+
+    /// Returns the value with the given `pes_data_private_data_byte`
+    #[must_use]
+    pub const fn with_pes_data_private_data_byte(
+        mut self,
+        pes_data_private_data_byte: &'input [u8],
+    ) -> Self {
+        self.pes_data_private_data_byte = pes_data_private_data_byte;
+        self
     }
 
     /// Returns the number of bytes [`write`](Self::write) appends
@@ -229,9 +244,13 @@ impl<'input> TryFrom<&PesPacket<'input>> for SynchronizedPesData<'input> {
 /// use mpeg2_systems::pes::{PesPacket, StreamId};
 /// use mpeg2_systems_arib::independent_pes::AsynchronousPesData;
 ///
-/// let packet = PesPacket::new(StreamId::PRIVATE_STREAM_2, &[0x81, 0xff, 0xf0, 0x01]);
+/// // Asynchronous PES data of 1 byte after 1 byte of private data
+/// let packet = PesPacket::new(StreamId::PRIVATE_STREAM_2, &[0x81, 0xff, 0xf1, 0xaa, 0x01]);
 /// let data = AsynchronousPesData::try_from(&packet)?;
-/// assert_eq!(data.asynchronous_pes_data_byte, [0x01]);
+/// assert_eq!(
+///     data,
+///     AsynchronousPesData::new(&[0x01]).with_pes_data_private_data_byte(&[0xaa])
+/// );
 ///
 /// # #[cfg(feature = "alloc")]
 /// # {
@@ -260,6 +279,16 @@ impl<'input> AsynchronousPesData<'input> {
             pes_data_private_data_byte: &[],
             asynchronous_pes_data_byte,
         }
+    }
+
+    /// Returns the value with the given `pes_data_private_data_byte`
+    #[must_use]
+    pub const fn with_pes_data_private_data_byte(
+        mut self,
+        pes_data_private_data_byte: &'input [u8],
+    ) -> Self {
+        self.pes_data_private_data_byte = pes_data_private_data_byte;
+        self
     }
 
     /// Returns the number of bytes [`write`](Self::write) appends
