@@ -6,8 +6,9 @@
 //! the fixtures as they lie. One run hands the stream over in chunks of the
 //! lengths chosen, in turn, takes every event after each, then ends the input
 //! and takes the events it leaves. PES packets are reassembled on the PIDs
-//! chosen and, as a caller would, on those each program map names. The run
-//! checks that:
+//! chosen and on those each program map names: subscribed to by the demuxer
+//! itself when the fuzzer sets `subscribe_elementary_pids`, and otherwise, as
+//! a caller would, on each program map event. The run checks that:
 //!
 //! 1. nothing panics
 //! 2. once the end of input is drained, `poll_event` stays at `None`
@@ -29,6 +30,8 @@ struct Input<'stream> {
     pes_buffer_limit: u16,
     /// The PIDs to subscribe to, of which the low 13 bits are taken
     subscribed: Vec<u16>,
+    /// Whether the demuxer subscribes to the PIDs the program maps name
+    subscribe_elementary_pids: bool,
     /// The lengths the stream is cut into, in turn; 0 takes the rest
     chunk_lengths: Vec<u16>,
     stream: &'stream [u8],
@@ -37,6 +40,7 @@ struct Input<'stream> {
 fuzz_target!(|input: Input<'_>| {
     let mut config = DemuxerConfig::default();
     config.pes_buffer_limit = usize::from(input.pes_buffer_limit);
+    config.subscribe_elementary_pids = input.subscribe_elementary_pids;
     let mut demuxer = Demuxer::new(config);
     for pid in input.subscribed {
         if let Ok(pid) = Pid::try_from(pid & 0x1FFF) {
@@ -52,11 +56,11 @@ fuzz_target!(|input: Input<'_>| {
         };
         let (chunk, after) = rest.split_at(length);
         demuxer.handle_input(chunk);
-        drain(&mut demuxer);
+        drain(&mut demuxer, !input.subscribe_elementary_pids);
         rest = after;
     }
     demuxer.finish();
-    drain(&mut demuxer);
+    drain(&mut demuxer, !input.subscribe_elementary_pids);
     assert!(
         demuxer.poll_event().is_none(),
         "an event came after the end of input was drained"
@@ -64,11 +68,11 @@ fuzz_target!(|input: Input<'_>| {
 });
 
 /// Takes every event, subscribing to the elementary streams a program map
-/// names
-fn drain(demuxer: &mut Demuxer) {
+/// names when `on_program_map` is set
+fn drain(demuxer: &mut Demuxer, on_program_map: bool) {
     while let Some(event) = demuxer.poll_event() {
         let mut pids = Vec::new();
-        if let Event::TsProgramMapSection { section, .. } = event {
+        if let (true, Event::TsProgramMapSection { section, .. }) = (on_program_map, event) {
             pids.extend(
                 section
                     .elementary_streams

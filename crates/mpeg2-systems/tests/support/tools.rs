@@ -99,9 +99,19 @@ pub(crate) fn named<'json>(json: &'json Value, name: &str) -> Vec<&'json Value> 
 pub(crate) fn ts_events<T>(
     stream: &[u8],
     pids: &[u64],
+    take: impl FnMut(Event<'_>) -> Option<T>,
+) -> Vec<T> {
+    ts_events_with(DemuxerConfig::default(), stream, pids, take)
+}
+
+/// [`ts_events`] with a demuxer of `config`
+pub(crate) fn ts_events_with<T>(
+    config: DemuxerConfig,
+    stream: &[u8],
+    pids: &[u64],
     mut take: impl FnMut(Event<'_>) -> Option<T>,
 ) -> Vec<T> {
-    let mut demuxer = Demuxer::new(DemuxerConfig::default());
+    let mut demuxer = Demuxer::new(config);
     for &pid in pids {
         demuxer.subscribe_pes(Pid::try_from(u16::try_from(pid).unwrap()).unwrap());
     }

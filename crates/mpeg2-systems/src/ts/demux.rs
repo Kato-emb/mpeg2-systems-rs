@@ -1,6 +1,7 @@
 //! Demuxing a Transport Stream: input of any length in, events out
 
 use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 use core::ops::Range;
 
 use crate::pes::PesPacket;
@@ -24,7 +25,9 @@ use framer::{Output, PacketFramer};
 /// ```
 /// use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, PacketSize};
 ///
-/// let config = DemuxerConfig::default().with_packet_size(PacketSize::Timestamped192);
+/// let config = DemuxerConfig::default()
+///     .with_packet_size(PacketSize::Timestamped192)
+///     .with_subscribe_elementary_pids(true);
 /// let demuxer = Demuxer::new(config);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -41,6 +44,22 @@ pub struct DemuxerConfig {
     /// nothing in the stream bounds it. A packet whose `PES_packet_length`
     /// is all in hand is never dropped, though it be longer.
     pub pes_buffer_limit: usize,
+    /// Whether the demuxer subscribes on its own to the elementary streams
+    /// the program maps name (`false` by default)
+    ///
+    /// When set, the events are those of a caller that, on taking each
+    /// [`Event::TsProgramMapSection`], calls [`Demuxer::subscribe_pes`] with
+    /// the `elementary_PID` of each entry of its `elementary_streams`
+    /// (ISO/IEC 13818-1 §2.4.4.10) whose `stream_type` is not carried in
+    /// sections ([`StreamType::is_carried_in_sections`], Table 2-34). So the
+    /// subscription applies from the packet after the one that completes
+    /// the section; an entry that cannot be read ends the entries taken; a section that fails as a PMT
+    /// section subscribes to nothing. A PID a later version leaves out stays
+    /// subscribed, and one unsubscribed from with [`Demuxer::unsubscribe_pes`]
+    /// is subscribed to again by the next version that names it.
+    ///
+    /// [`StreamType::is_carried_in_sections`]: crate::stream_type::StreamType::is_carried_in_sections
+    pub subscribe_elementary_pids: bool,
 }
 
 /// [`DemuxerConfig::pes_buffer_limit`] of the default settings
@@ -53,6 +72,7 @@ impl Default for DemuxerConfig {
         Self {
             packet_size: None,
             pes_buffer_limit: DEFAULT_PES_BUFFER_LIMIT,
+            subscribe_elementary_pids: false,
         }
     }
 }
@@ -69,6 +89,13 @@ impl DemuxerConfig {
     #[must_use]
     pub const fn with_pes_buffer_limit(mut self, pes_buffer_limit: usize) -> Self {
         self.pes_buffer_limit = pes_buffer_limit;
+        self
+    }
+
+    /// Returns the value with the given `subscribe_elementary_pids`
+    #[must_use]
+    pub const fn with_subscribe_elementary_pids(mut self, subscribe_elementary_pids: bool) -> Self {
+        self.subscribe_elementary_pids = subscribe_elementary_pids;
         self
     }
 }
@@ -128,7 +155,9 @@ enum Lent {
 /// reports a broken `continuity_counter`, a PCR, and the PSI sections it
 /// reassembles: those of the PAT, the PMTs the PAT names and the CAT typed,
 /// each at a version not reported before; and the PES packets of the PIDs
-/// [`Demuxer::subscribe_pes`] names. Handing input over never fails: a broken
+/// [`Demuxer::subscribe_pes`] names, or, with
+/// [`DemuxerConfig::subscribe_elementary_pids`], of the elementary streams
+/// the program maps name. Handing input over never fails: a broken
 /// stream is reported as [`Event::Error`] and demuxing goes on. The demuxer does no I/O; reading
 /// the stream is up to the caller.
 ///
@@ -180,6 +209,7 @@ pub struct Demuxer {
     framer: PacketFramer,
     analyzer: PacketAnalyzer,
     pending: VecDeque<Pending>,
+    subscribe_elementary_pids: bool,
 }
 
 impl Demuxer {
@@ -190,6 +220,7 @@ impl Demuxer {
             framer: PacketFramer::new(config.packet_size),
             analyzer: PacketAnalyzer::new(config.pes_buffer_limit),
             pending: VecDeque::new(),
+            subscribe_elementary_pids: config.subscribe_elementary_pids,
         }
     }
 
@@ -199,10 +230,11 @@ impl Demuxer {
     /// Reassembly starts at the next packet of the PID with
     /// `payload_unit_start_indicator` set. Subscribing a PID already
     /// subscribed keeps the PES packet in flight. A subscription stays across
-    /// [`Error::SyncLost`] and [`Demuxer::finish`]. The demuxer does not
-    /// choose the PIDs to subscribe to; the elementary streams a
-    /// [`Event::TsProgramMapSection`] names are the usual choice, and
-    /// subscribing on its event takes the PES packets that follow it.
+    /// [`Error::SyncLost`] and [`Demuxer::finish`]. The demuxer chooses no
+    /// PID to subscribe to unless [`DemuxerConfig::subscribe_elementary_pids`]
+    /// is set; the elementary streams a [`Event::TsProgramMapSection`] names
+    /// are the usual choice, and subscribing on its event takes the PES
+    /// packets that follow it.
     ///
     /// ```
     /// use mpeg2_systems::ts::Pid;
@@ -322,7 +354,31 @@ impl Demuxer {
             };
             self.pending.push_back(pending);
         }
-        let event = match self.pending.pop_front()? {
+        let pending = self.pending.pop_front()?;
+        if let (true, Pending::Section { pid, section, body }) =
+            (self.subscribe_elementary_pids, &pending)
+        {
+            // Why collect the PIDs before subscribing: the event borrows the
+            // bytes of the framer or the analyzer, which subscribing borrows
+            // mutably.
+            let pids: Vec<Pid> = if let Event::TsProgramMapSection { section, .. } =
+                self.section_event(*pid, section, body)
+            {
+                section
+                    .elementary_streams
+                    .iter()
+                    .map_while(Result::ok)
+                    .filter(|stream| !stream.stream_type.is_carried_in_sections())
+                    .map(|stream| stream.elementary_pid)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            for pid in pids {
+                self.analyzer.subscribe_pes(pid);
+            }
+        }
+        let event = match pending {
             Pending::Ready(event) => event,
             Pending::Unsynchronized(range) => Event::Unsynchronized {
                 bytes: self.framer.bytes(range),
@@ -332,16 +388,7 @@ impl Demuxer {
             // sections borrow their loops; the conversion reads the header
             // fields only, and gives on the same bytes what it gave when
             // analyzed.
-            Pending::Section { pid, section, body } => self.analyzer.section_event(
-                pid,
-                &Section {
-                    body: match body {
-                        Lent::Packet(range) => self.framer.bytes(range),
-                        Lent::Reassembled(range) => self.analyzer.reassembled(pid, range),
-                    },
-                    ..section
-                },
-            ),
+            Pending::Section { pid, section, body } => self.section_event(pid, &section, &body),
             // Why read the PES packet when polled, not when it ends: the
             // queue holds what it lends as a range, and the packet read
             // borrows those bytes.
@@ -390,6 +437,21 @@ impl Demuxer {
             },
         };
         Some(event)
+    }
+
+    /// Returns the event of a section queued whole on `pid`, without the
+    /// body it lends
+    fn section_event(&self, pid: Pid, section: &Section<'static>, body: &Lent) -> Event<'_> {
+        self.analyzer.section_event(
+            pid,
+            &Section {
+                body: match body {
+                    Lent::Packet(range) => self.framer.bytes(range.clone()),
+                    Lent::Reassembled(range) => self.analyzer.reassembled(pid, range.clone()),
+                },
+                ..section.clone()
+            },
+        )
     }
 
     /// Ends the input at the bytes handed over so far
