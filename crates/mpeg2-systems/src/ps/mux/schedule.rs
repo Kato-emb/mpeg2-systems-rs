@@ -250,11 +250,10 @@ impl Line {
 }
 
 /// How the bytes missing before a PES packet are cut into packs of padding:
-/// `count` packs of `total` bytes, each `longest` bytes but the last two,
-/// the last no shorter than a pack header
+/// `total` bytes in packs of `longest` bytes but the last two, the last no
+/// shorter than a pack header
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PaddingLayout {
-    count: u64,
     longest: u64,
     total: u64,
 }
@@ -273,32 +272,34 @@ fn padding_layout(missing: u64, longest: u64) -> Option<PaddingLayout> {
     let header = as_u64(pack_header::FIXED_LENGTH);
     let count = missing.div_ceil(longest);
     let rest = missing.saturating_sub(count.saturating_sub(1).saturating_mul(longest));
-    let (count, total) = if rest >= header
+    let total = if rest >= header
         || (count >= 2 && longest.saturating_add(rest) >= header.saturating_mul(2))
     {
-        (count, missing)
+        missing
     } else {
         // Why not a pack header for the bytes left: the PES packet would
         // come after its time, where leaving them has it come early.
-        (count.saturating_sub(1), missing.saturating_sub(rest))
+        missing.saturating_sub(rest)
     };
-    (count > 0).then_some(PaddingLayout {
-        count,
-        longest,
-        total,
-    })
+    (total > 0).then_some(PaddingLayout { longest, total })
 }
 
 impl PaddingLayout {
+    /// Returns how many packs there are
+    fn count(self) -> u64 {
+        self.total.div_ceil(self.longest)
+    }
+
     /// Returns the bytes of the pack at `index`, and of the packs before it
     fn pack(self, index: u64) -> (u64, u64) {
         let header = as_u64(pack_header::FIXED_LENGTH);
-        let others = self.longest.saturating_mul(self.count.saturating_sub(1));
+        let count = self.count();
+        let others = self.longest.saturating_mul(count.saturating_sub(1));
         let last = self.total.saturating_sub(others).max(header);
         let before = self.longest.saturating_mul(index);
-        if index.saturating_add(1) == self.count {
+        if index.saturating_add(1) == count {
             (last, self.total.saturating_sub(last))
-        } else if index.saturating_add(2) == self.count {
+        } else if index.saturating_add(2) == count {
             (
                 self.total.saturating_sub(before).saturating_sub(last),
                 before,
@@ -350,7 +351,7 @@ impl Gap {
     fn count(self) -> u64 {
         match self {
             Self::Filling { count, .. } => count,
-            Self::Padding { layout, .. } => layout.count,
+            Self::Padding { layout, .. } => layout.count(),
         }
     }
 
