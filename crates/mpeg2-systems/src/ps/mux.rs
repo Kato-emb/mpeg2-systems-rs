@@ -13,9 +13,10 @@
 //!   several, and holds no state. Where a pack starts, its SCR and the
 //!   bounds of a system header are up to the caller.
 //!
-//! The crate does not write a program stream directory, padding or pack
-//! stuffing. The example writes through [`PackWriter`]; [`Muxer`] has its
-//! own.
+//! The crate does not write a program stream directory. [`PackWriter`]
+//! writes padding and pack stuffing as the caller gives them, and [`Muxer`]
+//! writes neither. The example writes through [`PackWriter`]; [`Muxer`] has
+//! its own.
 //!
 //! ```
 //! use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};

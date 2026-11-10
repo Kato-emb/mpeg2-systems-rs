@@ -15,6 +15,46 @@ use crate::ps::{MPEG_PROGRAM_END_CODE, PackHeader, ProgramStreamMap, SystemHeade
 /// write that fails leaves the buffer as it was. The writer does not decide
 /// where a pack starts, the SCR or the multiplex rate, or the bounds of a
 /// system header.
+///
+/// Padding and pack stuffing go through the same methods: the
+/// `stuffing_byte`s after a pack header are its `pack_stuffing_length`, 0 to
+/// 7 (ISO/IEC 13818-1 §2.5.3.4, [`PackHeader::with_pack_stuffing_length`]),
+/// and padding is the PES packets of `padding_stream`
+/// ([`StreamId::PADDING_STREAM`]) given to
+/// [`write_pes_packets`](Self::write_pes_packets), whose payload is written
+/// as given as the `padding_byte`s, 0xFF (§2.4.3.6, §2.4.3.7).
+///
+/// ```
+/// use mpeg2_systems::pes::{PesPacket, StreamId};
+/// use mpeg2_systems::ps::PackHeader;
+/// use mpeg2_systems::ps::demux::{Demuxer, Event};
+/// use mpeg2_systems::ps::mux::PackWriter;
+/// use mpeg2_systems::time::ClockReference;
+///
+/// let writer = PackWriter::new();
+/// let mut stream = Vec::new();
+/// // A pack header with 7 stuffing bytes, then 100 bytes of padding
+/// let header = PackHeader::new(ClockReference::new(0, 0)?, 2_000).with_pack_stuffing_length(7);
+/// writer.write_pack_header(&header, &mut stream)?;
+/// let padding = [0xff; 94];
+/// writer.write_pes_packets(&PesPacket::new(StreamId::PADDING_STREAM, &padding), &mut stream)?;
+/// assert_eq!(stream.len(), 14 + 7 + 100);
+///
+/// // Read back
+/// let mut demuxer = Demuxer::new();
+/// demuxer.handle_input(&stream);
+/// demuxer.finish();
+/// let mut read = Vec::new();
+/// while let Some(event) = demuxer.poll_event() {
+///     match event {
+///         Event::PackHeader(header) => read.push(usize::from(header.pack_stuffing_length)),
+///         Event::PesPacket(packet) => read.push(packet.payload.len()),
+///         _ => {}
+///     }
+/// }
+/// assert_eq!(read, [7, 94]);
+/// # Ok::<(), Box<dyn core::error::Error>>(())
+/// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct PackWriter;
