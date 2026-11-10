@@ -3,6 +3,8 @@ use alloc::vec::Vec;
 
 use super::*;
 use crate::pes::{self, EncodedLen, OptionalHeader, StreamId};
+use crate::ps::demux::{Demuxer, Event};
+use crate::ps::pack_header;
 use crate::ps::system_header::{self, StreamBound, StreamBoundLoop, SystemHeader};
 use crate::time::{ClockReference, Timestamp};
 
@@ -342,6 +344,82 @@ fn the_count_and_the_bytes_of_the_pieces_are_known_before_they_are_cut() {
                 (3, 170),
                 (98, 5_000 + 14 + 97 * 9)
             ]
+        )
+    );
+}
+
+#[test]
+fn pack_stuffing_and_padding_read_back_through_the_demuxer_as_written() {
+    let writer = PackWriter::new();
+    let header =
+        PackHeader::new(ClockReference::new(0, 0).unwrap(), 2_000).with_pack_stuffing_length(7);
+    let padding = vec![0xff; 65_536];
+    let mut stream = Vec::new();
+    writer.write_pack_header(&header, &mut stream).unwrap();
+    let written = writer
+        .write_pes_packets(
+            &PesPacket::new(StreamId::PADDING_STREAM, &padding),
+            &mut stream,
+        )
+        .unwrap();
+    writer.write_program_end_code(&mut stream);
+
+    let mut demuxer = Demuxer::new();
+    demuxer.handle_input(&stream);
+    demuxer.finish();
+    let mut read = Vec::new();
+    while let Some(event) = demuxer.poll_event() {
+        read.push(if let Event::PackHeader(header) = event {
+            Read::PackHeader(header)
+        } else if let Event::PesPacket(packet) = event {
+            Read::PesPacket(packet.stream_id, packet.payload.to_vec())
+        } else if event == Event::ProgramEnd {
+            Read::ProgramEnd
+        } else {
+            Read::Other(alloc::format!("{event:?}"))
+        });
+    }
+    // 65 535 bytes of padding fill the PES_packet_length of one packet
+    assert_eq!(
+        (written, read),
+        (
+            2,
+            vec![
+                Read::Other("SyncAcquired".into()),
+                Read::PackHeader(header),
+                Read::PesPacket(StreamId::PADDING_STREAM, vec![0xff; 65_535]),
+                Read::PesPacket(StreamId::PADDING_STREAM, vec![0xff]),
+                Read::ProgramEnd,
+            ]
+        )
+    );
+}
+
+/// What the demuxer reads of a Program Stream, owned
+#[derive(Debug, PartialEq)]
+enum Read {
+    PackHeader(PackHeader),
+    PesPacket(StreamId, Vec<u8>),
+    ProgramEnd,
+    Other(alloc::string::String),
+}
+
+#[test]
+fn pack_stuffing_past_7_bytes_is_refused_leaving_out_as_it_was() {
+    let header =
+        PackHeader::new(ClockReference::new(0, 0).unwrap(), 2_000).with_pack_stuffing_length(8);
+    let mut out = vec![0xaa];
+
+    assert_eq!(
+        (PackWriter::new().write_pack_header(&header, &mut out), out),
+        (
+            Err(Error::PackHeader {
+                error: pack_header::Error::Field {
+                    field: "pack_stuffing_length",
+                    error: crate::field::Error::ValueTooWide { width: 3, value: 8 }
+                }
+            }),
+            vec![0xaa]
         )
     );
 }
