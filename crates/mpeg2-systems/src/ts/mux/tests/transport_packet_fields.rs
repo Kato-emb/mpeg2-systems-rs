@@ -459,3 +459,56 @@ fn a_pcr_split_from_its_pes_packet_counts_with_the_pes_packet_against_the_buffer
     );
     assert_eq!(refused, Err(Error::BufferFull { length: 188 * 6 }));
 }
+
+/// The PCRs of the output after `inputs` and the end of input, each
+/// `(pid, stream_id, dts)` given with `fields`, and the PCRs the output repeats
+/// the value of the one before
+fn repeated_pcrs(
+    inputs: &[(u16, u8, Option<u64>, TransportPacketFields<'_>)],
+) -> Vec<(u16, ClockReference)> {
+    let mut muxer = muxer_of(MuxerConfig::new());
+    let payload = [0xaa; 100];
+    for (pid_value, stream_id, dts, fields) in inputs {
+        // Why not stop at an input refused: whether one is refused is what
+        // the rule decides, and the output must hold no repeated PCR either way
+        let _ = muxer.handle_pes_packet_with_transport_packet_fields(
+            pid(*pid_value),
+            &pes_packet(*stream_id, &payload, *dts),
+            fields,
+        );
+    }
+    muxer.finish();
+    let mut out = Vec::new();
+    muxer.poll_output(&mut out);
+    pcrs_of(&out)
+        .windows(2)
+        .filter_map(|pair| match pair {
+            [before, after] if before.1 == after.1 => Some(*after),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn random_access_on_the_pcr_pid_at_the_time_of_the_pcr_before_repeats_no_pcr() {
+    let random_access = TransportPacketFields::new().with_random_access_indicator(true);
+    assert_eq!(
+        repeated_pcrs(&[
+            (AUDIO_PID, 0xc0, Some(90_000), TransportPacketFields::new()),
+            (VIDEO_PID, 0xe0, Some(90_000), random_access),
+        ]),
+        []
+    );
+}
+
+#[test]
+fn random_access_on_the_pcr_pid_without_a_time_stamp_repeats_no_pcr() {
+    let random_access = TransportPacketFields::new().with_random_access_indicator(true);
+    assert_eq!(
+        repeated_pcrs(&[
+            (VIDEO_PID, 0xe0, Some(90_000), TransportPacketFields::new()),
+            (VIDEO_PID, 0xe0, None, random_access),
+        ]),
+        []
+    );
+}
