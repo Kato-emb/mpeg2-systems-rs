@@ -67,31 +67,10 @@ impl StreamBound {
         }
     }
 
-    /// Returns the value with the given `stream_id`
-    #[must_use]
-    pub const fn with_stream_id(mut self, stream_id: StreamId) -> Self {
-        self.stream_id = stream_id;
-        self
-    }
-
     /// Returns the value with `stream_id_extension` present, set to the one given
     #[must_use]
     pub const fn with_stream_id_extension(mut self, stream_id_extension: u8) -> Self {
         self.stream_id_extension = Some(stream_id_extension);
-        self
-    }
-
-    /// Returns the value with the given `p_std_buffer_bound_scale`
-    #[must_use]
-    pub const fn with_p_std_buffer_bound_scale(mut self, p_std_buffer_bound_scale: bool) -> Self {
-        self.p_std_buffer_bound_scale = p_std_buffer_bound_scale;
-        self
-    }
-
-    /// Returns the value with the given `p_std_buffer_size_bound`
-    #[must_use]
-    pub const fn with_p_std_buffer_size_bound(mut self, p_std_buffer_size_bound: u16) -> Self {
-        self.p_std_buffer_size_bound = p_std_buffer_size_bound;
         self
     }
 

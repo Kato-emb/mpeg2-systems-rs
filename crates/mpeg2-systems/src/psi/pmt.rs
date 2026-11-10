@@ -233,20 +233,6 @@ impl<'input> TsProgramMapSection<'input> {
         }
     }
 
-    /// Returns the value with the given `program_number`
-    #[must_use]
-    pub const fn with_program_number(mut self, program_number: u16) -> Self {
-        self.program_number = program_number;
-        self
-    }
-
-    /// Returns the value with the given `version_number`
-    #[must_use]
-    pub const fn with_version_number(mut self, version_number: VersionNumber) -> Self {
-        self.version_number = version_number;
-        self
-    }
-
     /// Returns the value with the given `current_next_indicator`
     #[must_use]
     pub const fn with_current_next_indicator(mut self, current_next_indicator: bool) -> Self {
@@ -547,25 +533,19 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_built_with_every_with_method_equals_one_with_every_field_assigned() {
+    fn an_entry_built_from_new_and_every_with_method_equals_one_with_every_field_assigned() {
         let mut assigned = ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x0100));
-        assigned.stream_type = StreamType::ISO_IEC_13818_7_AUDIO;
-        assigned.elementary_pid = pid(0x0101);
         assigned.es_info = DescriptorLoop::from(ES_INFO.as_slice());
 
         let built = ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x0100))
-            .with_stream_type(StreamType::ISO_IEC_13818_7_AUDIO)
-            .with_elementary_pid(pid(0x0101))
             .with_es_info(DescriptorLoop::from(ES_INFO.as_slice()));
 
         assert_eq!(built, assigned);
     }
 
     #[test]
-    fn a_section_built_with_every_with_method_equals_one_with_every_field_assigned() {
-        let mut assigned = TsProgramMapSection::new(1, VersionNumber::try_from(0).unwrap());
-        assigned.program_number = 100;
-        assigned.version_number = VersionNumber::try_from(2).unwrap();
+    fn a_section_built_from_new_and_every_with_method_equals_one_with_every_field_assigned() {
+        let mut assigned = TsProgramMapSection::new(100, VersionNumber::try_from(2).unwrap());
         assigned.current_next_indicator = false;
         assigned.section_number = 1;
         assigned.last_section_number = 2;
@@ -573,9 +553,7 @@ mod tests {
         assigned.program_info = DescriptorLoop::from(PROGRAM_INFO.as_slice());
         assigned.elementary_streams = ElementaryStreamLoop::from(ES_INFO.as_slice());
 
-        let built = TsProgramMapSection::new(1, VersionNumber::try_from(0).unwrap())
-            .with_program_number(100)
-            .with_version_number(VersionNumber::try_from(2).unwrap())
+        let built = TsProgramMapSection::new(100, VersionNumber::try_from(2).unwrap())
             .with_current_next_indicator(false)
             .with_section_number(1)
             .with_last_section_number(2)

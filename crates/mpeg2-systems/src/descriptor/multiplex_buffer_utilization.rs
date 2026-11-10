@@ -34,20 +34,6 @@ impl LtwOffsetBounds {
             ltw_offset_upper_bound,
         }
     }
-
-    /// Returns the value with the given `ltw_offset_lower_bound`
-    #[must_use]
-    pub const fn with_ltw_offset_lower_bound(mut self, ltw_offset_lower_bound: u16) -> Self {
-        self.ltw_offset_lower_bound = ltw_offset_lower_bound;
-        self
-    }
-
-    /// Returns the value with the given `ltw_offset_upper_bound`
-    #[must_use]
-    pub const fn with_ltw_offset_upper_bound(mut self, ltw_offset_upper_bound: u16) -> Self {
-        self.ltw_offset_upper_bound = ltw_offset_upper_bound;
-        self
-    }
 }
 
 /// Multiplex buffer utilization descriptor, which bounds the occupancy of

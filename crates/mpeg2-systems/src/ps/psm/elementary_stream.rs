@@ -55,20 +55,6 @@ impl<'input> ElementaryStream<'input> {
         }
     }
 
-    /// Returns the value with the given `stream_type`
-    #[must_use]
-    pub const fn with_stream_type(mut self, stream_type: StreamType) -> Self {
-        self.stream_type = stream_type;
-        self
-    }
-
-    /// Returns the value with the given `elementary_stream_id`
-    #[must_use]
-    pub const fn with_elementary_stream_id(mut self, elementary_stream_id: StreamId) -> Self {
-        self.elementary_stream_id = elementary_stream_id;
-        self
-    }
-
     /// Returns the value with `elementary_stream_id_extension` present, set to the one given
     #[must_use]
     pub const fn with_elementary_stream_id_extension(

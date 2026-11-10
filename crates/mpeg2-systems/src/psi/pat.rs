@@ -178,20 +178,6 @@ impl<'input> ProgramAssociationSection<'input> {
         }
     }
 
-    /// Returns the value with the given `transport_stream_id`
-    #[must_use]
-    pub const fn with_transport_stream_id(mut self, transport_stream_id: u16) -> Self {
-        self.transport_stream_id = transport_stream_id;
-        self
-    }
-
-    /// Returns the value with the given `version_number`
-    #[must_use]
-    pub const fn with_version_number(mut self, version_number: VersionNumber) -> Self {
-        self.version_number = version_number;
-        self
-    }
-
     /// Returns the value with the given `current_next_indicator`
     #[must_use]
     pub const fn with_current_next_indicator(mut self, current_next_indicator: bool) -> Self {

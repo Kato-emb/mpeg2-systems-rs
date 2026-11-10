@@ -243,20 +243,6 @@ impl<'input> SystemHeader<'input> {
         }
     }
 
-    /// Returns the value with the given `rate_bound`
-    #[must_use]
-    pub const fn with_rate_bound(mut self, rate_bound: u32) -> Self {
-        self.rate_bound = rate_bound;
-        self
-    }
-
-    /// Returns the value with the given `audio_bound`
-    #[must_use]
-    pub const fn with_audio_bound(mut self, audio_bound: u8) -> Self {
-        self.audio_bound = audio_bound;
-        self
-    }
-
     /// Returns the value with the given `fixed_flag`
     #[must_use]
     pub const fn with_fixed_flag(mut self, fixed_flag: bool) -> Self {
@@ -282,13 +268,6 @@ impl<'input> SystemHeader<'input> {
     #[must_use]
     pub const fn with_system_video_lock_flag(mut self, system_video_lock_flag: bool) -> Self {
         self.system_video_lock_flag = system_video_lock_flag;
-        self
-    }
-
-    /// Returns the value with the given `video_bound`
-    #[must_use]
-    pub const fn with_video_bound(mut self, video_bound: u8) -> Self {
-        self.video_bound = video_bound;
         self
     }
 

@@ -77,13 +77,6 @@ impl IbpDescriptor {
         self
     }
 
-    /// Returns the value with the given `max_gop_length`
-    #[must_use]
-    pub const fn with_max_gop_length(mut self, max_gop_length: u16) -> Self {
-        self.max_gop_length = max_gop_length;
-        self
-    }
-
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     #[expect(

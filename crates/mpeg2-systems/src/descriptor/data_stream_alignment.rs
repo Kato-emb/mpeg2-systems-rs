@@ -171,13 +171,6 @@ impl DataStreamAlignmentDescriptor {
         Self { alignment_type }
     }
 
-    /// Returns the value with the given `alignment_type`
-    #[must_use]
-    pub const fn with_alignment_type(mut self, alignment_type: AlignmentType) -> Self {
-        self.alignment_type = alignment_type;
-        self
-    }
-
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     #[expect(

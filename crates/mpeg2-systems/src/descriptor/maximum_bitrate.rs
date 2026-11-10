@@ -54,13 +54,6 @@ impl MaximumBitrateDescriptor {
         Self { maximum_bitrate }
     }
 
-    /// Returns the value with the given `maximum_bitrate`
-    #[must_use]
-    pub const fn with_maximum_bitrate(mut self, maximum_bitrate: u32) -> Self {
-        self.maximum_bitrate = maximum_bitrate;
-        self
-    }
-
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     #[expect(

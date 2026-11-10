@@ -35,30 +35,6 @@ impl ProgramPacketSequenceCounter {
             original_stuff_length,
         }
     }
-
-    /// Returns the value with the given `program_packet_sequence_counter`
-    #[must_use]
-    pub const fn with_program_packet_sequence_counter(
-        mut self,
-        program_packet_sequence_counter: u8,
-    ) -> Self {
-        self.program_packet_sequence_counter = program_packet_sequence_counter;
-        self
-    }
-
-    /// Returns the value with the given `mpeg1_mpeg2_identifier`
-    #[must_use]
-    pub const fn with_mpeg1_mpeg2_identifier(mut self, mpeg1_mpeg2_identifier: bool) -> Self {
-        self.mpeg1_mpeg2_identifier = mpeg1_mpeg2_identifier;
-        self
-    }
-
-    /// Returns the value with the given `original_stuff_length`
-    #[must_use]
-    pub const fn with_original_stuff_length(mut self, original_stuff_length: u8) -> Self {
-        self.original_stuff_length = original_stuff_length;
-        self
-    }
 }
 
 /// Size of the input buffer of the P-STD for the stream
@@ -81,20 +57,6 @@ impl PStdBuffer {
             p_std_buffer_scale,
             p_std_buffer_size,
         }
-    }
-
-    /// Returns the value with the given `p_std_buffer_scale`
-    #[must_use]
-    pub const fn with_p_std_buffer_scale(mut self, p_std_buffer_scale: bool) -> Self {
-        self.p_std_buffer_scale = p_std_buffer_scale;
-        self
-    }
-
-    /// Returns the value with the given `p_std_buffer_size`
-    #[must_use]
-    pub const fn with_p_std_buffer_size(mut self, p_std_buffer_size: u16) -> Self {
-        self.p_std_buffer_size = p_std_buffer_size;
-        self
     }
 
     /// Returns the size in bytes: `p_std_buffer_size` units of 1024 bytes

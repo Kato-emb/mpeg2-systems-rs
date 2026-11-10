@@ -114,13 +114,6 @@ impl AudioStreamDescriptor {
         self
     }
 
-    /// Returns the value with the given `layer`
-    #[must_use]
-    pub const fn with_layer(mut self, layer: Layer) -> Self {
-        self.layer = layer;
-        self
-    }
-
     /// Returns the value with the given `variable_rate_audio_indicator`
     #[must_use]
     pub const fn with_variable_rate_audio_indicator(

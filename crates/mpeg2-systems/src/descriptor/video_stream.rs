@@ -213,23 +213,6 @@ impl Mpeg2Fields {
         }
     }
 
-    /// Returns the value with the given `profile_and_level_indication`
-    #[must_use]
-    pub const fn with_profile_and_level_indication(
-        mut self,
-        profile_and_level_indication: ProfileAndLevelIndication,
-    ) -> Self {
-        self.profile_and_level_indication = profile_and_level_indication;
-        self
-    }
-
-    /// Returns the value with the given `chroma_format`
-    #[must_use]
-    pub const fn with_chroma_format(mut self, chroma_format: ChromaFormat) -> Self {
-        self.chroma_format = chroma_format;
-        self
-    }
-
     /// Returns the value with the given `frame_rate_extension_flag`
     #[must_use]
     pub const fn with_frame_rate_extension_flag(mut self, frame_rate_extension_flag: bool) -> Self {
@@ -311,13 +294,6 @@ impl VideoStreamDescriptor {
     #[must_use]
     pub const fn with_multiple_frame_rate_flag(mut self, multiple_frame_rate_flag: bool) -> Self {
         self.multiple_frame_rate_flag = multiple_frame_rate_flag;
-        self
-    }
-
-    /// Returns the value with the given `frame_rate_code`
-    #[must_use]
-    pub const fn with_frame_rate_code(mut self, frame_rate_code: FrameRateCode) -> Self {
-        self.frame_rate_code = frame_rate_code;
         self
     }
 

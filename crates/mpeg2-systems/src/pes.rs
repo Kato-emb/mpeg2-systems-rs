@@ -305,13 +305,6 @@ impl<'input> PesPacket<'input> {
         }
     }
 
-    /// Returns the value with the given `stream_id`
-    #[must_use]
-    pub const fn with_stream_id(mut self, stream_id: StreamId) -> Self {
-        self.stream_id = stream_id;
-        self
-    }
-
     /// Returns the value with the given `length_unspecified`
     #[must_use]
     pub const fn with_length_unspecified(mut self, length_unspecified: bool) -> Self {
@@ -323,13 +316,6 @@ impl<'input> PesPacket<'input> {
     #[must_use]
     pub const fn with_optional_header(mut self, optional_header: OptionalHeader<'input>) -> Self {
         self.optional_header = Some(optional_header);
-        self
-    }
-
-    /// Returns the value with the given `payload`
-    #[must_use]
-    pub const fn with_payload(mut self, payload: &'input [u8]) -> Self {
-        self.payload = payload;
         self
     }
 
@@ -486,18 +472,14 @@ mod tests {
     use crate::pes;
 
     #[test]
-    fn a_packet_built_with_every_with_method_equals_one_with_every_field_assigned() {
-        let mut assigned = PesPacket::new(StreamId::PADDING_STREAM, &[0xff]);
-        assigned.stream_id = StreamId::from(0xe0);
+    fn a_packet_built_from_new_and_every_with_method_equals_one_with_every_field_assigned() {
+        let mut assigned = PesPacket::new(StreamId::from(0xe0), &[0xaa, 0xbb]);
         assigned.length_unspecified = true;
         assigned.optional_header = Some(OptionalHeader::new());
-        assigned.payload = &[0xaa, 0xbb];
 
-        let built = PesPacket::new(StreamId::PADDING_STREAM, &[0xff])
-            .with_stream_id(StreamId::from(0xe0))
+        let built = PesPacket::new(StreamId::from(0xe0), &[0xaa, 0xbb])
             .with_length_unspecified(true)
-            .with_optional_header(OptionalHeader::new())
-            .with_payload(&[0xaa, 0xbb]);
+            .with_optional_header(OptionalHeader::new());
 
         assert_eq!(built, assigned);
     }

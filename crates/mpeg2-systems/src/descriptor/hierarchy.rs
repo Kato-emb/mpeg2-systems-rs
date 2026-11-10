@@ -178,41 +178,10 @@ impl HierarchyDescriptor {
         self
     }
 
-    /// Returns the value with the given `hierarchy_type`
-    #[must_use]
-    pub const fn with_hierarchy_type(mut self, hierarchy_type: HierarchyType) -> Self {
-        self.hierarchy_type = hierarchy_type;
-        self
-    }
-
-    /// Returns the value with the given `hierarchy_layer_index`
-    #[must_use]
-    pub const fn with_hierarchy_layer_index(mut self, hierarchy_layer_index: u8) -> Self {
-        self.hierarchy_layer_index = hierarchy_layer_index;
-        self
-    }
-
     /// Returns the value with the given `tref_present_flag`
     #[must_use]
     pub const fn with_tref_present_flag(mut self, tref_present_flag: bool) -> Self {
         self.tref_present_flag = tref_present_flag;
-        self
-    }
-
-    /// Returns the value with the given `hierarchy_embedded_layer_index`
-    #[must_use]
-    pub const fn with_hierarchy_embedded_layer_index(
-        mut self,
-        hierarchy_embedded_layer_index: u8,
-    ) -> Self {
-        self.hierarchy_embedded_layer_index = hierarchy_embedded_layer_index;
-        self
-    }
-
-    /// Returns the value with the given `hierarchy_channel`
-    #[must_use]
-    pub const fn with_hierarchy_channel(mut self, hierarchy_channel: u8) -> Self {
-        self.hierarchy_channel = hierarchy_channel;
         self
     }
 

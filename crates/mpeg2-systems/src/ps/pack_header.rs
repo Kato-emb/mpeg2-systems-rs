@@ -175,23 +175,6 @@ impl PackHeader {
         }
     }
 
-    /// Returns the value with the given `system_clock_reference`
-    #[must_use]
-    pub const fn with_system_clock_reference(
-        mut self,
-        system_clock_reference: ClockReference,
-    ) -> Self {
-        self.system_clock_reference = system_clock_reference;
-        self
-    }
-
-    /// Returns the value with the given `program_mux_rate`
-    #[must_use]
-    pub const fn with_program_mux_rate(mut self, program_mux_rate: u32) -> Self {
-        self.program_mux_rate = program_mux_rate;
-        self
-    }
-
     /// Returns the value with the given `pack_stuffing_length`
     #[must_use]
     pub const fn with_pack_stuffing_length(mut self, pack_stuffing_length: u8) -> Self {

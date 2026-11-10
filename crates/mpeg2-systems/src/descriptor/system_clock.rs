@@ -80,20 +80,6 @@ impl SystemClockDescriptor {
         self
     }
 
-    /// Returns the value with the given `clock_accuracy_integer`
-    #[must_use]
-    pub const fn with_clock_accuracy_integer(mut self, clock_accuracy_integer: u8) -> Self {
-        self.clock_accuracy_integer = clock_accuracy_integer;
-        self
-    }
-
-    /// Returns the value with the given `clock_accuracy_exponent`
-    #[must_use]
-    pub const fn with_clock_accuracy_exponent(mut self, clock_accuracy_exponent: u8) -> Self {
-        self.clock_accuracy_exponent = clock_accuracy_exponent;
-        self
-    }
-
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     #[expect(

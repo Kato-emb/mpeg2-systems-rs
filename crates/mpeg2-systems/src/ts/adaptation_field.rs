@@ -563,7 +563,7 @@ mod tests {
     use crate::time::ClockReference;
 
     #[test]
-    fn a_field_built_with_every_with_method_equals_one_with_every_field_assigned() {
+    fn a_field_built_from_new_and_every_with_method_equals_one_with_every_field_assigned() {
         let pcr = ClockReference::new(2, 100).unwrap();
         let opcr = ClockReference::new(3, 299).unwrap();
         let mut assigned = AdaptationField::new();

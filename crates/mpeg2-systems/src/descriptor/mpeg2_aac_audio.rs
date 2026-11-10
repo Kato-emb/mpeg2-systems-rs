@@ -100,23 +100,6 @@ impl Mpeg2AacAudioDescriptor {
         }
     }
 
-    /// Returns the value with the given `mpeg_2_aac_profile`
-    #[must_use]
-    pub const fn with_mpeg_2_aac_profile(mut self, mpeg_2_aac_profile: u8) -> Self {
-        self.mpeg_2_aac_profile = mpeg_2_aac_profile;
-        self
-    }
-
-    /// Returns the value with the given `mpeg_2_aac_channel_configuration`
-    #[must_use]
-    pub const fn with_mpeg_2_aac_channel_configuration(
-        mut self,
-        mpeg_2_aac_channel_configuration: u8,
-    ) -> Self {
-        self.mpeg_2_aac_channel_configuration = mpeg_2_aac_channel_configuration;
-        self
-    }
-
     /// Returns the value with the given `mpeg_2_aac_additional_information`
     #[must_use]
     pub const fn with_mpeg_2_aac_additional_information(

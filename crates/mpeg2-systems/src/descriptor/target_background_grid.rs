@@ -109,30 +109,6 @@ impl TargetBackgroundGridDescriptor {
         }
     }
 
-    /// Returns the value with the given `horizontal_size`
-    #[must_use]
-    pub const fn with_horizontal_size(mut self, horizontal_size: u16) -> Self {
-        self.horizontal_size = horizontal_size;
-        self
-    }
-
-    /// Returns the value with the given `vertical_size`
-    #[must_use]
-    pub const fn with_vertical_size(mut self, vertical_size: u16) -> Self {
-        self.vertical_size = vertical_size;
-        self
-    }
-
-    /// Returns the value with the given `aspect_ratio_information`
-    #[must_use]
-    pub const fn with_aspect_ratio_information(
-        mut self,
-        aspect_ratio_information: AspectRatioInformation,
-    ) -> Self {
-        self.aspect_ratio_information = aspect_ratio_information;
-        self
-    }
-
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     #[expect(

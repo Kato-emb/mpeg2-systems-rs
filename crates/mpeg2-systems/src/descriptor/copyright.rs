@@ -60,13 +60,6 @@ impl<'input> CopyrightDescriptor<'input> {
         }
     }
 
-    /// Returns the value with the given `copyright_identifier`
-    #[must_use]
-    pub const fn with_copyright_identifier(mut self, copyright_identifier: u32) -> Self {
-        self.copyright_identifier = copyright_identifier;
-        self
-    }
-
     /// Returns the value with the given `additional_copyright_info`
     #[must_use]
     pub const fn with_additional_copyright_info(

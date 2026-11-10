@@ -54,10 +54,8 @@
 //! writer.write_ts_program_map_section(pmt_pid, &pmt, &mut stream)?;
 //! // An access unit, with the PCR of the program
 //! let access_unit = vec![0xaa; 1_000];
-//! let mut header = OptionalHeader::new();
-//! header.pts = Some(Timestamp::try_from(90_000)?);
-//! let mut packet = PesPacket::new(StreamId::from(0xe0), &access_unit);
-//! packet.optional_header = Some(header);
+//! let packet = PesPacket::new(StreamId::from(0xe0), &access_unit)
+//!     .with_optional_header(OptionalHeader::new().with_pts(Timestamp::try_from(90_000)?));
 //! let pcr = ClockReference::new(81_000, 0)?;
 //! assert_eq!(writer.write_pes_packet(video_pid, &packet, Some(pcr), &mut stream)?, 6);
 //!
@@ -466,10 +464,8 @@ impl MuxerConfig {
 /// muxer.add_stream(1, video_pid, StreamType::ISO_IEC_13818_2_VIDEO, &[])?;
 /// // Give an access unit a second in, and take the Transport Packets
 /// let access_unit = vec![0xaa; 1_000];
-/// let mut header = OptionalHeader::new();
-/// header.pts = Some(Timestamp::try_from(90_000)?);
-/// let mut packet = PesPacket::new(StreamId::from(0xe0), &access_unit);
-/// packet.optional_header = Some(header);
+/// let packet = PesPacket::new(StreamId::from(0xe0), &access_unit)
+///     .with_optional_header(OptionalHeader::new().with_pts(Timestamp::try_from(90_000)?));
 /// muxer.handle_pes_packet(video_pid, &packet)?;
 /// muxer.poll_output(&mut stream);
 /// // The end, and what is still held

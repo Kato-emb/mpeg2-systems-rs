@@ -295,13 +295,6 @@ impl<'input> TransportPacket<'input> {
         self
     }
 
-    /// Returns the value with the given `pid`
-    #[must_use]
-    pub const fn with_pid(mut self, pid: Pid) -> Self {
-        self.pid = pid;
-        self
-    }
-
     /// Returns the value with the given `transport_scrambling_control`
     #[must_use]
     pub const fn with_transport_scrambling_control(
@@ -309,13 +302,6 @@ impl<'input> TransportPacket<'input> {
         transport_scrambling_control: TransportScramblingControl,
     ) -> Self {
         self.transport_scrambling_control = transport_scrambling_control;
-        self
-    }
-
-    /// Returns the value with the given `continuity_counter`
-    #[must_use]
-    pub const fn with_continuity_counter(mut self, continuity_counter: ContinuityCounter) -> Self {
-        self.continuity_counter = continuity_counter;
         self
     }
 

@@ -45,20 +45,6 @@ impl<'input> ElementaryStream<'input> {
         }
     }
 
-    /// Returns the value with the given `stream_type`
-    #[must_use]
-    pub const fn with_stream_type(mut self, stream_type: StreamType) -> Self {
-        self.stream_type = stream_type;
-        self
-    }
-
-    /// Returns the value with the given `elementary_pid`
-    #[must_use]
-    pub const fn with_elementary_pid(mut self, elementary_pid: Pid) -> Self {
-        self.elementary_pid = elementary_pid;
-        self
-    }
-
     /// Returns the value with the given `es_info`
     #[must_use]
     pub const fn with_es_info(mut self, es_info: DescriptorLoop<'input>) -> Self {

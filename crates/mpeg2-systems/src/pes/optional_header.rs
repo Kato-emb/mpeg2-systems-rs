@@ -591,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn a_header_built_with_every_with_method_equals_one_with_every_field_assigned() {
+    fn a_header_built_from_new_and_every_with_method_equals_one_with_every_field_assigned() {
         let mut extension = PesExtension::new();
         extension.pes_private_data = Some(&PRIVATE_DATA);
         extension.pack_header_field = Some(&[0xaa, 0xbb, 0xcc]);

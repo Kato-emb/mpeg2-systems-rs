@@ -58,20 +58,6 @@ impl SmoothingBufferDescriptor {
         }
     }
 
-    /// Returns the value with the given `sb_leak_rate`
-    #[must_use]
-    pub const fn with_sb_leak_rate(mut self, sb_leak_rate: u32) -> Self {
-        self.sb_leak_rate = sb_leak_rate;
-        self
-    }
-
-    /// Returns the value with the given `sb_size`
-    #[must_use]
-    pub const fn with_sb_size(mut self, sb_size: u32) -> Self {
-        self.sb_size = sb_size;
-        self
-    }
-
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     #[expect(

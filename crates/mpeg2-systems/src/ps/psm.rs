@@ -278,16 +278,6 @@ impl<'input> ProgramStreamMap<'input> {
         self
     }
 
-    /// Returns the value with the given `program_stream_map_version`
-    #[must_use]
-    pub const fn with_program_stream_map_version(
-        mut self,
-        program_stream_map_version: VersionNumber,
-    ) -> Self {
-        self.program_stream_map_version = program_stream_map_version;
-        self
-    }
-
     /// Returns the value with the given `program_stream_info`
     #[must_use]
     pub const fn with_program_stream_info(

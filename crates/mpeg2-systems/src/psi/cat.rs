@@ -146,13 +146,6 @@ impl<'input> CaSection<'input> {
         }
     }
 
-    /// Returns the value with the given `version_number`
-    #[must_use]
-    pub const fn with_version_number(mut self, version_number: VersionNumber) -> Self {
-        self.version_number = version_number;
-        self
-    }
-
     /// Returns the value with the given `current_next_indicator`
     #[must_use]
     pub const fn with_current_next_indicator(mut self, current_next_indicator: bool) -> Self {
