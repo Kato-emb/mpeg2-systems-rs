@@ -45,6 +45,11 @@ pub(crate) fn fixture_path(name: &str) -> String {
 
 /// What `tool` prints on its standard output for `arguments`, read as JSON
 pub(crate) fn run(tool: &str, arguments: &[&str]) -> Value {
+    serde_json::from_slice(&run_for_output(tool, arguments)).unwrap()
+}
+
+/// What `tool` prints on its standard output for `arguments`
+pub(crate) fn run_for_output(tool: &str, arguments: &[&str]) -> Vec<u8> {
     let output = Command::new(tool)
         .args(arguments)
         .output()
@@ -56,7 +61,7 @@ pub(crate) fn run(tool: &str, arguments: &[&str]) -> Value {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-    serde_json::from_slice(&output.stdout).unwrap()
+    output.stdout
 }
 
 /// An integer a tool printed as a number, or as a string in decimal or in

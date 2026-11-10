@@ -1,10 +1,9 @@
 //! The program maps a PAT names, version by version
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::mem;
 
-use super::section_reassembly::SectionReassembler;
+use super::section_reassembly::SectionReassembly;
 use super::version_gate::VersionGate;
 use crate::psi::VersionNumber;
 use crate::psi::pat::{Program, ProgramAssociationSection};
@@ -66,18 +65,35 @@ impl ProgramMapRoutes {
         })
     }
 
+    /// Returns whether the latest whole version, or a section of the version
+    /// being gathered, names a program map on `pid`
+    pub(super) fn follows(&self, pid: Pid) -> bool {
+        [&self.named, &self.gathered].into_iter().any(|programs| {
+            programs
+                .binary_search_by_key(&pid, |&(named, _)| named)
+                .is_ok()
+        })
+    }
+
+    /// Returns whether `pid` carries the PSI the demuxer follows: the PAT and
+    /// CAT PIDs, and a program map PID [`follows`](Self::follows)
+    pub(super) fn carries_psi(&self, pid: Pid) -> bool {
+        [Pid::PAT, Pid::CAT].contains(&pid) || self.follows(pid)
+    }
+
     /// Takes a PAT section in force, and follows the program maps it names
     ///
     /// Each program a section names is named at once, and its program map
     /// gains a reassembler. Once every section of the version is in, the
     /// version's programs replace those of the previous one: a program map
-    /// PID the version no longer names loses its reassembler, and a program
-    /// it no longer names, or a PAT section past its `last_section_number`,
-    /// loses its version memory.
+    /// PID the version no longer names is no longer reassembled for the PSI
+    /// in `sections`, and a program it no longer names,
+    /// or a PAT section past its `last_section_number`, loses its version
+    /// memory.
     pub(super) fn follow(
         &mut self,
         pat: &ProgramAssociationSection<'_>,
-        reassemblers: &mut BTreeMap<Pid, SectionReassembler>,
+        sections: &mut SectionReassembly,
         gate: &mut VersionGate,
     ) {
         let gathering = match (observe(self.gathering.as_ref(), pat), &mut self.gathering) {
@@ -116,9 +132,7 @@ impl ProgramMapRoutes {
             }) = program
                 && ![Pid::PAT, Pid::CAT, Pid::NULL].contains(&program_map_pid)
             {
-                reassemblers
-                    .entry(program_map_pid)
-                    .or_insert_with(SectionReassembler::new);
+                sections.for_psi(program_map_pid);
                 self.gathered.push((program_map_pid, program_number.get()));
             }
         }
@@ -143,13 +157,7 @@ impl ProgramMapRoutes {
         }
         mem::swap(&mut self.named, &mut self.gathered);
         self.gathered.clear();
-        reassemblers.retain(|pid, _| {
-            [Pid::PAT, Pid::CAT].contains(pid)
-                || self
-                    .named
-                    .binary_search_by_key(pid, |&(named, _)| named)
-                    .is_ok()
-        });
+        sections.retain(|pid| self.carries_psi(pid));
         gate.retain(
             pat.transport_stream_id,
             Some(pat.last_section_number),
@@ -186,7 +194,6 @@ fn observe(gathering: Option<&Gathering>, pat: &ProgramAssociationSection<'_>) -
 
 #[cfg(test)]
 mod tests {
-    use alloc::collections::BTreeMap;
     use alloc::vec;
     use alloc::vec::Vec;
 
@@ -195,7 +202,7 @@ mod tests {
     use crate::psi::pat::ProgramAssociationSection;
     use crate::psi::section::Section;
     use crate::ts::Pid;
-    use crate::ts::demux::analyzer::section_reassembly::SectionReassembler;
+    use crate::ts::demux::analyzer::section_reassembly::SectionReassembly;
     use crate::ts::demux::analyzer::version_gate::{Admission, TableSection, VersionGate};
 
     /// A PAT section of `transport_stream_id` 1 naming `programs`, each a
@@ -228,12 +235,12 @@ mod tests {
         bytes
     }
 
-    /// Program routes, the reassembler map of a demuxer that has seen the
+    /// Program routes, the section PIDs of a demuxer that has seen the
     /// PAT PID only, and a version memory
     #[derive(Debug, Clone, PartialEq)]
     struct Fixture {
         routes: ProgramMapRoutes,
-        reassemblers: BTreeMap<Pid, SectionReassembler>,
+        sections: SectionReassembly,
         gate: VersionGate,
     }
 
@@ -246,7 +253,11 @@ mod tests {
         fn new() -> Self {
             Self {
                 routes: ProgramMapRoutes::new(),
-                reassemblers: BTreeMap::from([(Pid::PAT, SectionReassembler::new())]),
+                sections: {
+                    let mut sections = SectionReassembly::new();
+                    sections.for_psi(Pid::PAT);
+                    sections
+                },
                 gate: VersionGate::new(),
             }
         }
@@ -254,8 +265,7 @@ mod tests {
         fn follow(&mut self, bytes: &[u8]) -> &mut Self {
             let section = Section::read(bytes).unwrap();
             let pat = ProgramAssociationSection::try_from(&section).unwrap();
-            self.routes
-                .follow(&pat, &mut self.reassemblers, &mut self.gate);
+            self.routes.follow(&pat, &mut self.sections, &mut self.gate);
             self
         }
 
@@ -269,7 +279,7 @@ mod tests {
         }
 
         fn state(&self, programs: &[(u16, u16)]) -> State {
-            let pids = self.reassemblers.keys().map(|pid| pid.get()).collect();
+            let pids = self.sections.pids().map(Pid::get).collect();
             let listed = |programs: &[(Pid, u16)]| {
                 programs
                     .iter()
