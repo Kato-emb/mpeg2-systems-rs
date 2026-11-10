@@ -262,8 +262,9 @@ pub enum Error {
         /// The counter found
         found: ContinuityCounter,
     },
-    /// A section reassembled on a PID that carries PSI could not be read,
-    /// its `CRC_32` failing included
+    /// A section reassembled on a PID that carries PSI, or that
+    /// [`Demuxer::subscribe_sections`](super::Demuxer::subscribe_sections)
+    /// named, could not be read, its `CRC_32` failing included
     ///
     /// The bytes of the section are dropped.
     Section {

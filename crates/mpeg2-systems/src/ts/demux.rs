@@ -534,8 +534,8 @@ impl Demuxer {
     /// flight and the `continuity_counter` history are dropped at the end.
     /// Poll until `None` before handing over more input. The packet size
     /// found, the PIDs learned from a PAT, the table versions reported and
-    /// the PES subscriptions stay, so the same demuxer can then take a stream
-    /// that goes on.
+    /// the PES and section subscriptions stay, so the same demuxer can then
+    /// take a stream that goes on.
     pub fn finish(&mut self) {
         self.framer.finish();
     }

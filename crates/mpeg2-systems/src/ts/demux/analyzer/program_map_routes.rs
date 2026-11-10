@@ -157,7 +157,7 @@ impl ProgramMapRoutes {
         }
         mem::swap(&mut self.named, &mut self.gathered);
         self.gathered.clear();
-        sections.retain_psi(|pid| self.carries_psi(pid));
+        sections.retain(|pid| self.carries_psi(pid));
         gate.retain(
             pat.transport_stream_id,
             Some(pat.last_section_number),

@@ -74,6 +74,14 @@ struct SectionPid {
     subscribed: bool,
 }
 
+impl SectionPid {
+    /// Returns whether the sections of the PID stay reassembled: while the
+    /// caller subscribes to them, or while the PID `carries_psi`
+    const fn is_kept(&self, carries_psi: bool) -> bool {
+        self.subscribed || carries_psi
+    }
+}
+
 impl SectionReassembly {
     pub(super) const fn new() -> Self {
         Self {
@@ -105,10 +113,10 @@ impl SectionReassembly {
             return;
         };
         section_pid.subscribed = false;
-        if carries_psi {
+        if section_pid.is_kept(carries_psi) {
             return;
         }
-        // Why drop the queued events too: a section that crossed packets
+        // Why not leave the queued events: a section that crossed packets
         // lends the buffer dropped here.
         self.pids.remove(&pid);
         pending.retain(|pending| match pending {
@@ -128,11 +136,11 @@ impl SectionReassembly {
         &mut self.entry(pid).reassembler
     }
 
-    /// Stops reassembling the sections of each PID not subscribed to that
-    /// `carries_psi` refuses
-    pub(super) fn retain_psi(&mut self, mut carries_psi: impl FnMut(Pid) -> bool) {
+    /// Keeps reassembling the PIDs subscribed to and those `carries_psi`
+    /// accepts, and stops reassembling the others
+    pub(super) fn retain(&mut self, mut carries_psi: impl FnMut(Pid) -> bool) {
         self.pids
-            .retain(|&pid, section_pid| section_pid.subscribed || carries_psi(pid));
+            .retain(|&pid, section_pid| section_pid.is_kept(carries_psi(pid)));
     }
 
     /// Returns the entry of `pid`, made with no section and no subscription
