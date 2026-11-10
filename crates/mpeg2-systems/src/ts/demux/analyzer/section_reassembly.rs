@@ -1,10 +1,14 @@
-//! Reassembly of the sections one PID carries across Transport Packets
+//! Reassembly of the sections the PIDs followed carry across Transport
+//! Packets, and the subscriptions to them
 
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use core::ops::Range;
 
 use crate::psi::TableId;
 use crate::psi::section::PREFIX_LENGTH;
+use crate::ts::Pid;
+use crate::ts::demux::{Error, Event, Pending};
 
 /// How a packet's payload relates to sections, `pointer_field` included
 enum Unit<'payload> {
@@ -51,6 +55,142 @@ pub(super) enum Completed {
     Reassembled(usize),
 }
 
+/// The PIDs whose sections are reassembled, for the PSI or because the
+/// caller subscribed to them, and the section in flight on each
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SectionReassembly {
+    pids: BTreeMap<Pid, SectionPid>,
+}
+
+/// A PID whose sections are reassembled
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SectionPid {
+    reassembler: SectionReassembler,
+    /// Whether [`Demuxer::subscribe_sections`](crate::ts::demux::Demuxer::subscribe_sections)
+    /// names the PID
+    // Why not a set of the PIDs subscribed to beside the map: each of them
+    // has an entry here, and the two would have to be kept in step wherever
+    // an entry is added or dropped.
+    subscribed: bool,
+}
+
+impl SectionPid {
+    /// Returns whether the sections of the PID stay reassembled: while the
+    /// caller subscribes to them, or while the PID `carries_psi`
+    const fn is_kept(&self, carries_psi: bool) -> bool {
+        self.subscribed || carries_psi
+    }
+}
+
+impl SectionReassembly {
+    pub(super) const fn new() -> Self {
+        Self {
+            pids: BTreeMap::new(),
+        }
+    }
+
+    /// Reassembles the sections of `pid` from its next
+    /// `payload_unit_start_indicator` for the caller, keeping the section in
+    /// flight of a PID already reassembled
+    pub(super) fn subscribe(&mut self, pid: Pid) {
+        self.entry(pid).subscribed = true;
+    }
+
+    /// Drops the caller's subscription to `pid`, if any; unless `carries_psi`,
+    /// drops with it every byte the PID gathered and the queued events of
+    /// its sections
+    pub(super) fn unsubscribe(
+        &mut self,
+        pid: Pid,
+        carries_psi: bool,
+        pending: &mut VecDeque<Pending>,
+    ) {
+        let Some(section_pid) = self
+            .pids
+            .get_mut(&pid)
+            .filter(|section_pid| section_pid.subscribed)
+        else {
+            return;
+        };
+        section_pid.subscribed = false;
+        if section_pid.is_kept(carries_psi) {
+            return;
+        }
+        // Why not leave the queued events: a section that crossed packets
+        // lends the buffer dropped here.
+        self.pids.remove(&pid);
+        pending.retain(|pending| match pending {
+            Pending::Section { pid: queued, .. }
+            | Pending::Ready(Event::Error(Error::Section { pid: queued, .. })) => *queued != pid,
+            Pending::Ready(_)
+            | Pending::Unsynchronized(_)
+            | Pending::PesPacket { .. }
+            | Pending::ScrambledPesPacket { .. }
+            | Pending::TruncatedPesPacket { .. } => true,
+        });
+    }
+
+    /// Returns the reassembler of `pid`, which carries the PSI, reassembling
+    /// its sections from here on if they are not already
+    pub(super) fn for_psi(&mut self, pid: Pid) -> &mut SectionReassembler {
+        &mut self.entry(pid).reassembler
+    }
+
+    /// Keeps reassembling the PIDs subscribed to and those `carries_psi`
+    /// accepts, and stops reassembling the others
+    pub(super) fn retain(&mut self, mut carries_psi: impl FnMut(Pid) -> bool) {
+        self.pids
+            .retain(|&pid, section_pid| section_pid.is_kept(carries_psi(pid)));
+    }
+
+    /// Returns the entry of `pid`, made with no section and no subscription
+    /// if there is none
+    fn entry(&mut self, pid: Pid) -> &mut SectionPid {
+        self.pids.entry(pid).or_insert_with(|| SectionPid {
+            reassembler: SectionReassembler::new(),
+            subscribed: false,
+        })
+    }
+
+    /// Returns the reassembler of `pid`, if its sections are reassembled
+    pub(super) fn reassembler_mut(&mut self, pid: Pid) -> Option<&mut SectionReassembler> {
+        self.pids
+            .get_mut(&pid)
+            .map(|section_pid| &mut section_pid.reassembler)
+    }
+
+    /// Returns the bytes of a [`Completed::Reassembled`] range of `pid`
+    pub(super) fn bytes(&self, pid: Pid, range: Range<usize>) -> &[u8] {
+        self.pids
+            .get(&pid)
+            .map(|section_pid| section_pid.reassembler.section(range))
+            .unwrap_or_default()
+    }
+
+    /// Drops the section in flight on every PID, keeping the sections
+    /// completed, which the queued events lend, the PIDs reassembled and the
+    /// subscriptions
+    pub(super) fn discard_in_flight(&mut self) {
+        for section_pid in self.pids.values_mut() {
+            section_pid.reassembler.discard_in_flight();
+        }
+    }
+
+    /// The PIDs whose sections are reassembled
+    #[cfg(test)]
+    pub(super) fn pids(&self) -> impl Iterator<Item = Pid> + '_ {
+        self.pids.keys().copied()
+    }
+
+    /// Bytes the reassembler of `pid` holds
+    #[cfg(test)]
+    pub(super) fn buffer_len(&self, pid: Pid) -> Option<usize> {
+        self.pids
+            .get(&pid)
+            .map(|section_pid| section_pid.reassembler.buffer_len())
+    }
+}
+
 /// The sections of one PID that cross Transport Packets
 ///
 /// `buffer[..in_flight_start]` holds the sections the latest packet
@@ -78,12 +218,6 @@ impl SectionReassembler {
     #[cfg(test)]
     pub(super) fn buffer_len(&self) -> usize {
         self.buffer.len()
-    }
-
-    /// Drops every byte, the completed sections and the section in flight
-    pub(super) fn clear(&mut self) {
-        self.buffer.clear();
-        self.in_flight_start = 0;
     }
 
     /// Drops the section in flight

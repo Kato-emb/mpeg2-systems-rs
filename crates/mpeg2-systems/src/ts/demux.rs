@@ -152,9 +152,10 @@ enum Lent {
 ///
 /// The demuxer finds the packet grid (188, 192 or 204 bytes), cuts Transport
 /// Packets off it, and reports each byte it could not cut. From each packet it
-/// reports a broken `continuity_counter`, a PCR, and the PSI sections it
+/// reports a broken `continuity_counter`, a PCR, and the sections it
 /// reassembles: those of the PAT, the PMTs the PAT names and the CAT typed,
-/// each at a version not reported before; and the PES packets of the PIDs
+/// each at a version not reported before, and those of the PIDs
+/// [`Demuxer::subscribe_sections`] names; and the PES packets of the PIDs
 /// [`Demuxer::subscribe_pes`] names, or, with
 /// [`DemuxerConfig::subscribe_elementary_pids`], of the elementary streams
 /// the program maps name. Handing input over never fails: a broken
@@ -290,6 +291,74 @@ impl Demuxer {
     /// subscription does.
     pub fn unsubscribe_pes(&mut self, pid: Pid) {
         self.analyzer.unsubscribe_pes(pid, &mut self.pending);
+    }
+
+    /// Reassembles the sections of `pid` from here on, reported as
+    /// [`Event::Section`]
+    ///
+    /// Reassembly starts at the next packet of the PID with
+    /// `payload_unit_start_indicator` set. Each section is reported as read,
+    /// a repeated one and one with `current_next_indicator` `'0'` included,
+    /// its `CRC_32` verified when `section_syntax_indicator` is `'1'`; the
+    /// demuxer keeps no version of it. Subscribing a PID already subscribed,
+    /// or one whose sections the demuxer reassembles anyway (the PAT and CAT
+    /// PIDs, and a PID a PAT names for a program map), keeps the section in
+    /// flight and changes none of the events of the PID: the PAT, PMT and
+    /// CAT sections come typed and by version as before. A subscription
+    /// stays across [`Error::SyncLost`] and [`Demuxer::finish`], and across a
+    /// PAT that stops naming the PID. It is independent of
+    /// [`Demuxer::subscribe_pes`]: a PID subscribed to both is reassembled
+    /// both ways. The demuxer chooses no PID to subscribe to for sections,
+    /// not even one a program map names with a `stream_type` carried in
+    /// sections ([`StreamType::is_carried_in_sections`]).
+    ///
+    /// [`StreamType::is_carried_in_sections`]: crate::stream_type::StreamType::is_carried_in_sections
+    ///
+    /// ```
+    /// use mpeg2_systems::psi::section::Section;
+    /// use mpeg2_systems::psi::TableId;
+    /// use mpeg2_systems::ts::Pid;
+    /// use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event};
+    /// use mpeg2_systems::ts::mux::PacketWriter;
+    ///
+    /// // A private section on PID 0x0300, which no PAT names, across packets
+    /// let pid = Pid::try_from(0x0300)?;
+    /// let private_data = [0xaa; 1000];
+    /// let mut stream = Vec::new();
+    /// PacketWriter::new().write_section(
+    ///     pid,
+    ///     &Section::new(TableId::from(0x80), &private_data),
+    ///     &mut stream,
+    /// )?;
+    ///
+    /// let mut demuxer = Demuxer::new(DemuxerConfig::default());
+    /// demuxer.subscribe_sections(pid);
+    /// demuxer.handle_input(&stream);
+    /// demuxer.finish();
+    /// let mut bodies = Vec::new();
+    /// while let Some(event) = demuxer.poll_event() {
+    ///     if let Event::Section { section, .. } = event {
+    ///         bodies.push(section.body.to_vec());
+    ///     }
+    /// }
+    /// assert_eq!(bodies, [private_data]);
+    /// # Ok::<(), Box<dyn core::error::Error>>(())
+    /// ```
+    pub fn subscribe_sections(&mut self, pid: Pid) {
+        self.analyzer.subscribe_sections(pid);
+    }
+
+    /// Stops reassembling the sections of `pid` that
+    /// [`Demuxer::subscribe_sections`] asked for
+    ///
+    /// The PAT and CAT PIDs, and a PID a PAT names for a program map, are
+    /// reassembled as before. On any other PID, the section in flight and
+    /// the events of the PID not yet polled that the subscription gave are
+    /// dropped without a word. Unsubscribing a PID not subscribed does
+    /// nothing. Subscribing again starts at the next
+    /// `payload_unit_start_indicator`, as a first subscription does.
+    pub fn unsubscribe_sections(&mut self, pid: Pid) {
+        self.analyzer.unsubscribe_sections(pid, &mut self.pending);
     }
 
     /// Hands over the next bytes of the stream, cut anywhere
@@ -465,8 +534,8 @@ impl Demuxer {
     /// flight and the `continuity_counter` history are dropped at the end.
     /// Poll until `None` before handing over more input. The packet size
     /// found, the PIDs learned from a PAT, the table versions reported and
-    /// the PES subscriptions stay, so the same demuxer can then take a stream
-    /// that goes on.
+    /// the PES and section subscriptions stay, so the same demuxer can then
+    /// take a stream that goes on.
     pub fn finish(&mut self) {
         self.framer.finish();
     }
