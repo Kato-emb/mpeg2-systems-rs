@@ -1,5 +1,6 @@
 use alloc::vec;
 use alloc::vec::Vec;
+use core::time::Duration;
 
 use super::*;
 use crate::descriptor;
@@ -59,6 +60,19 @@ fn muxer() -> Muxer {
     muxer_of(MuxerConfig::new(RATE))
 }
 
+/// Whole descriptors of tag 0x80 that come to `length` bytes, which is not 1
+fn descriptors(length: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut rest = length;
+    while rest > 0 {
+        let body = rest.saturating_sub(2).min(255);
+        bytes.extend([0x80, u8::try_from(body).unwrap()]);
+        bytes.extend(core::iter::repeat_n(0xaa, body));
+        rest = rest.saturating_sub(body.saturating_add(2));
+    }
+    bytes
+}
+
 /// What `muxer` gives of `packets`, each taken before the next is given
 fn multiplexed_by(mut muxer: Muxer, packets: &[PesPacket<'_>]) -> Vec<u8> {
     let mut stream = Vec::new();
@@ -76,7 +90,7 @@ fn multiplexed_by(mut muxer: Muxer, packets: &[PesPacket<'_>]) -> Vec<u8> {
 enum Element<'a> {
     PackHeader(PackHeader),
     SystemHeader(&'a [u8]),
-    ProgramStreamMap,
+    ProgramStreamMap(&'a [u8]),
     PesPacket(PesPacket<'a>),
     ProgramEnd,
 }
@@ -95,7 +109,7 @@ fn elements(bytes: &[u8]) -> Vec<(Element<'_>, usize)> {
         let element = match code {
             0xba => Element::PackHeader(PackHeader::read(element).unwrap()),
             0xbb => Element::SystemHeader(element),
-            0xbc => Element::ProgramStreamMap,
+            0xbc => Element::ProgramStreamMap(element),
             0xb9 => Element::ProgramEnd,
             _ => Element::PesPacket(PesPacket::read(element).unwrap()),
         };
@@ -256,7 +270,7 @@ fn a_pes_packet_too_long_for_a_pack_is_split_into_packs_of_at_most_pack_size() {
         match element {
             Element::PackHeader(_) => packs.push((length, Vec::new())),
             Element::ProgramEnd => {}
-            Element::SystemHeader(_) | Element::ProgramStreamMap | Element::PesPacket(_) => {
+            Element::SystemHeader(_) | Element::ProgramStreamMap(_) | Element::PesPacket(_) => {
                 let pack = packs.last_mut().unwrap();
                 pack.0 += length;
                 pack.1.push(element);
@@ -844,17 +858,6 @@ fn after_finish_poll_output_gives_what_is_held_and_the_end_code_once() {
 fn a_stream_is_taken_whose_descriptors_fill_the_map_and_refused_one_byte_past_it() {
     // A map of video and audio: 10 bytes besides its loop, two entries of
     // 4, and 4 for the stream added, leave 996 bytes of descriptors
-    let descriptors = |length: usize| {
-        let mut bytes = Vec::new();
-        let mut rest = length;
-        while rest > 0 {
-            let body = (rest - 2).min(255);
-            bytes.extend([0x80, u8::try_from(body).unwrap()]);
-            bytes.extend(core::iter::repeat_n(0xaa, body));
-            rest -= 2 + body;
-        }
-        bytes
-    };
     let add = |es_info: &[u8]| {
         muxer().add_stream(
             ElementaryStream::new(
@@ -973,3 +976,5 @@ fn a_p_std_buffer_size_past_the_bound_registered_is_refused_on_any_pes_packet() 
         )
     );
 }
+
+mod headers;

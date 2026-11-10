@@ -173,8 +173,19 @@ pub fn multiplex_pes_packets(
 /// measure.
 #[must_use]
 pub fn registered_program_stream_muxer() -> ps::mux::Muxer {
-    let mut muxer = ps::mux::Muxer::new(ps::mux::MuxerConfig::new(25_200))
-        .expect("the default settings are taken");
+    registered_program_stream_muxer_of(ps::mux::MuxerConfig::new(25_200))
+}
+
+/// Returns a Program Stream muxer of `config` with its video stream of
+/// `stream_id` 0xE0 registered
+///
+/// # Panics
+///
+/// Panics if the muxer refuses `config` or the registration, which a
+/// benchmark must not measure.
+#[must_use]
+pub fn registered_program_stream_muxer_of(config: ps::mux::MuxerConfig) -> ps::mux::Muxer {
+    let mut muxer = ps::mux::Muxer::new(config).expect("the settings are taken");
     muxer
         .add_stream(
             ps::psm::ElementaryStream::new(StreamType::AVC_VIDEO, StreamId::from(0xE0)),

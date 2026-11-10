@@ -523,20 +523,18 @@ impl<'input> ProgramStreamMap<'input> {
     }
 }
 
-/// Refuses a map without descriptors of the program whose elementary stream
-/// loop would hold `elementary_streams`, its `program_stream_map_length`
-/// larger than 1018, from the lengths of the entries alone
+/// Refuses a map whose descriptors of the program are `program_stream_info`
+/// and whose elementary stream loop would hold `elementary_streams`, its
+/// `program_stream_map_length` larger than 1018, from the lengths alone
 #[cfg(feature = "alloc")]
-pub(crate) fn check_elementary_streams<'stream>(
+pub(crate) fn check_lengths<'stream>(
+    program_stream_info: DescriptorLoop<'_>,
     elementary_streams: impl IntoIterator<Item = ElementaryStream<'stream>>,
 ) -> Result<(), Error> {
-    check_encoded_len(
-        elementary_streams
-            .into_iter()
-            .fold(OVERHEAD, |length, stream| {
-                length.saturating_add(stream.encoded_len())
-            }),
-    )
+    check_encoded_len(elementary_streams.into_iter().fold(
+        OVERHEAD.saturating_add(program_stream_info.0.len()),
+        |length, stream| length.saturating_add(stream.encoded_len()),
+    ))
 }
 
 /// Refuses a map of `encoded_len` bytes, its `program_stream_map_length`
