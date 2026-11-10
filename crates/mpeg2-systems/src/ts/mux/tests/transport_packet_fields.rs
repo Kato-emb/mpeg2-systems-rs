@@ -460,55 +460,109 @@ fn a_pcr_split_from_its_pes_packet_counts_with_the_pes_packet_against_the_buffer
     assert_eq!(refused, Err(Error::BufferFull { length: 188 * 6 }));
 }
 
-/// The PCRs of the output after `inputs` and the end of input, each
-/// `(pid, stream_id, dts)` given with `fields`, and the PCRs the output repeats
-/// the value of the one before
-fn repeated_pcrs(
+/// The PCRs of an output, each the PID it goes on and its value
+type Pcrs = Vec<(u16, ClockReference)>;
+
+/// What the muxer of the default settings makes of `inputs` and the end of
+/// input, each `(pid, stream_id, dts, fields)`: the result of each, and the
+/// PCRs of the output
+fn finished(
     inputs: &[(u16, u8, Option<u64>, TransportPacketFields<'_>)],
-) -> Vec<(u16, ClockReference)> {
+) -> (Vec<Result<(), Error>>, Pcrs) {
     let mut muxer = muxer_of(MuxerConfig::new());
     let payload = [0xaa; 100];
-    for (pid_value, stream_id, dts, fields) in inputs {
-        // Why not stop at an input refused: whether one is refused is what
-        // the rule decides, and the output must hold no repeated PCR either way
-        let _ = muxer.handle_pes_packet_with_transport_packet_fields(
-            pid(*pid_value),
-            &pes_packet(*stream_id, &payload, *dts),
-            fields,
-        );
-    }
+    let results = inputs
+        .iter()
+        .map(|(pid_value, stream_id, dts, fields)| {
+            muxer.handle_pes_packet_with_transport_packet_fields(
+                pid(*pid_value),
+                &pes_packet(*stream_id, &payload, *dts),
+                fields,
+            )
+        })
+        .collect();
     muxer.finish();
     let mut out = Vec::new();
     muxer.poll_output(&mut out);
-    pcrs_of(&out)
-        .windows(2)
-        .filter_map(|pair| match pair {
-            [before, after] if before.1 == after.1 => Some(*after),
-            _ => None,
-        })
-        .collect()
+    (results, pcrs_of(&out))
+}
+
+/// The PCR of the time `dts` on the PCR PID, the default `mux_delay` taken off
+fn video_pcr(dts: u64) -> (u16, ClockReference) {
+    (VIDEO_PID, pcr((dts - DELAY) * 300))
 }
 
 #[test]
-fn random_access_on_the_pcr_pid_at_the_time_of_the_pcr_before_repeats_no_pcr() {
+fn random_access_on_the_pcr_pid_at_the_time_of_the_pcr_before_is_refused() {
     let random_access = TransportPacketFields::new().with_random_access_indicator(true);
+    let audio = (AUDIO_PID, 0xc0, Some(90_000), TransportPacketFields::new());
+    let (results, pcrs) = finished(&[audio, (VIDEO_PID, 0xe0, Some(90_000), random_access)]);
+    let (_, without_the_refused) = finished(&[audio]);
     assert_eq!(
-        repeated_pcrs(&[
-            (AUDIO_PID, 0xc0, Some(90_000), TransportPacketFields::new()),
-            (VIDEO_PID, 0xe0, Some(90_000), random_access),
-        ]),
-        []
+        (results, pcrs.clone(), without_the_refused),
+        (
+            vec![
+                Ok(()),
+                Err(Error::RandomAccessIndicator {
+                    pid: pid(VIDEO_PID),
+                    program_clock_reference: pcr((90_000 - DELAY) * 300),
+                })
+            ],
+            vec![video_pcr(90_000), video_pcr(93_600)],
+            pcrs
+        )
     );
 }
 
 #[test]
-fn random_access_on_the_pcr_pid_without_a_time_stamp_repeats_no_pcr() {
+fn random_access_on_the_pcr_pid_without_a_time_stamp_after_the_pcr_is_refused() {
     let random_access = TransportPacketFields::new().with_random_access_indicator(true);
+    let video = (VIDEO_PID, 0xe0, Some(90_000), TransportPacketFields::new());
+    let (results, pcrs) = finished(&[video, (VIDEO_PID, 0xe0, None, random_access)]);
     assert_eq!(
-        repeated_pcrs(&[
-            (VIDEO_PID, 0xe0, Some(90_000), TransportPacketFields::new()),
-            (VIDEO_PID, 0xe0, None, random_access),
-        ]),
-        []
+        (results, pcrs),
+        (
+            vec![
+                Ok(()),
+                Err(Error::RandomAccessIndicator {
+                    pid: pid(VIDEO_PID),
+                    program_clock_reference: pcr((90_000 - DELAY) * 300),
+                })
+            ],
+            vec![video_pcr(90_000), video_pcr(93_600)]
+        )
+    );
+}
+
+#[test]
+fn random_access_on_the_pcr_pid_given_first_among_pes_packets_of_one_time_is_taken() {
+    let random_access = TransportPacketFields::new().with_random_access_indicator(true);
+    let (results, pcrs) = finished(&[
+        (VIDEO_PID, 0xe0, Some(90_000), random_access),
+        (AUDIO_PID, 0xc0, Some(90_000), TransportPacketFields::new()),
+    ]);
+    assert_eq!(
+        (results, pcrs),
+        (
+            vec![Ok(()), Ok(())],
+            vec![video_pcr(90_000), video_pcr(93_600)]
+        )
+    );
+}
+
+#[test]
+fn random_access_on_the_pcr_pid_without_a_time_stamp_after_the_time_advanced_is_taken() {
+    let random_access = TransportPacketFields::new().with_random_access_indicator(true);
+    let (results, pcrs) = finished(&[
+        (VIDEO_PID, 0xe0, Some(90_000), TransportPacketFields::new()),
+        (AUDIO_PID, 0xc0, Some(90_900), TransportPacketFields::new()),
+        (VIDEO_PID, 0xe0, None, random_access),
+    ]);
+    assert_eq!(
+        (results, pcrs),
+        (
+            vec![Ok(()), Ok(()), Ok(())],
+            vec![video_pcr(90_000), video_pcr(90_900)]
+        )
     );
 }

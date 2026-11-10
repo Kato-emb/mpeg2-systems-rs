@@ -3,6 +3,7 @@
 
 use super::Error;
 use crate::time::ClockReference;
+use crate::ts::Pid;
 use crate::ts::adaptation_field::AdaptationField;
 
 /// Bytes the adaptation field of a Transport Packet with a payload takes at
@@ -97,10 +98,12 @@ impl<'a> TransportPacketFields<'a> {
     }
 
     /// Returns whether the PCR goes in the adaptation field of the first
-    /// Transport Packet, on the PCR PID when `on_pcr_pid`, a PCR being due at
-    /// the packet when `pcr_due`
+    /// Transport Packet of a PES packet on `pid`, the PCR PID when
+    /// `on_pcr_pid`, a PCR being due at the packet when `pcr_due`
     ///
-    /// `random_access_indicator` on the PCR PID takes a PCR beside it
+    /// `program_clock_reference` is the value a PCR in the packet carries, and
+    /// `after_last_pcr` whether its time is after that of the PCR sent before
+    /// it. `random_access_indicator` on the PCR PID takes a PCR beside it
     /// (§2.4.3.5). A PCR due goes beside `transport_private_data` where it
     /// fits, and in a Transport Packet of its own otherwise.
     ///
@@ -109,16 +112,29 @@ impl<'a> TransportPacketFields<'a> {
     /// * [`TransportPrivateDataLength`](Error::TransportPrivateDataLength):
     ///   `transport_private_data` is longer than the adaptation field holds,
     ///   beside the PCR that random access on the PCR PID takes.
+    /// * [`RandomAccessIndicator`](Error::RandomAccessIndicator): random
+    ///   access on the PCR PID takes a PCR, and no PCR is due, at a time not
+    ///   after the PCR sent before.
     pub(super) fn pcr_in_first_packet(
         &self,
-        on_pcr_pid: bool,
-        pcr_due: bool,
+        pid: Pid,
+        (on_pcr_pid, pcr_due): (bool, bool),
+        (program_clock_reference, after_last_pcr): (ClockReference, bool),
     ) -> Result<bool, Error> {
         let length = self.transport_private_data.map_or(0, <[u8]>::len);
         let random_access_pcr = on_pcr_pid && self.random_access_indicator;
         let limit = transport_private_data_limit(random_access_pcr);
         if length > limit {
             return Err(Error::TransportPrivateDataLength { length, limit });
+        }
+        // Why not put the PCR random access takes at the time of the PCR
+        // before: two PCRs of one value leave the rate between them undefined
+        // (§2.4.2.3 equation 2-5), and the time stamps give no later value.
+        if random_access_pcr && !pcr_due && !after_last_pcr {
+            return Err(Error::RandomAccessIndicator {
+                pid,
+                program_clock_reference,
+            });
         }
         Ok(random_access_pcr
             || (on_pcr_pid && pcr_due && length <= transport_private_data_limit(true)))

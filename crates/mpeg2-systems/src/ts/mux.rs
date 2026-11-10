@@ -518,6 +518,15 @@ impl Muxer {
     ///   field of a Transport Packet with a payload holds, or, with
     ///   `random_access_indicator` set on the PCR PID, than the 174 it holds
     ///   beside the PCR (§2.4.3.5).
+    /// * [`RandomAccessIndicator`](Error::RandomAccessIndicator):
+    ///   `random_access_indicator` is set on the PCR PID, where it takes a PCR
+    ///   in the packet (§2.4.3.5), at no time after the PCR sent before. A PCR
+    ///   of the same value would leave the transport rate between the two
+    ///   undefined (§2.4.2.3 equation 2-5). The muxer takes the value of a PCR
+    ///   from the time stamps (the time of the PES packet's DTS, its PTS
+    ///   without one, or the latest given before when it has neither), so it
+    ///   has no later value to give. To avoid it, give the PES packet of the
+    ///   PCR PID first among those of one time.
     ///
     /// # Panics
     ///
@@ -625,9 +634,14 @@ impl Muxer {
         let pcr_pid = program.pcr_pid().unwrap_or(pid);
         let on_pcr_pid = pcr_pid == pid;
         let pcr_due = on_pcr_pid && pcr_times.last() == Some(clock);
-        let pcr_in_packet = fields.pcr_in_first_packet(on_pcr_pid, pcr_due)?;
-        let adaptation_field = fields
-            .adaptation_field(pcr_in_packet.then(|| clock.to_clock_reference(config.mux_delay)));
+        let pcr_at_clock = clock.to_clock_reference(config.mux_delay);
+        let after_last_pcr = schedule.is_none_or(|schedule| clock > schedule.pcr_sent_at);
+        let pcr_in_packet = fields.pcr_in_first_packet(
+            pid,
+            (on_pcr_pid, pcr_due),
+            (pcr_at_clock, after_last_pcr),
+        )?;
+        let adaptation_field = fields.adaptation_field(pcr_in_packet.then_some(pcr_at_clock));
         let pcrs_alone = pcr_times
             .count
             .saturating_sub(u64::from(pcr_due && pcr_in_packet));
