@@ -158,6 +158,16 @@ impl<'input> SynchronizedPesData<'input> {
         }
     }
 
+    /// Returns the value with the given `pes_data_private_data_byte`
+    #[must_use]
+    pub const fn with_pes_data_private_data_byte(
+        mut self,
+        pes_data_private_data_byte: &'input [u8],
+    ) -> Self {
+        self.pes_data_private_data_byte = pes_data_private_data_byte;
+        self
+    }
+
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
@@ -260,6 +270,16 @@ impl<'input> AsynchronousPesData<'input> {
             pes_data_private_data_byte: &[],
             asynchronous_pes_data_byte,
         }
+    }
+
+    /// Returns the value with the given `pes_data_private_data_byte`
+    #[must_use]
+    pub const fn with_pes_data_private_data_byte(
+        mut self,
+        pes_data_private_data_byte: &'input [u8],
+    ) -> Self {
+        self.pes_data_private_data_byte = pes_data_private_data_byte;
+        self
     }
 
     /// Returns the number of bytes [`write`](Self::write) appends

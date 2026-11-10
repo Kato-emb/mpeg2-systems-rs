@@ -109,6 +109,13 @@ impl<'input> CaptionManagementData<'input> {
         }
     }
 
+    /// Returns the value with `otm` present, set to the one given
+    #[must_use]
+    pub const fn with_otm(mut self, otm: BcdTime) -> Self {
+        self.otm = Some(otm);
+        self
+    }
+
     /// Appends the caption management data to `out`, as the
     /// `data_group_data_byte` of a data group
     ///
@@ -248,6 +255,25 @@ mod tests {
             Tcs::EIGHT_BIT_CODE,
             RollupMode::NON_ROLL_UP,
         )
+    }
+
+    #[test]
+    fn management_data_built_from_new_and_every_with_method_equals_one_with_every_field_assigned() {
+        let mut assigned = CaptionManagementData::new(
+            Tmd::OFFSET_TIME,
+            LanguageLoop::from(&SPIKE[2..7]),
+            DataUnitLoop::from(&[][..]),
+        );
+        assigned.otm = Some(BcdTime::new(1, 23, 45, 678).unwrap());
+
+        let built = CaptionManagementData::new(
+            Tmd::OFFSET_TIME,
+            LanguageLoop::from(&SPIKE[2..7]),
+            DataUnitLoop::from(&[][..]),
+        )
+        .with_otm(BcdTime::new(1, 23, 45, 678).unwrap());
+
+        assert_eq!(built, assigned);
     }
 
     #[test]

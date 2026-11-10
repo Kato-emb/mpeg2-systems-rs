@@ -68,6 +68,16 @@ impl<'input> DataComponentDescriptor<'input> {
         }
     }
 
+    /// Returns the value with the given `additional_data_component_info`
+    #[must_use]
+    pub const fn with_additional_data_component_info(
+        mut self,
+        additional_data_component_info: &'input [u8],
+    ) -> Self {
+        self.additional_data_component_info = additional_data_component_info;
+        self
+    }
+
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     pub const fn encoded_len(&self) -> usize {

@@ -76,6 +76,30 @@ impl<'input> DataGroup<'input> {
         }
     }
 
+    /// Returns the value with the given `data_group_version`
+    #[must_use]
+    pub const fn with_data_group_version(mut self, data_group_version: DataGroupVersion) -> Self {
+        self.data_group_version = data_group_version;
+        self
+    }
+
+    /// Returns the value with the given `data_group_link_number`
+    #[must_use]
+    pub const fn with_data_group_link_number(mut self, data_group_link_number: u8) -> Self {
+        self.data_group_link_number = data_group_link_number;
+        self
+    }
+
+    /// Returns the value with the given `last_data_group_link_number`
+    #[must_use]
+    pub const fn with_last_data_group_link_number(
+        mut self,
+        last_data_group_link_number: u8,
+    ) -> Self {
+        self.last_data_group_link_number = last_data_group_link_number;
+        self
+    }
+
     /// Reads a data group from `bytes`, which hold it whole and nothing more
     ///
     /// # Errors
@@ -260,7 +284,7 @@ mod tests {
 
     use mpeg2_systems::field;
 
-    use super::{DataGroup, DataGroupId};
+    use super::{DataGroup, DataGroupId, DataGroupVersion};
     use crate::caption::Error;
 
     /// The data group of caption management data (DGI 0, one language
@@ -283,6 +307,21 @@ mod tests {
             DataGroupId::try_from(id).unwrap(),
             bytes.get(5..bytes.len().saturating_sub(2)).unwrap(),
         )
+    }
+
+    #[test]
+    fn a_data_group_built_from_new_and_every_with_method_equals_one_with_every_field_assigned() {
+        let mut assigned = DataGroup::new(DataGroupId::try_from(1).unwrap(), &[0xaa]);
+        assigned.data_group_version = DataGroupVersion::try_from(2).unwrap();
+        assigned.data_group_link_number = 1;
+        assigned.last_data_group_link_number = 3;
+
+        let built = DataGroup::new(DataGroupId::try_from(1).unwrap(), &[0xaa])
+            .with_data_group_version(DataGroupVersion::try_from(2).unwrap())
+            .with_data_group_link_number(1)
+            .with_last_data_group_link_number(3);
+
+        assert_eq!(built, assigned);
     }
 
     #[test]

@@ -62,6 +62,13 @@ impl Language {
         }
     }
 
+    /// Returns the value with `dc` present, set to the one given
+    #[must_use]
+    pub const fn with_dc(mut self, dc: Dc) -> Self {
+        self.dc = Some(dc);
+        self
+    }
+
     /// Appends the entry to `out`, refusing reserved values and a `DC` that
     /// does not match the `DMF`
     #[cfg(feature = "alloc")]

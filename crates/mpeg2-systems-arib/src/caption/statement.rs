@@ -76,6 +76,13 @@ impl<'input> CaptionData<'input> {
         }
     }
 
+    /// Returns the value with `stm` present, set to the one given
+    #[must_use]
+    pub const fn with_stm(mut self, stm: BcdTime) -> Self {
+        self.stm = Some(stm);
+        self
+    }
+
     /// Appends the caption statement data to `out`, as the
     /// `data_group_data_byte` of a data group
     ///
