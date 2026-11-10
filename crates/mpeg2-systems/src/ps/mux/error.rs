@@ -81,8 +81,9 @@ pub enum Error {
         /// The `stream_id_extension` of the PES packet, if it has one
         stream_id_extension: Option<u8>,
     },
-    /// A `stream_id_extension` is given where the `stream_id` is not 0xFD,
-    /// or none where it is
+    /// A `stream_id_extension`, or the `elementary_stream_id_extension` of a
+    /// stream registered, is present where the `stream_id` is not 0xFD, or
+    /// absent where it is
     StreamIdExtension {
         /// The `stream_id` given
         stream_id: StreamId,

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use mpeg2_systems::pes::extension::PStdBuffer;
 use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
 use mpeg2_systems::ps;
+use mpeg2_systems::psi::pmt;
 use mpeg2_systems::stream_type::StreamType;
 use mpeg2_systems::time::{ClockReference, Timestamp};
 use mpeg2_systems::ts::Pid;
@@ -122,10 +123,13 @@ pub fn registered_muxer() -> Muxer {
     let mut muxer = Muxer::new(MuxerConfig::new()).expect("the default settings are taken");
     let pid = |value| Pid::try_from(value).expect("a PID");
     muxer
-        .add_program(1, pid(0x1000), None, &[])
+        .add_program(1, pid(0x1000))
         .expect("the muxer registers the program");
     muxer
-        .add_stream(1, pid(0x0100), StreamType::AVC_VIDEO, &[])
+        .add_stream(
+            1,
+            pmt::ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x0100)),
+        )
         .expect("the muxer registers the stream");
     muxer
 }
@@ -173,11 +177,8 @@ pub fn registered_program_stream_muxer() -> ps::mux::Muxer {
         .expect("the default settings are taken");
     muxer
         .add_stream(
-            StreamId::from(0xE0),
-            None,
-            StreamType::AVC_VIDEO,
+            ps::psm::ElementaryStream::new(StreamType::AVC_VIDEO, StreamId::from(0xE0)),
             PStdBuffer::new(true, 224),
-            &[],
         )
         .expect("the muxer registers the stream");
     muxer

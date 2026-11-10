@@ -76,15 +76,16 @@
 
 use alloc::vec::Vec;
 use core::fmt;
+use core::mem;
 use core::num::NonZeroU16;
 use core::time::Duration;
 
+use crate::descriptor::DescriptorLoop;
 use crate::pes::{self, PesPacket, StreamId};
 use crate::psi::cat;
 use crate::psi::pat;
 use crate::psi::pmt;
 use crate::psi::section;
-use crate::stream_type::StreamType;
 use crate::time::{ClockReference, SystemTimeClock, Timestamp};
 use crate::ts::Pid;
 use crate::ts::adaptation_field::AdaptationField;
@@ -430,7 +431,7 @@ impl MuxerConfig {
 ///   first Transport Packet, and any other in a Transport Packet of its own
 ///   on the PCR PID, before the PES packet. A leap of the time stamps is
 ///   filled with PCRs, and with PATs and PMTs, at their intervals.
-/// - The PCR PID is the `pcr_pid` registered with the program. Without one,
+/// - The PCR PID is the one [`Muxer::set_pcr_pid`] sets. Without one,
 ///   it is the PID of the first video stream registered, or of the first
 ///   stream when none is video. The muxer takes for video the streams of
 ///   `stream_type` 0x01, 0x02, 0x10, 0x1B, 0x21, 0x24, 0x32, 0x33 and 0x35,
@@ -449,6 +450,7 @@ impl MuxerConfig {
 ///
 /// ```
 /// use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
+/// use mpeg2_systems::psi::pmt::ElementaryStream;
 /// use mpeg2_systems::stream_type::StreamType;
 /// use mpeg2_systems::time::Timestamp;
 /// use mpeg2_systems::ts::Pid;
@@ -460,8 +462,8 @@ impl MuxerConfig {
 /// let mut stream = Vec::new();
 ///
 /// // Register the program and its stream
-/// muxer.add_program(1, pmt_pid, None, &[])?;
-/// muxer.add_stream(1, video_pid, StreamType::ISO_IEC_13818_2_VIDEO, &[])?;
+/// muxer.add_program(1, pmt_pid)?;
+/// muxer.add_stream(1, ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, video_pid))?;
 /// // Give an access unit a second in, and take the Transport Packets
 /// let access_unit = vec![0xaa; 1_000];
 /// let packet = PesPacket::new(StreamId::from(0xe0), &access_unit)
@@ -610,20 +612,17 @@ impl Muxer {
 
     /// Registers the program, its PMT on `program_map_pid`
     ///
-    /// `program_info` is the descriptors of the program as written, which
-    /// the muxer copies. The PCR goes on `pcr_pid`, or, when it is `None`,
-    /// on the PID [`Muxer`] says.
+    /// The program has no `program_info` and no `pcr_pid` until
+    /// [`set_program_info`](Self::set_program_info) and
+    /// [`set_pcr_pid`](Self::set_pcr_pid) set them.
     ///
     /// # Errors
     ///
     /// * [`ProgramNumber`](Error::ProgramNumber): `program_number` is 0.
-    /// * [`Pid`](Error::Pid): `program_map_pid` or `pcr_pid` is outside
-    ///   0x0010 to 0x1FFE, the PIDs Table 2-3 leaves free to assign.
+    /// * [`Pid`](Error::Pid): `program_map_pid` is outside 0x0010 to 0x1FFE,
+    ///   the PIDs Table 2-3 leaves free to assign.
     /// * [`TsProgramMapSection`](Error::TsProgramMapSection):
-    ///   [`TsProgramMapSection::write`](pmt::TsProgramMapSection::write) refuses the PMT of the program, as it
-    ///   does `program_info` that is not whole descriptors, or a PMT past the
-    ///   1021 bytes of `section_length`, which is refused before
-    ///   `program_info` is copied.
+    ///   [`TsProgramMapSection::write`](pmt::TsProgramMapSection::write) refuses the PMT of the program.
     ///
     /// # Panics
     ///
@@ -632,28 +631,21 @@ impl Muxer {
         clippy::panic_in_result_fn,
         reason = "a call out of order is the caller's mistake, which panics as documented"
     )]
-    pub fn add_program(
-        &mut self,
-        program_number: u16,
-        program_map_pid: Pid,
-        pcr_pid: Option<Pid>,
-        program_info: &[u8],
-    ) -> Result<(), Error> {
+    pub fn add_program(&mut self, program_number: u16, program_map_pid: Pid) -> Result<(), Error> {
         assert!(self.program.is_none(), "a program is registered already");
         let Some(program_number) = NonZeroU16::new(program_number) else {
             return Err(Error::ProgramNumber { program_number });
         };
-        for pid in core::iter::once(program_map_pid).chain(pcr_pid) {
-            if !pid.is_assignable() {
-                return Err(Error::Pid { pid });
-            }
+        if !program_map_pid.is_assignable() {
+            return Err(Error::Pid {
+                pid: program_map_pid,
+            });
         }
-        program_definition::check_pmt_length(program_info, core::iter::empty())?;
         let program = ProgramDefinition {
             program_number,
             program_map_pid,
-            pcr_pid,
-            program_info: program_info.to_vec(),
+            pcr_pid: None,
+            program_info: Vec::new(),
             streams: Vec::new(),
         };
         program.check(self.config.transport_stream_id)?;
@@ -661,19 +653,96 @@ impl Muxer {
         Ok(())
     }
 
-    /// Registers a stream of the program `program_number`, its PES packets
-    /// on `pid`
+    /// Sets the PID the PCR of the program `program_number` goes on, in
+    /// place of the one [`Muxer`] says
     ///
-    /// `es_info` is the descriptors of the stream as written, which the
-    /// muxer copies.
+    /// A later call replaces the PID set before.
     ///
     /// # Errors
     ///
     /// * [`UnregisteredProgram`](Error::UnregisteredProgram): no program of
     ///   `program_number` is registered.
-    /// * [`Pid`](Error::Pid): `pid` is outside 0x0010 to 0x1FFE.
-    /// * [`PidInUse`](Error::PidInUse): `pid` is that of a stream registered
-    ///   already, or of the PMT.
+    /// * [`Pid`](Error::Pid): `pcr_pid` is outside 0x0010 to 0x1FFE.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a PES packet has been given already, which sent the PMT at
+    /// its one `version_number` (§2.4.4.10).
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "a call out of order is the caller's mistake, which panics as documented"
+    )]
+    pub fn set_pcr_pid(&mut self, program_number: u16, pcr_pid: Pid) -> Result<(), Error> {
+        assert!(
+            self.schedule.is_none(),
+            "the PCR PID is set after the first PES packet"
+        );
+        let program = self.program_mut(program_number)?;
+        if !pcr_pid.is_assignable() {
+            return Err(Error::Pid { pid: pcr_pid });
+        }
+        program.pcr_pid = Some(pcr_pid);
+        Ok(())
+    }
+
+    /// Sets `program_info`, the descriptors of the program `program_number`,
+    /// which the muxer copies
+    ///
+    /// A later call replaces the descriptors set before. A call refused
+    /// leaves the muxer as it was.
+    ///
+    /// # Errors
+    ///
+    /// * [`UnregisteredProgram`](Error::UnregisteredProgram): no program of
+    ///   `program_number` is registered.
+    /// * [`TsProgramMapSection`](Error::TsProgramMapSection):
+    ///   [`TsProgramMapSection::write`](pmt::TsProgramMapSection::write) refuses the PMT with
+    ///   `program_info` and the streams registered, as it does `program_info`
+    ///   that is not whole descriptors, or a PMT past the 1021 bytes of
+    ///   `section_length`, which is refused before `program_info` is copied.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a PES packet has been given already, which sent the PMT at
+    /// its one `version_number` (§2.4.4.10).
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "a call out of order is the caller's mistake, which panics as documented"
+    )]
+    pub fn set_program_info(
+        &mut self,
+        program_number: u16,
+        program_info: DescriptorLoop<'_>,
+    ) -> Result<(), Error> {
+        assert!(
+            self.schedule.is_none(),
+            "the program info is set after the first PES packet"
+        );
+        let transport_stream_id = self.config.transport_stream_id;
+        let program = self.program_mut(program_number)?;
+        program_definition::check_pmt_length(
+            program_info.as_bytes(),
+            program.elementary_streams(),
+        )?;
+        let previous = mem::replace(&mut program.program_info, program_info.as_bytes().to_vec());
+        program.check(transport_stream_id).inspect_err(|_| {
+            program.program_info = previous;
+        })
+    }
+
+    /// Registers `stream`, a stream of the program `program_number`, its PES
+    /// packets on its `elementary_pid`
+    ///
+    /// The muxer copies the `es_info` of `stream`, the descriptors of the
+    /// stream as written.
+    ///
+    /// # Errors
+    ///
+    /// * [`UnregisteredProgram`](Error::UnregisteredProgram): no program of
+    ///   `program_number` is registered.
+    /// * [`Pid`](Error::Pid): `elementary_pid` is outside 0x0010 to 0x1FFE.
+    /// * [`PidInUse`](Error::PidInUse): `elementary_pid` is that of a stream
+    ///   registered already, or of the PMT.
     /// * [`TsProgramMapSection`](Error::TsProgramMapSection):
     ///   [`TsProgramMapSection::write`](pmt::TsProgramMapSection::write) refuses the PMT with the stream, as
     ///   it does `es_info` that is not whole descriptors or is longer than
@@ -691,43 +760,43 @@ impl Muxer {
     pub fn add_stream(
         &mut self,
         program_number: u16,
-        pid: Pid,
-        stream_type: StreamType,
-        es_info: &[u8],
+        stream: pmt::ElementaryStream<'_>,
     ) -> Result<(), Error> {
         assert!(
             self.schedule.is_none(),
             "a stream is registered after the first PES packet"
         );
         let transport_stream_id = self.config.transport_stream_id;
-        let Some(program) = self
-            .program
-            .as_mut()
-            .filter(|program| program.program_number.get() == program_number)
-        else {
-            return Err(Error::UnregisteredProgram { program_number });
-        };
+        let program = self.program_mut(program_number)?;
+        let pid = stream.elementary_pid;
         if !pid.is_assignable() {
             return Err(Error::Pid { pid });
         }
         if pid == program.program_map_pid || program.stream(pid).is_some() {
             return Err(Error::PidInUse { pid });
         }
-        let mut entry = pmt::ElementaryStream::new(stream_type, pid);
-        entry.es_info = es_info.into();
         program_definition::check_pmt_length(
             &program.program_info,
-            program.elementary_streams().chain(core::iter::once(entry)),
+            program.elementary_streams().chain(core::iter::once(stream)),
         )?;
         program.streams.push(Stream {
             pid,
-            stream_type,
-            es_info: es_info.to_vec(),
+            stream_type: stream.stream_type,
+            es_info: stream.es_info.as_bytes().to_vec(),
             last_timestamp: None,
         });
         program.check(transport_stream_id).inspect_err(|_| {
             program.streams.pop();
         })
+    }
+
+    /// Returns the program of `program_number`, or
+    /// [`UnregisteredProgram`](Error::UnregisteredProgram)
+    fn program_mut(&mut self, program_number: u16) -> Result<&mut ProgramDefinition, Error> {
+        self.program
+            .as_mut()
+            .filter(|program| program.program_number.get() == program_number)
+            .ok_or(Error::UnregisteredProgram { program_number })
     }
 
     /// Takes `packet`, a PES packet of the stream on `pid`, with the PAT, the

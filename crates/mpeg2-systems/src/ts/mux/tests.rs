@@ -2,10 +2,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::*;
+use crate::descriptor::DescriptorLoop;
 use crate::pes::OptionalHeader;
 use crate::psi::VersionNumber;
 use crate::psi::pat::{Program as PatProgram, ProgramAssociationSection, ProgramLoop};
 use crate::psi::pmt::{ElementaryStream, ElementaryStreamLoop, TsProgramMapSection};
+use crate::stream_type::StreamType;
 use crate::time::Timestamp;
 use crate::ts::packet::TransportPacket;
 
@@ -33,12 +35,18 @@ fn pes_packet(stream_id: u8, payload: &[u8], dts: Option<u64>) -> PesPacket<'_> 
 /// A muxer of `config` with program 1 and a video and an audio stream
 fn muxer_of(config: MuxerConfig) -> Muxer {
     let mut muxer = Muxer::new(config).unwrap();
-    muxer.add_program(1, pid(PMT_PID), None, &[]).unwrap();
+    muxer.add_program(1, pid(PMT_PID)).unwrap();
     muxer
-        .add_stream(1, pid(VIDEO_PID), StreamType::ISO_IEC_13818_2_VIDEO, &[])
+        .add_stream(
+            1,
+            ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, pid(VIDEO_PID)),
+        )
         .unwrap();
     muxer
-        .add_stream(1, pid(AUDIO_PID), StreamType::ISO_IEC_13818_3_AUDIO, &[])
+        .add_stream(
+            1,
+            ElementaryStream::new(StreamType::ISO_IEC_13818_3_AUDIO, pid(AUDIO_PID)),
+        )
         .unwrap();
     muxer
 }
@@ -198,11 +206,13 @@ fn the_pat_and_the_pmt_and_the_pcr_are_sent_again_once_their_interval_has_passed
 #[test]
 fn without_a_stream_on_the_pcr_pid_the_pcr_goes_alone() {
     let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
+    muxer.add_program(1, pid(PMT_PID)).unwrap();
+    muxer.set_pcr_pid(1, pid(0x01ff)).unwrap();
     muxer
-        .add_program(1, pid(PMT_PID), Some(pid(0x01ff)), &[])
-        .unwrap();
-    muxer
-        .add_stream(1, pid(VIDEO_PID), StreamType::AVC_VIDEO, &[])
+        .add_stream(
+            1,
+            ElementaryStream::new(StreamType::AVC_VIDEO, pid(VIDEO_PID)),
+        )
         .unwrap();
     muxer
         .handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &[1, 2, 3], Some(90_000)))
@@ -225,10 +235,10 @@ fn without_a_pcr_pid_the_pcr_goes_on_the_first_stream_of_a_video_stream_type_or_
  {
     let first_pcr_pid = |stream_types: &[StreamType]| {
         let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
-        muxer.add_program(1, pid(PMT_PID), None, &[]).unwrap();
+        muxer.add_program(1, pid(PMT_PID)).unwrap();
         for (pid_value, stream_type) in (0x0100..).zip(stream_types) {
             muxer
-                .add_stream(1, pid(pid_value), *stream_type, &[])
+                .add_stream(1, ElementaryStream::new(*stream_type, pid(pid_value)))
                 .unwrap();
         }
         muxer
@@ -365,55 +375,175 @@ fn a_refused_pes_packet_leaves_the_muxer_as_it_was() {
 }
 
 #[test]
-fn a_program_is_refused_for_program_number_0_a_pid_not_free_to_assign_or_its_descriptors() {
-    let broken = [0x05, 0x04, 0x00];
-    let mut pmt = TsProgramMapSection::new(1, VersionNumber(0));
-    pmt.program_info = broken.as_slice().into();
-    let broken_error = pmt.write(&mut Vec::new()).unwrap_err();
+fn a_program_is_refused_for_program_number_0_or_a_pid_not_free_to_assign() {
     let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
     let results = [
-        muxer.add_program(0, pid(PMT_PID), None, &[]),
-        muxer.add_program(1, pid(0x000f), None, &[]),
-        muxer.add_program(1, pid(PMT_PID), Some(Pid::NULL), &[]),
-        muxer.add_program(1, pid(PMT_PID), None, &broken),
-        muxer.add_program(1, pid(PMT_PID), None, &[]),
+        muxer.add_program(0, pid(PMT_PID)),
+        muxer.add_program(1, pid(0x000f)),
+        muxer.add_program(1, pid(PMT_PID)),
     ];
     assert_eq!(
         results,
         [
             Err(Error::ProgramNumber { program_number: 0 }),
             Err(Error::Pid { pid: pid(0x000f) }),
-            Err(Error::Pid { pid: Pid::NULL }),
-            Err(Error::TsProgramMapSection {
-                error: broken_error
-            }),
             Ok(()),
         ]
     );
 }
 
 #[test]
+fn the_pcr_pid_is_refused_for_a_program_not_registered_or_a_pid_not_free_to_assign() {
+    let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
+    let before_program = muxer.set_pcr_pid(1, pid(VIDEO_PID));
+    muxer.add_program(1, pid(PMT_PID)).unwrap();
+    assert_eq!(
+        [
+            before_program,
+            muxer.set_pcr_pid(2, pid(VIDEO_PID)),
+            muxer.set_pcr_pid(1, Pid::NULL),
+        ],
+        [
+            Err(Error::UnregisteredProgram { program_number: 1 }),
+            Err(Error::UnregisteredProgram { program_number: 2 }),
+            Err(Error::Pid { pid: Pid::NULL }),
+        ]
+    );
+}
+
+#[test]
+fn the_pcr_pid_set_last_is_the_one_the_pcr_goes_on() {
+    let output = |pcr_pids: &[u16]| {
+        let mut muxer = muxer_of(MuxerConfig::new());
+        for &pcr_pid in pcr_pids {
+            muxer.set_pcr_pid(1, pid(pcr_pid)).unwrap();
+        }
+        muxer
+            .handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &[1, 2, 3], Some(90_000)))
+            .unwrap();
+        let mut out = Vec::new();
+        muxer.poll_output(&mut out);
+        out
+    };
+    assert_eq!(output(&[0x01fe, AUDIO_PID]), output(&[AUDIO_PID]));
+}
+
+#[test]
+fn program_info_is_written_in_the_pmt() {
+    let descriptors = [0x05, 0x04, 0x48, 0x44, 0x4d, 0x56];
+    let mut muxer = muxer_of(MuxerConfig::new());
+    muxer
+        .set_program_info(1, DescriptorLoop::from(&[0x05, 0x00][..]))
+        .unwrap();
+    muxer
+        .set_program_info(1, DescriptorLoop::from(descriptors.as_slice()))
+        .unwrap();
+    muxer
+        .handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &[1, 2, 3], Some(90_000)))
+        .unwrap();
+    let mut out = Vec::new();
+    muxer.poll_output(&mut out);
+    let pmt_packet = TransportPacket::read(out.get(188..376).unwrap()).unwrap();
+    let section_bytes = pmt_packet.payload.unwrap().get(1..).unwrap();
+    let section_length = section::encoded_len(section_bytes).unwrap();
+    let section = section::Section::read(section_bytes.get(..section_length).unwrap()).unwrap();
+    assert_eq!(
+        TsProgramMapSection::try_from(&section)
+            .unwrap()
+            .program_info,
+        DescriptorLoop::from(descriptors.as_slice())
+    );
+}
+
+#[test]
+fn program_info_refused_leaves_the_muxer_as_it_was() {
+    let broken = [0x05, 0x04, 0x00];
+    let mut pmt = TsProgramMapSection::new(1, VersionNumber(0));
+    pmt.program_info = broken.as_slice().into();
+    let broken_error = pmt.write(&mut Vec::new()).unwrap_err();
+    let past_the_limit = descriptors(1_009);
+    let output = |refused: &[&[u8]]| {
+        let mut muxer = muxer_of(MuxerConfig::new());
+        let errors: Vec<_> = refused
+            .iter()
+            .map(|program_info| muxer.set_program_info(1, DescriptorLoop::from(*program_info)))
+            .collect();
+        muxer
+            .handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &[1, 2, 3], Some(90_000)))
+            .unwrap();
+        let mut out = Vec::new();
+        muxer.poll_output(&mut out);
+        (errors, out)
+    };
+    let (errors, out) = output(&[&broken, &past_the_limit]);
+    assert_eq!(
+        (
+            errors,
+            Muxer::new(MuxerConfig::new())
+                .unwrap()
+                .set_program_info(1, DescriptorLoop::from(&[][..])),
+            out
+        ),
+        (
+            vec![
+                Err(Error::TsProgramMapSection {
+                    error: broken_error
+                }),
+                Err(Error::TsProgramMapSection {
+                    error: pmt::Error::Section(section::Error::SectionLength {
+                        section_length: 1_032,
+                        limit: 1_021
+                    })
+                }),
+            ],
+            Err(Error::UnregisteredProgram { program_number: 1 }),
+            output(&[]).1
+        )
+    );
+}
+
+#[test]
 fn a_stream_is_refused_off_the_program_on_a_pid_in_use_or_for_its_descriptors() {
     let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
-    let before_the_program = muxer.add_stream(1, pid(VIDEO_PID), StreamType::AVC_VIDEO, &[]);
-    muxer.add_program(1, pid(PMT_PID), None, &[]).unwrap();
+    let before_the_program = muxer.add_stream(
+        1,
+        ElementaryStream::new(StreamType::AVC_VIDEO, pid(VIDEO_PID)),
+    );
+    muxer.add_program(1, pid(PMT_PID)).unwrap();
     muxer
-        .add_stream(1, pid(VIDEO_PID), StreamType::AVC_VIDEO, &[])
+        .add_stream(
+            1,
+            ElementaryStream::new(StreamType::AVC_VIDEO, pid(VIDEO_PID)),
+        )
         .unwrap();
     let too_long = vec![0u8; 1_024];
     let results = [
         before_the_program,
-        muxer.add_stream(2, pid(AUDIO_PID), StreamType::ISO_IEC_13818_7_AUDIO, &[]),
-        muxer.add_stream(1, Pid::NULL, StreamType::ISO_IEC_13818_7_AUDIO, &[]),
-        muxer.add_stream(1, pid(VIDEO_PID), StreamType::ISO_IEC_13818_7_AUDIO, &[]),
-        muxer.add_stream(1, pid(PMT_PID), StreamType::ISO_IEC_13818_7_AUDIO, &[]),
+        muxer.add_stream(
+            2,
+            ElementaryStream::new(StreamType::ISO_IEC_13818_7_AUDIO, pid(AUDIO_PID)),
+        ),
         muxer.add_stream(
             1,
-            pid(AUDIO_PID),
-            StreamType::ISO_IEC_13818_7_AUDIO,
-            &too_long,
+            ElementaryStream::new(StreamType::ISO_IEC_13818_7_AUDIO, Pid::NULL),
         ),
-        muxer.add_stream(1, pid(AUDIO_PID), StreamType::ISO_IEC_13818_7_AUDIO, &[]),
+        muxer.add_stream(
+            1,
+            ElementaryStream::new(StreamType::ISO_IEC_13818_7_AUDIO, pid(VIDEO_PID)),
+        ),
+        muxer.add_stream(
+            1,
+            ElementaryStream::new(StreamType::ISO_IEC_13818_7_AUDIO, pid(PMT_PID)),
+        ),
+        muxer.add_stream(
+            1,
+            ElementaryStream::new(StreamType::ISO_IEC_13818_7_AUDIO, pid(AUDIO_PID))
+                .with_es_info(DescriptorLoop::from(too_long.as_slice())),
+        ),
+        muxer.add_stream(
+            1,
+            ElementaryStream::new(StreamType::ISO_IEC_13818_7_AUDIO, pid(AUDIO_PID)),
+        ),
     ];
     assert_eq!(
         results,
@@ -437,7 +567,7 @@ fn a_stream_is_refused_off_the_program_on_a_pid_in_use_or_for_its_descriptors() 
 #[should_panic(expected = "a program is registered already")]
 fn a_second_program_panics() {
     let mut muxer = muxer_of(MuxerConfig::new());
-    let _ = muxer.add_program(2, pid(0x1001), None, &[]);
+    let _ = muxer.add_program(2, pid(0x1001));
 }
 
 #[test]
@@ -447,7 +577,27 @@ fn a_stream_after_the_first_pes_packet_panics() {
     muxer
         .handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &[], Some(90_000)))
         .unwrap();
-    let _ = muxer.add_stream(1, pid(0x0102), StreamType::AVC_VIDEO, &[]);
+    let _ = muxer.add_stream(1, ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x0102)));
+}
+
+#[test]
+#[should_panic(expected = "the PCR PID is set after the first PES packet")]
+fn the_pcr_pid_after_the_first_pes_packet_panics() {
+    let mut muxer = muxer_of(MuxerConfig::new());
+    muxer
+        .handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &[], Some(90_000)))
+        .unwrap();
+    let _ = muxer.set_pcr_pid(1, pid(AUDIO_PID));
+}
+
+#[test]
+#[should_panic(expected = "the program info is set after the first PES packet")]
+fn program_info_after_the_first_pes_packet_panics() {
+    let mut muxer = muxer_of(MuxerConfig::new());
+    muxer
+        .handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &[], Some(90_000)))
+        .unwrap();
+    let _ = muxer.set_program_info(1, DescriptorLoop::from(&[][..]));
 }
 
 #[test]
@@ -935,14 +1085,15 @@ fn descriptors(length: usize) -> Vec<u8> {
 }
 
 #[test]
-fn a_program_is_taken_whose_descriptors_fill_the_pmt_and_refused_one_byte_past_it() {
+fn program_info_is_taken_that_fills_the_pmt_and_refused_one_byte_past_it() {
     // A PMT without streams: 13 bytes of `section_length` besides its
     // descriptors leave 1008 of the 1021
     let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
+    muxer.add_program(1, pid(PMT_PID)).unwrap();
     assert_eq!(
         [
-            muxer.add_program(1, pid(PMT_PID), None, &descriptors(1_009)),
-            muxer.add_program(1, pid(PMT_PID), None, &descriptors(1_008)),
+            muxer.set_program_info(1, DescriptorLoop::from(descriptors(1_009).as_slice())),
+            muxer.set_program_info(1, DescriptorLoop::from(descriptors(1_008).as_slice())),
         ],
         [
             Err(Error::TsProgramMapSection {
@@ -961,7 +1112,13 @@ fn a_stream_is_taken_whose_descriptors_fill_the_pmt_and_refused_one_byte_past_it
     // A PMT of video and audio: 13 bytes besides its loops, two entries of
     // 5, and 5 for the stream added, leave 993 bytes of descriptors
     let mut muxer = muxer_of(MuxerConfig::new());
-    let mut add = |es_info: &[u8]| muxer.add_stream(1, pid(0x0102), StreamType::AVC_VIDEO, es_info);
+    let mut add = |es_info: &[u8]| {
+        muxer.add_stream(
+            1,
+            ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x0102))
+                .with_es_info(DescriptorLoop::from(es_info)),
+        )
+    };
     assert_eq!(
         [add(&descriptors(994)), add(&descriptors(993))],
         [
@@ -982,16 +1139,20 @@ const PRIVATE_PID: u16 = 0x0102;
 /// stream of `private_stream_2`
 fn muxer_with_private_stream_2() -> Muxer {
     let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
-    muxer.add_program(1, pid(PMT_PID), None, &[]).unwrap();
+    muxer.add_program(1, pid(PMT_PID)).unwrap();
     muxer
-        .add_stream(1, pid(VIDEO_PID), StreamType::ISO_IEC_13818_2_VIDEO, &[])
+        .add_stream(
+            1,
+            ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, pid(VIDEO_PID)),
+        )
         .unwrap();
     muxer
         .add_stream(
             1,
-            pid(PRIVATE_PID),
-            StreamType::ISO_IEC_13818_1_PES_PRIVATE_DATA,
-            &[],
+            ElementaryStream::new(
+                StreamType::ISO_IEC_13818_1_PES_PRIVATE_DATA,
+                pid(PRIVATE_PID),
+            ),
         )
         .unwrap();
     muxer

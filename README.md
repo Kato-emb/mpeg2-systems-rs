@@ -63,6 +63,7 @@ both `Muxer`s are driven the same way.
 
 ```rust
 use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
+use mpeg2_systems::psi::pmt::ElementaryStream;
 use mpeg2_systems::stream_type::StreamType;
 use mpeg2_systems::time::Timestamp;
 use mpeg2_systems::ts::Pid;
@@ -70,8 +71,8 @@ use mpeg2_systems::ts::mux::{Muxer, MuxerConfig};
 
 let video = Pid::try_from(0x0100)?;
 let mut muxer = Muxer::new(MuxerConfig::new())?;
-muxer.add_program(1, Pid::try_from(0x1000)?, None, &[])?;
-muxer.add_stream(1, video, StreamType::ISO_IEC_13818_2_VIDEO, &[])?;
+muxer.add_program(1, Pid::try_from(0x1000)?)?;
+muxer.add_stream(1, ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, video))?;
 let access_unit = [0xaa; 1_000];
 let mut header = OptionalHeader::new();
 header.pts = Some(Timestamp::try_from(90_000)?);

@@ -32,6 +32,7 @@ mod tests {
     use std::process::Command;
 
     use mpeg2_systems::pes::{PesPacket, StreamId};
+    use mpeg2_systems::psi::pmt::ElementaryStream;
     use mpeg2_systems::stream_type::StreamType;
     use mpeg2_systems::time::{ClockReference, Timestamp};
     use mpeg2_systems::ts::Pid;
@@ -111,10 +112,10 @@ mod tests {
     fn multiplexed_of(name: &str, streams: &[(u16, StreamType)], inputs: Vec<Input>) -> String {
         let pid = |value: u16| Pid::try_from(value).unwrap();
         let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
-        muxer.add_program(1, pid(PMT_PID), None, &[]).unwrap();
+        muxer.add_program(1, pid(PMT_PID)).unwrap();
         for &(stream_pid, stream_type) in streams {
             muxer
-                .add_stream(1, pid(stream_pid), stream_type, &[])
+                .add_stream(1, ElementaryStream::new(stream_type, pid(stream_pid)))
                 .unwrap();
         }
         let mut stream = Vec::new();

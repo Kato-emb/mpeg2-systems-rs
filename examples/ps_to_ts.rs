@@ -32,6 +32,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 
 use mpeg2_systems::pes::StreamId;
 use mpeg2_systems::ps::demux::{Demuxer, Event};
+use mpeg2_systems::psi::pmt::ElementaryStream;
 use mpeg2_systems::stream_type::StreamType;
 use mpeg2_systems::ts::Pid;
 use mpeg2_systems::ts::mux::{Muxer, MuxerConfig};
@@ -109,16 +110,12 @@ fn convert(mut reader: impl BufRead, mut writer: impl Write) -> Result<usize, Bo
             } else if let Event::PesPacket(packet) = &event {
                 if !registered {
                     registered = true;
-                    muxer.add_program(
-                        PROGRAM_NUMBER,
-                        Pid::try_from(PROGRAM_MAP_PID)?,
-                        None,
-                        &[],
-                    )?;
+                    muxer.add_program(PROGRAM_NUMBER, Pid::try_from(PROGRAM_MAP_PID)?)?;
                     let streams = mapped.take().or_else(|| bounded.take()).unwrap_or_default();
                     for (pid, (stream_id, stream_type)) in (FIRST_ELEMENTARY_PID..).zip(streams) {
                         let pid = Pid::try_from(pid)?;
-                        muxer.add_stream(PROGRAM_NUMBER, pid, stream_type, &[])?;
+                        muxer
+                            .add_stream(PROGRAM_NUMBER, ElementaryStream::new(stream_type, pid))?;
                         pids.push((stream_id, pid));
                     }
                 }

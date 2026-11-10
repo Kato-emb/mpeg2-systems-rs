@@ -15,9 +15,11 @@
 
 #[cfg(test)]
 mod tests {
+    use mpeg2_systems::descriptor::DescriptorLoop;
     use mpeg2_systems::pes::StreamId;
     use mpeg2_systems::pes::extension::PStdBuffer;
     use mpeg2_systems::ps;
+    use mpeg2_systems::psi::pmt;
     use mpeg2_systems::stream_type::StreamType;
     use mpeg2_systems::time::ClockReference;
     use mpeg2_systems::ts::Pid;
@@ -110,11 +112,12 @@ mod tests {
         let counted = allocations_once_grown(&ALLOCATOR, || {
             muxer
                 .add_stream(
-                    StreamId::from(0xC0),
-                    None,
-                    StreamType::ISO_IEC_11172_3_AUDIO,
+                    ps::psm::ElementaryStream::new(
+                        StreamType::ISO_IEC_11172_3_AUDIO,
+                        StreamId::from(0xC0),
+                    )
+                    .with_elementary_stream_info(DescriptorLoop::from(es_info.as_slice())),
                     PStdBuffer::new(false, 32),
-                    &es_info,
                 )
                 .unwrap_err();
         });
@@ -125,18 +128,23 @@ mod tests {
             muxer
                 .add_stream(
                     1,
-                    Pid::try_from(0x0101).unwrap(),
-                    StreamType::ISO_IEC_13818_7_AUDIO,
-                    &es_info,
+                    pmt::ElementaryStream::new(
+                        StreamType::ISO_IEC_13818_7_AUDIO,
+                        Pid::try_from(0x0101).unwrap(),
+                    )
+                    .with_es_info(DescriptorLoop::from(es_info.as_slice())),
                 )
                 .unwrap_err();
         });
         allocations.push(("es_info past the pmt", es_info.len(), "ts muxer", counted));
         none.push(("es_info past the pmt", es_info.len(), "ts muxer", 0));
         let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
+        muxer
+            .add_program(1, Pid::try_from(0x1000).unwrap())
+            .unwrap();
         let counted = allocations_once_grown(&ALLOCATOR, || {
             muxer
-                .add_program(1, Pid::try_from(0x1000).unwrap(), None, &es_info)
+                .set_program_info(1, DescriptorLoop::from(es_info.as_slice()))
                 .unwrap_err();
         });
         allocations.push((

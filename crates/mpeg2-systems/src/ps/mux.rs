@@ -57,13 +57,11 @@
 use alloc::vec::Vec;
 use core::time::Duration;
 
-use crate::descriptor::DescriptorLoop;
 use crate::field::write_or_truncate;
 use crate::pes::extension::{PStdBuffer, PesExtension};
 use crate::pes::{self, PesPacket, StreamId};
 use crate::ps::psm::ElementaryStream;
 use crate::ps::{PackHeader, pack_header, system_header};
-use crate::stream_type::StreamType;
 use crate::time::SystemTimeClock;
 use pack_writer::PesPacketPieces;
 use schedule::{Filling, Pack, bytes_within_longest_scr_interval};
@@ -219,6 +217,7 @@ impl MuxerConfig {
 /// use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
 /// use mpeg2_systems::ps::demux::{Demuxer, Event};
 /// use mpeg2_systems::ps::mux::{Muxer, MuxerConfig};
+/// use mpeg2_systems::ps::psm::ElementaryStream;
 /// use mpeg2_systems::stream_type::StreamType;
 /// use mpeg2_systems::time::Timestamp;
 ///
@@ -228,7 +227,7 @@ impl MuxerConfig {
 ///
 /// // Register the stream, its P-STD buffer 224 KiB
 /// let buffer = PStdBuffer::new(true, 224);
-/// muxer.add_stream(video, None, StreamType::ISO_IEC_13818_2_VIDEO, buffer, &[])?;
+/// muxer.add_stream(ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, video), buffer)?;
 /// // Give an access unit a second in, and take the packs
 /// let access_unit = vec![0xaa; 5_000];
 /// let packet = PesPacket::new(video, &access_unit)
@@ -330,23 +329,25 @@ impl Muxer {
         })
     }
 
-    /// Registers a stream, its PES packets of `stream_id` and, when it is
-    /// 0xFD, of `stream_id_extension`
+    /// Registers `stream`, its PES packets of its `elementary_stream_id`
+    /// and, when it is 0xFD, of its `elementary_stream_id_extension`
     ///
     /// `p_std_buffer` is both the bound of the stream in the system header
     /// and the P-STD buffer size of its first PES packet, and no PES packet
-    /// of the stream may carry a larger one. `es_info` is the
-    /// descriptors of the stream as written, which the muxer copies.
+    /// of the stream may carry a larger one. The muxer copies the
+    /// `elementary_stream_info` of `stream`, the descriptors of the stream as
+    /// written.
     ///
     /// # Errors
     ///
-    /// * [`StreamId`](Error::StreamId): `stream_id` is below 0xBD, which this
-    ///   entry point does not take: 0xBC, the `program_stream_map`, is written
-    ///   with [`ProgramStreamMap`](crate::ps::ProgramStreamMap), and those
-    ///   below it start the other elements of a Program Stream.
+    /// * [`StreamId`](Error::StreamId): `elementary_stream_id` is below 0xBD,
+    ///   which this entry point does not take: 0xBC, the
+    ///   `program_stream_map`, is written with
+    ///   [`ProgramStreamMap`](crate::ps::ProgramStreamMap), and those below it
+    ///   start the other elements of a Program Stream.
     /// * [`StreamIdExtension`](Error::StreamIdExtension):
-    ///   `stream_id_extension` is given where `stream_id` is not 0xFD, or
-    ///   none where it is.
+    ///   `elementary_stream_id_extension` is present where
+    ///   `elementary_stream_id` is not 0xFD, or absent where it is.
     /// * [`StreamInUse`](Error::StreamInUse): the stream is registered
     ///   already.
     /// * [`AudioBound`](Error::AudioBound), [`VideoBound`](Error::VideoBound):
@@ -358,10 +359,11 @@ impl Muxer {
     ///   audio or of `'0'` for video.
     /// * [`ProgramStreamMap`](Error::ProgramStreamMap):
     ///   [`ProgramStreamMap::write`](crate::ps::ProgramStreamMap::write)
-    ///   refuses the map with the stream, as it does `es_info` that is not
-    ///   whole descriptors, a `stream_type` carried in sections, or a map
-    ///   past the 1018 bytes of `program_stream_map_length`, which is
-    ///   refused before `es_info` is copied.
+    ///   refuses the map with the stream, as it does
+    ///   `elementary_stream_info` that is not whole descriptors, a
+    ///   `stream_type` carried in sections, or a map past the 1018 bytes of
+    ///   `program_stream_map_length`, which is refused before
+    ///   `elementary_stream_info` is copied.
     /// * [`PackLength`](Error::PackLength): the first pack, with the system
     ///   header and the program stream map, could not carry a PES packet in
     ///   [`MuxerConfig::pack_size`], or in the bytes that arrive within 0.7 s
@@ -376,16 +378,15 @@ impl Muxer {
     )]
     pub fn add_stream(
         &mut self,
-        stream_id: StreamId,
-        stream_id_extension: Option<u8>,
-        stream_type: StreamType,
+        stream: ElementaryStream<'_>,
         p_std_buffer: PStdBuffer,
-        es_info: &[u8],
     ) -> Result<(), Error> {
         assert!(
             self.last_pack.is_none(),
             "a stream is registered after the first PES packet"
         );
+        let stream_id = stream.elementary_stream_id;
+        let stream_id_extension = stream.elementary_stream_id_extension;
         if !stream_id.is_pes_packet() || stream_id == StreamId::PROGRAM_STREAM_MAP {
             return Err(Error::StreamId { stream_id });
         }
@@ -398,16 +399,13 @@ impl Muxer {
                 stream_id_extension,
             });
         }
-        let mut entry = ElementaryStream::new(stream_type, stream_id);
-        entry.elementary_stream_id_extension = stream_id_extension;
-        entry.elementary_stream_info = DescriptorLoop::from(es_info);
-        stream_definition::check_map_length(&self.streams, entry)?;
+        stream_definition::check_map_length(&self.streams, stream)?;
         let stream = Stream {
             stream_id,
             stream_id_extension,
-            stream_type,
+            stream_type: stream.stream_type,
             p_std_buffer,
-            es_info: es_info.to_vec(),
+            es_info: stream.elementary_stream_info.as_bytes().to_vec(),
             last_timestamp: None,
         };
         let (audio_bound, video_bound) = stream_definition::bounds(&self.streams);
