@@ -82,12 +82,13 @@ use core::time::Duration;
 use crate::descriptor::DescriptorLoop;
 use crate::pes::{PesPacket, StreamId};
 use crate::psi::pmt;
-use crate::time::{ClockReference, SystemTimeClock};
+use crate::time::SystemTimeClock;
 use crate::ts::Pid;
 use crate::ts::adaptation_field::AdaptationField;
 use crate::ts::packet::PACKET_LENGTH;
 use packet_writer::{Stuffing, packet_count, section_packets_length};
 use program_definition::{ProgramDefinition, Stream};
+use schedule::{Schedule, Times};
 
 /// The longest time from one PCR to the next, ISO/IEC 13818-1 §2.7.2
 const LONGEST_PCR_INTERVAL: Duration = Duration::from_millis(100);
@@ -96,10 +97,13 @@ mod config;
 mod error;
 mod packet_writer;
 mod program_definition;
+mod schedule;
+mod transport_packet_fields;
 
 pub use config::MuxerConfig;
 pub use error::Error;
 pub use packet_writer::PacketWriter;
+pub use transport_packet_fields::TransportPacketFields;
 
 /// Multiplexer of PES packets into a Transport Stream, which sends the PAT,
 /// the PMT and the PCRs the stream needs on its own
@@ -211,65 +215,6 @@ pub struct Muxer {
     // the input.
     section_bodies: Vec<u8>,
     finished: bool,
-}
-
-/// The times the PAT and the PMT and the PCR were last sent, before
-/// [`MuxerConfig::mux_delay`] is taken off
-// Why not a field of the time the input has reached: it is the latest
-// `last_timestamp` of the streams, which every time stamp taken sets.
-#[derive(Debug, Clone, Copy)]
-struct Schedule {
-    psi_sent_at: SystemTimeClock,
-    pcr_sent_at: SystemTimeClock,
-    /// Whether more than one PCR has been sent
-    // Why not compare pcr_sent_at with the time of the first PCR: that time
-    // is kept nowhere else, so it would be a field for this alone.
-    several_pcrs: bool,
-}
-
-/// The times at which the PAT and the PMT, or the PCR, are sent before a
-/// PES packet: `count` times `step` ticks of the STC apart from `first`
-#[derive(Debug, Clone, Copy)]
-struct Times {
-    first: SystemTimeClock,
-    count: u64,
-    step: u64,
-}
-
-impl Times {
-    /// Returns the one time `at`
-    const fn once(at: SystemTimeClock) -> Self {
-        Self {
-            first: at,
-            count: 1,
-            step: 0,
-        }
-    }
-
-    /// Returns the times `interval` apart after `sent_at` up to `clock`, or
-    /// `clock` alone when `interval` is 0
-    const fn due(sent_at: SystemTimeClock, clock: SystemTimeClock, interval: u64) -> Self {
-        match clock.ticks_since(sent_at).checked_div(interval) {
-            // Why not skip sending at an interval of 0: the API promises PSI
-            // before every PES packet, including when the clock has not advanced.
-            None => Self::once(clock),
-            Some(count) => Self {
-                first: sent_at.add_ticks(interval),
-                count,
-                step: interval,
-            },
-        }
-    }
-
-    /// Returns the last of the times, `None` when there are none
-    fn last(self) -> Option<SystemTimeClock> {
-        let steps = self.count.checked_sub(1)?;
-        Some(self.first.add_ticks(steps.saturating_mul(self.step)))
-    }
-
-    fn iter(self) -> impl Iterator<Item = SystemTimeClock> {
-        (0..self.count).map(move |index| self.first.add_ticks(index.saturating_mul(self.step)))
-    }
 }
 
 impl Muxer {
@@ -512,11 +457,90 @@ impl Muxer {
     /// # Panics
     ///
     /// Panics if [`finish`](Self::finish) has been called.
+    pub fn handle_pes_packet(&mut self, pid: Pid, packet: &PesPacket<'_>) -> Result<(), Error> {
+        self.handle_pes_packet_with_transport_packet_fields(
+            pid,
+            packet,
+            &TransportPacketFields::new(),
+        )
+    }
+
+    /// Takes `packet`, a PES packet of the stream on `pid`, as
+    /// [`handle_pes_packet`](Self::handle_pes_packet) does, its Transport
+    /// Packets carrying `fields`
+    ///
+    /// With `random_access_indicator` set on the PCR PID, the muxer sends a
+    /// PCR in the first Transport Packet, since ISO/IEC 13818-1 §2.4.3.5 sets
+    /// the indicator on the PCR PID only in a packet that carries one; the
+    /// next PCR is [`MuxerConfig::pcr_interval`] after it. A PCR due at the
+    /// first Transport Packet that does not fit beside
+    /// `transport_private_data` goes, at the same value, in a Transport
+    /// Packet of its own on the PCR PID before it. With
+    /// [`TransportPacketFields::new`], the output is that of
+    /// `handle_pes_packet`.
+    ///
+    /// ```
+    /// use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
+    /// use mpeg2_systems::psi::pmt::ElementaryStream;
+    /// use mpeg2_systems::stream_type::StreamType;
+    /// use mpeg2_systems::time::Timestamp;
+    /// use mpeg2_systems::ts::Pid;
+    /// use mpeg2_systems::ts::mux::{Muxer, MuxerConfig, TransportPacketFields};
+    /// use mpeg2_systems::ts::packet::TransportPacket;
+    ///
+    /// let (pmt_pid, video_pid) = (Pid::try_from(0x1000)?, Pid::try_from(0x0100)?);
+    /// let mut muxer = Muxer::new(MuxerConfig::new())?;
+    /// muxer.add_program(1, pmt_pid)?;
+    /// muxer.add_stream(1, ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, video_pid))?;
+    ///
+    /// // An access unit that starts a video sequence, a point to begin decoding at
+    /// let access_unit = vec![0xaa; 1_000];
+    /// let packet = PesPacket::new(StreamId::from(0xe0), &access_unit)
+    ///     .with_optional_header(OptionalHeader::new().with_pts(Timestamp::try_from(90_000)?));
+    /// let fields = TransportPacketFields::new().with_random_access_indicator(true);
+    /// muxer.handle_pes_packet_with_transport_packet_fields(video_pid, &packet, &fields)?;
+    /// let mut stream = Vec::new();
+    /// muxer.poll_output(&mut stream);
+    ///
+    /// // The first Transport Packet of the PES packet, after the PAT and the PMT
+    /// let first = TransportPacket::read(&stream[2 * 188..3 * 188])?;
+    /// let field = first.adaptation_field.unwrap();
+    /// assert!(field.random_access_indicator && field.program_clock_reference.is_some());
+    /// # Ok::<(), Box<dyn core::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of `handle_pes_packet`, and
+    ///
+    /// * [`TransportPrivateDataLength`](Error::TransportPrivateDataLength):
+    ///   `transport_private_data` is longer than the 180 bytes the adaptation
+    ///   field of a Transport Packet with a payload holds, or, with
+    ///   `random_access_indicator` set on the PCR PID, than the 174 it holds
+    ///   beside the PCR (§2.4.3.5).
+    /// * [`RandomAccessIndicator`](Error::RandomAccessIndicator):
+    ///   `random_access_indicator` is set on the PCR PID, where it takes a PCR
+    ///   in the packet (§2.4.3.5), at no time after the PCR sent before. A PCR
+    ///   of the same value would leave the transport rate between the two
+    ///   undefined (§2.4.2.3 equation 2-5). The muxer takes the value of a PCR
+    ///   from the time stamps (the time of the PES packet's DTS, its PTS
+    ///   without one, or the latest given before when it has neither), so it
+    ///   has no later value to give. To avoid it, give the PES packet of the
+    ///   PCR PID first among those of one time.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`finish`](Self::finish) has been called.
     #[expect(
         clippy::panic_in_result_fn,
         reason = "a call out of order is the caller's mistake, which panics as documented"
     )]
-    pub fn handle_pes_packet(&mut self, pid: Pid, packet: &PesPacket<'_>) -> Result<(), Error> {
+    pub fn handle_pes_packet_with_transport_packet_fields(
+        &mut self,
+        pid: Pid,
+        packet: &PesPacket<'_>,
+        fields: &TransportPacketFields<'_>,
+    ) -> Result<(), Error> {
         assert!(!self.finished, "a PES packet is given after finish");
         let Some((program, stream_index)) = self.program.as_ref().and_then(|program| {
             let index = program
@@ -558,7 +582,8 @@ impl Muxer {
         }
         let timestamp = header.and_then(|header| header.dts.or(header.pts));
         let reached = program.latest_timestamp();
-        let (clock, time, psi_times, pcr_times, next) = match (schedule.zip(reached), timestamp) {
+        let (clock, time, psi_times, pcr_times, mut next) = match (schedule.zip(reached), timestamp)
+        {
             (None, Some(timestamp)) => {
                 let clock = SystemTimeClock::first(timestamp);
                 let next = Schedule {
@@ -607,13 +632,23 @@ impl Muxer {
         // Why not refuse a program without a PCR PID: a stream is registered
         // on `pid`, so the program has one.
         let pcr_pid = program.pcr_pid().unwrap_or(pid);
-        let pcr_in_packet = pcr_pid == pid && pcr_times.last() == Some(clock);
-        let adaptation_field = pcr_in_packet.then(|| {
-            let mut adaptation_field = AdaptationField::new();
-            adaptation_field.program_clock_reference = Some(pcr_at(config, clock));
-            adaptation_field
-        });
-        let pcrs_alone = pcr_times.count.saturating_sub(u64::from(pcr_in_packet));
+        let on_pcr_pid = pcr_pid == pid;
+        let pcr_due = on_pcr_pid && pcr_times.last() == Some(clock);
+        let pcr_at_clock = clock.to_clock_reference(config.mux_delay);
+        let after_last_pcr = schedule.is_none_or(|schedule| clock > schedule.pcr_sent_at);
+        let pcr_in_packet =
+            fields.pcr_in_first_packet(pid, on_pcr_pid, pcr_due, pcr_at_clock, after_last_pcr)?;
+        let adaptation_field = fields.adaptation_field(pcr_in_packet.then_some(pcr_at_clock));
+        let pcrs_alone = pcr_times
+            .count
+            .saturating_sub(u64::from(pcr_due && pcr_in_packet));
+        // Why not count the PCR due at the PES packet, split from it, with the
+        // PCRs that fill a leap: it is sent at the PES packet's time, and is
+        // part of what the PES packet adds to the output.
+        let pcr_split = pcr_due && !pcr_in_packet;
+        if pcr_in_packet && !pcr_due {
+            next = next.with_pcr_sent_at(clock);
+        }
 
         section_bodies.clear();
         let sections = if psi_times.count > 0 {
@@ -630,13 +665,17 @@ impl Muxer {
         let as_length = |count: u64| usize::try_from(count).unwrap_or(usize::MAX);
         let filling = psi_length
             .saturating_mul(as_length(psi_times.count))
-            .saturating_add(PACKET_LENGTH.saturating_mul(as_length(pcrs_alone)));
+            .saturating_add(
+                PACKET_LENGTH
+                    .saturating_mul(as_length(pcrs_alone.saturating_sub(u64::from(pcr_split)))),
+            );
         if filling > config.buffer_limit {
             return Err(Error::TimestampGap {
                 gap: clock.timestamp_ticks_since(reached.unwrap_or(clock)),
             });
         }
         let length = filling
+            .saturating_add(if pcr_split { PACKET_LENGTH } else { 0 })
             .saturating_add(
                 packet_count(
                     pes_length,
@@ -673,7 +712,11 @@ impl Muxer {
                     writer.write_section(program.program_map_pid, pmt, pending)?;
                 }
             } else if let Some(at) = pcrs_at.next() {
-                writer.write_pcr_packet(pcr_pid, pcr_at(config, at), pending)?;
+                writer.write_pcr_packet(
+                    pcr_pid,
+                    at.to_clock_reference(config.mux_delay),
+                    pending,
+                )?;
             }
         }
         writer.write_payload_unit(
@@ -683,6 +726,7 @@ impl Muxer {
                 Ok(())
             },
             adaptation_field,
+            fields.transport_priority,
             Stuffing::AdaptationField,
             pending,
         )?;
@@ -715,7 +759,11 @@ impl Muxer {
                 .max(reached);
             if self
                 .writer
-                .write_pcr_packet(pcr_pid, pcr_at(&self.config, at), &mut self.pending)
+                .write_pcr_packet(
+                    pcr_pid,
+                    at.to_clock_reference(self.config.mux_delay),
+                    &mut self.pending,
+                )
                 .is_ok()
             {
                 schedule.several_pcrs = true;
@@ -732,11 +780,6 @@ impl Muxer {
     pub const fn finish(&mut self) {
         self.finished = true;
     }
-}
-
-/// Returns the PCR of `at`, less [`MuxerConfig::mux_delay`]
-fn pcr_at(config: &MuxerConfig, at: SystemTimeClock) -> ClockReference {
-    at.to_clock_reference(config.mux_delay)
 }
 
 #[cfg(test)]

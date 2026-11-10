@@ -36,7 +36,7 @@ mod tests {
     use mpeg2_systems::stream_type::StreamType;
     use mpeg2_systems::time::{ClockReference, Timestamp};
     use mpeg2_systems::ts::Pid;
-    use mpeg2_systems::ts::mux::{Muxer, MuxerConfig};
+    use mpeg2_systems::ts::mux::{Muxer, MuxerConfig, TransportPacketFields};
 
     use crate::tools::{
         ProgramAssociation, ProgramMap, Timing, ffprobe, integer, pes_packet, pes_packets_of_188,
@@ -426,6 +426,194 @@ mod tests {
         assert_eq!(
             (tables_tstables(&path).1, errors, probed),
             (registered, no_errors, expected)
+        );
+    }
+
+    /// What `tsp -P dump` prints of a Transport Packet: its PID,
+    /// `payload_unit_start_indicator`, `transport_priority`, whether it has
+    /// a payload, `random_access_indicator`,
+    /// `elementary_stream_priority_indicator`, whether it carries a PCR, and
+    /// its transport private data
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    struct Dumped {
+        pid: u64,
+        payload_unit_start_indicator: bool,
+        transport_priority: bool,
+        payload: bool,
+        random_access_indicator: bool,
+        elementary_stream_priority_indicator: bool,
+        program_clock_reference: bool,
+        transport_private_data: Option<Vec<u8>>,
+    }
+
+    /// The value after `key: ` in a line `tsp -P dump` prints, up to the next
+    /// comma or space
+    fn after<'line>(line: &'line str, key: &str) -> &'line str {
+        line.split(&format!("{key}: "))
+            .nth(1)
+            .and_then(|rest| rest.split([',', ' ']).next())
+            .unwrap()
+    }
+
+    /// Each Transport Packet of the file at `path`, as `tsp -P dump` reads it
+    fn dumped(path: &str) -> Vec<Dumped> {
+        let mut packets: Vec<Dumped> = Vec::new();
+        let mut private_data_left = 0;
+        for line in tsp(
+            path,
+            &["-P", "dump", "--headers-only", "--adaptation-field"],
+        ) {
+            let line = line.trim();
+            if line.starts_with("* Packet") {
+                packets.push(Dumped::default());
+            }
+            let Some(packet) = packets.last_mut() else {
+                continue;
+            };
+            if line.starts_with("PID: ") {
+                packet.pid =
+                    u64::from_str_radix(after(line, "PID").trim_start_matches("0x"), 16).unwrap();
+            } else if line.starts_with("Error: ") {
+                packet.payload_unit_start_indicator = after(line, "unit start") == "1";
+                packet.transport_priority = after(line, "priority") == "1";
+            } else if line.starts_with("Adaptation field: ") {
+                packet.payload = after(line, "payload") == "yes";
+            } else if line.starts_with("Discontinuity: ") {
+                packet.random_access_indicator = after(line, "random access") == "1";
+                packet.elementary_stream_priority_indicator = after(line, "ES priority") == "1";
+            } else if line.starts_with("PCR: ") {
+                packet.program_clock_reference = true;
+            } else if let Some(rest) = line.strip_prefix("Private data (") {
+                private_data_left = rest.split(' ').next().unwrap().parse().unwrap();
+                packet.transport_private_data = Some(Vec::new());
+            } else if let (Some((offset, bytes)), Some(data)) =
+                (line.split_once(':'), packet.transport_private_data.as_mut())
+                && private_data_left > 0
+                && offset.len() == 4
+            {
+                // Why take no more than a line holds, and no more than are
+                // left: the hexadecimal bytes of a line, 16 at most, are
+                // followed by the same bytes in ASCII
+                for byte in bytes.split_whitespace().take(private_data_left.min(16)) {
+                    data.push(u8::from_str_radix(byte, 16).unwrap());
+                    private_data_left -= 1;
+                }
+            }
+        }
+        packets
+    }
+
+    #[test]
+    #[ignore = "runs tsp from TSDuck"]
+    fn the_transport_packet_fields_set_on_each_pes_packet_read_in_tsp_dump() {
+        let pid = |value: u16| Pid::try_from(value).unwrap();
+        let inputs = inputs();
+        let private_data: Vec<Vec<u8>> = (0..inputs.len())
+            .map(|index| match index % 6 {
+                1 => vec![u8::try_from(index % 256).unwrap(); 4],
+                4 => (0..180)
+                    .map(|byte| u8::try_from((byte + index) % 256).unwrap())
+                    .collect(),
+                5 => vec![u8::try_from(index % 256).unwrap(); 174],
+                _ => Vec::new(),
+            })
+            .collect();
+        let fields_of = |index: usize| {
+            let data = private_data[index].as_slice();
+            match index % 6 {
+                0 => TransportPacketFields::new().with_random_access_indicator(true),
+                1 => TransportPacketFields::new()
+                    .with_elementary_stream_priority_indicator(true)
+                    .with_transport_private_data(data),
+                2 => TransportPacketFields::new().with_transport_priority(true),
+                3 => TransportPacketFields::new(),
+                4 => TransportPacketFields::new()
+                    .with_transport_priority(true)
+                    .with_transport_private_data(data),
+                _ => TransportPacketFields::new()
+                    .with_random_access_indicator(true)
+                    .with_transport_private_data(data),
+            }
+        };
+        let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
+        muxer.add_program(1, pid(PMT_PID)).unwrap();
+        for (stream_pid, stream_type) in STREAMS {
+            muxer
+                .add_stream(1, ElementaryStream::new(stream_type, pid(stream_pid)))
+                .unwrap();
+        }
+        let mut stream = Vec::new();
+        for (index, (pid_value, stream_id, timing, payload)) in inputs.iter().enumerate() {
+            muxer
+                .handle_pes_packet_with_transport_packet_fields(
+                    pid(*pid_value),
+                    &pes_packet(*stream_id, *timing, payload),
+                    &fields_of(index),
+                )
+                .unwrap();
+        }
+        muxer.finish();
+        muxer.poll_output(&mut stream);
+        let path = format!(
+            "{}/muxer_transport_packet_fields.ts",
+            env!("CARGO_TARGET_TMPDIR")
+        );
+        std::fs::write(&path, &stream).unwrap();
+
+        let mut expected = Vec::new();
+        let mut read = Vec::new();
+        let mut starts = 0..;
+        let mut fields = TransportPacketFields::new();
+        for packet in dumped(&path) {
+            if ![VIDEO_PID, AUDIO_PID].map(u64::from).contains(&packet.pid) {
+                continue;
+            }
+            if packet.payload_unit_start_indicator {
+                fields = fields_of(starts.next().unwrap());
+            }
+            let first = packet.payload_unit_start_indicator;
+            expected.push(Dumped {
+                pid: packet.pid,
+                payload_unit_start_indicator: first,
+                // Why not set the priority on a packet without a payload:
+                // that is a PCR the muxer sends alone, not a packet of the
+                // PES packet
+                transport_priority: fields.transport_priority && packet.payload,
+                payload: packet.payload,
+                random_access_indicator: first && fields.random_access_indicator,
+                elementary_stream_priority_indicator: first
+                    && fields.elementary_stream_priority_indicator,
+                // Why not check every PCR: their times are checked against
+                // the PCR interval elsewhere; here only the one
+                // random_access_indicator needs on the PCR PID (§2.4.3.5)
+                program_clock_reference: packet.program_clock_reference,
+                transport_private_data: fields
+                    .transport_private_data
+                    .filter(|_| first)
+                    .map(<[u8]>::to_vec),
+            });
+            read.push(packet);
+        }
+        let random_access_on_the_pcr_pid_without_a_pcr = read
+            .iter()
+            .filter(|packet| {
+                packet.pid == u64::from(VIDEO_PID)
+                    && packet.random_access_indicator
+                    && !packet.program_clock_reference
+            })
+            .count();
+        let pcrs_alone_on_the_pcr_pid = read
+            .iter()
+            .filter(|packet| packet.pid == u64::from(VIDEO_PID) && !packet.payload)
+            .count();
+        assert_eq!(
+            (
+                read,
+                starts.next(),
+                random_access_on_the_pcr_pid_without_a_pcr,
+                pcrs_alone_on_the_pcr_pid > 0
+            ),
+            (expected, Some(inputs.len()), 0, true)
         );
     }
 }

@@ -9,7 +9,7 @@ use crate::psi::pat::{Program as PatProgram, ProgramAssociationSection, ProgramL
 use crate::psi::pmt::{ElementaryStream, ElementaryStreamLoop, TsProgramMapSection};
 use crate::psi::section;
 use crate::stream_type::StreamType;
-use crate::time::Timestamp;
+use crate::time::{ClockReference, Timestamp};
 use crate::ts::packet::TransportPacket;
 
 const PMT_PID: u16 = 0x1000;
@@ -647,6 +647,7 @@ fn the_packets_counted_are_those_a_payload_unit_is_cut_into() {
                             Ok(())
                         },
                         field,
+                        false,
                         Stuffing::AdaptationField,
                         &mut out,
                     )
@@ -1209,3 +1210,5 @@ fn a_config_built_from_new_and_every_with_method_equals_one_with_every_field_ass
 
     assert_eq!(built, assigned);
 }
+
+mod transport_packet_fields;

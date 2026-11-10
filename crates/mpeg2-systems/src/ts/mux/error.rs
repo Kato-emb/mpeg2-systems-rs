@@ -6,7 +6,7 @@ use core::time::Duration;
 
 use crate::pes::{self, StreamId};
 use crate::psi::{cat, pat, pmt, section};
-use crate::time::Timestamp;
+use crate::time::{ClockReference, Timestamp};
 use crate::ts::Pid;
 use crate::ts::packet;
 
@@ -114,6 +114,24 @@ pub enum Error {
         /// The bytes the output held would grow to
         length: usize,
     },
+    /// The `transport_private_data` of
+    /// [`TransportPacketFields`](super::TransportPacketFields) is longer than
+    /// the adaptation field of the PES packet's first Transport Packet holds
+    TransportPrivateDataLength {
+        /// The bytes of `transport_private_data` given
+        length: usize,
+        /// The most bytes the adaptation field holds
+        limit: usize,
+    },
+    /// `random_access_indicator` is set on the PCR PID, which takes a PCR,
+    /// at a time no later than that of the PCR sent before
+    RandomAccessIndicator {
+        /// The PID of the PES packet, the PCR PID
+        pid: Pid,
+        /// The value of the PCR the packet would carry, that of the PCR sent
+        /// before
+        program_clock_reference: ClockReference,
+    },
 }
 
 impl fmt::Display for Error {
@@ -188,6 +206,19 @@ impl fmt::Display for Error {
                 formatter,
                 "the output held would grow to {length} bytes, past buffer_limit"
             ),
+            Self::RandomAccessIndicator {
+                pid,
+                program_clock_reference,
+            } => write!(
+                formatter,
+                "random_access_indicator on PCR PID {:#06x} needs a PCR after the one of {} already sent",
+                pid.get(),
+                program_clock_reference.base()
+            ),
+            Self::TransportPrivateDataLength { length, limit } => write!(
+                formatter,
+                "transport_private_data of {length} bytes is longer than the {limit} bytes the adaptation field holds"
+            ),
         }
     }
 }
@@ -211,7 +242,9 @@ impl core::error::Error for Error {
             | Self::MissingPts { .. }
             | Self::DecreasingTimestamp { .. }
             | Self::TimestampGap { .. }
-            | Self::BufferFull { .. } => None,
+            | Self::BufferFull { .. }
+            | Self::TransportPrivateDataLength { .. }
+            | Self::RandomAccessIndicator { .. } => None,
         }
     }
 }
