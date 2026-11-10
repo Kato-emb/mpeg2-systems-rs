@@ -178,7 +178,7 @@ impl PackWriter {
     ///
     /// * [`PackHeader`](Error::PackHeader): [`PackHeader::write`] refuses
     ///   `header`.
-    pub(crate) fn write_padding_pack(
+    pub(super) fn write_padding_pack(
         &self,
         header: &PackHeader,
         length: usize,
