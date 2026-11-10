@@ -9,7 +9,7 @@ use crate::psi::pat::{Program as PatProgram, ProgramAssociationSection, ProgramL
 use crate::psi::pmt::{ElementaryStream, ElementaryStreamLoop, TsProgramMapSection};
 use crate::psi::section;
 use crate::stream_type::StreamType;
-use crate::time::Timestamp;
+use crate::time::{ClockReference, Timestamp};
 use crate::ts::packet::TransportPacket;
 
 const PMT_PID: u16 = 0x1000;

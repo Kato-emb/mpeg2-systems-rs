@@ -82,7 +82,7 @@ use core::time::Duration;
 use crate::descriptor::DescriptorLoop;
 use crate::pes::{PesPacket, StreamId};
 use crate::psi::pmt;
-use crate::time::{ClockReference, SystemTimeClock};
+use crate::time::SystemTimeClock;
 use crate::ts::Pid;
 use crate::ts::adaptation_field::AdaptationField;
 use crate::ts::packet::PACKET_LENGTH;
@@ -621,8 +621,8 @@ impl Muxer {
         let on_pcr_pid = pcr_pid == pid;
         let pcr_due = on_pcr_pid && pcr_times.last() == Some(clock);
         let pcr_in_packet = carriage.pcr_in_first_packet(on_pcr_pid, pcr_due)?;
-        let adaptation_field =
-            carriage.adaptation_field(pcr_in_packet.then(|| pcr_at(config, clock)));
+        let adaptation_field = carriage
+            .adaptation_field(pcr_in_packet.then(|| clock.to_clock_reference(config.mux_delay)));
         let pcrs_alone = pcr_times
             .count
             .saturating_sub(u64::from(pcr_due && pcr_in_packet));
@@ -696,7 +696,11 @@ impl Muxer {
                     writer.write_section(program.program_map_pid, pmt, pending)?;
                 }
             } else if let Some(at) = pcrs_at.next() {
-                writer.write_pcr_packet(pcr_pid, pcr_at(config, at), pending)?;
+                writer.write_pcr_packet(
+                    pcr_pid,
+                    at.to_clock_reference(config.mux_delay),
+                    pending,
+                )?;
             }
         }
         writer.write_payload_unit(
@@ -739,7 +743,11 @@ impl Muxer {
                 .max(reached);
             if self
                 .writer
-                .write_pcr_packet(pcr_pid, pcr_at(&self.config, at), &mut self.pending)
+                .write_pcr_packet(
+                    pcr_pid,
+                    at.to_clock_reference(self.config.mux_delay),
+                    &mut self.pending,
+                )
                 .is_ok()
             {
                 schedule.several_pcrs = true;
@@ -756,11 +764,6 @@ impl Muxer {
     pub const fn finish(&mut self) {
         self.finished = true;
     }
-}
-
-/// Returns the PCR of `at`, less [`MuxerConfig::mux_delay`]
-fn pcr_at(config: &MuxerConfig, at: SystemTimeClock) -> ClockReference {
-    at.to_clock_reference(config.mux_delay)
 }
 
 #[cfg(test)]
