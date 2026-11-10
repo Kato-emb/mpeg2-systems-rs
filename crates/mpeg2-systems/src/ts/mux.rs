@@ -621,8 +621,6 @@ impl Muxer {
     /// * [`ProgramNumber`](Error::ProgramNumber): `program_number` is 0.
     /// * [`Pid`](Error::Pid): `program_map_pid` is outside 0x0010 to 0x1FFE,
     ///   the PIDs Table 2-3 leaves free to assign.
-    /// * [`TsProgramMapSection`](Error::TsProgramMapSection):
-    ///   [`TsProgramMapSection::write`](pmt::TsProgramMapSection::write) refuses the PMT of the program.
     ///
     /// # Panics
     ///
@@ -641,15 +639,13 @@ impl Muxer {
                 pid: program_map_pid,
             });
         }
-        let program = ProgramDefinition {
+        self.program = Some(ProgramDefinition {
             program_number,
             program_map_pid,
             pcr_pid: None,
             program_info: Vec::new(),
             streams: Vec::new(),
-        };
-        program.check(self.config.transport_stream_id)?;
-        self.program = Some(program);
+        });
         Ok(())
     }
 
