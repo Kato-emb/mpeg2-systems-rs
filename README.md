@@ -104,7 +104,7 @@ of `ts::mux` and `ps::mux` carry an example of each writer.
 | Section, PAT, PMT, CAT (§2.4.4) | yes | yes |
 | Descriptors 0x02–0x12, AVC video, MPEG-2 AAC audio, HEVC video (§2.6) | yes | yes |
 | Pack header, system header, program stream map (§2.5.3) | yes | yes |
-| Transport Stream: framing in 188, 192 and 204 bytes, PSI, PES reassembly, PCR | `ts::demux` | `ts::mux`: `Muxer` (one program at a variable bit rate, the PAT, the PMT and the PCRs sent at intervals) and `PacketWriter` (PES packets, sections, PCRs on their own) |
+| Transport Stream: framing in 188, 192 and 204 bytes, PSI, PES reassembly, PCR | `ts::demux` | `ts::mux`: `Muxer` (one program at a variable bit rate, the PAT, the PMT and the PCRs sent at intervals, the random access, priorities and private data the caller sets on each PES packet's Transport Packets) and `PacketWriter` (PES packets, sections, PCRs on their own) |
 | Program Stream: packs, system headers, maps, PES packets | `ps::demux` | `ps::mux`: `Muxer` (packs, their SCRs, the system header and the program stream map, at the start, at an interval set and after the map changes) and `PackWriter` (pack headers with pack stuffing, system headers, maps, PES packets split to fit, padding) |
 
 `mpeg2-systems-arib` reads and writes:

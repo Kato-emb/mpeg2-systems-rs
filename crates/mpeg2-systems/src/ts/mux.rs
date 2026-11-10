@@ -618,20 +618,21 @@ impl Muxer {
         // Why not refuse a program without a PCR PID: a stream is registered
         // on `pid`, so the program has one.
         let pcr_pid = program.pcr_pid().unwrap_or(pid);
-        carriage.check(pcr_pid == pid)?;
-        let pcr_due_in_packet = pcr_pid == pid && pcr_times.last() == Some(clock);
-        // Why not wait for the PCR's time: §2.4.3.5 lets random_access_indicator
-        // be set on the PCR PID only in a packet that carries a PCR.
-        let pcr_for_random_access =
-            pcr_pid == pid && carriage.random_access_indicator && !pcr_due_in_packet;
-        let pcr_due_shares_packet = pcr_due_in_packet && carriage.fits_beside_pcr();
-        let adaptation_field = carriage.adaptation_field(
-            (pcr_due_shares_packet || pcr_for_random_access).then(|| pcr_at(config, clock)),
-        );
+        let on_pcr_pid = pcr_pid == pid;
+        carriage.check(on_pcr_pid)?;
+        let pcr_due = on_pcr_pid && pcr_times.last() == Some(clock);
+        // Why not wait for the PCR's time on random access: §2.4.3.5 lets
+        // random_access_indicator be set on the PCR PID only in a packet that
+        // carries a PCR. Why not always put the PCR due in the packet: it may
+        // not fit beside transport_private_data, and then goes alone.
+        let pcr_in_packet =
+            on_pcr_pid && (carriage.random_access_indicator || (pcr_due && carriage.fits(true)));
+        let adaptation_field =
+            carriage.adaptation_field(pcr_in_packet.then(|| pcr_at(config, clock)));
         let pcrs_alone = pcr_times
             .count
-            .saturating_sub(u64::from(pcr_due_shares_packet));
-        if pcr_for_random_access {
+            .saturating_sub(u64::from(pcr_due && pcr_in_packet));
+        if pcr_in_packet && !pcr_due {
             next.pcr_sent_at = clock;
             next.several_pcrs = true;
         }

@@ -52,24 +52,40 @@ fn plain(pid: u16, payload_unit_start_indicator: bool) -> Carried {
     }
 }
 
-/// The output of the PES packets given in turn on `pid` with `carriage`,
-/// each `(dts, carriage)`, after a first one on the video PID at 90 000
-fn output_of(inputs: &[(u16, u64, PesPacketCarriage<'_>)]) -> Vec<u8> {
+/// What the muxer of the default settings makes of the PES packets given
+/// in turn, each `(pid, dts, carriage)`: the result of each, and the output
+fn multiplexed(inputs: &[(u16, u64, PesPacketCarriage<'_>)]) -> (Vec<Result<(), Error>>, Vec<u8>) {
     let mut muxer = muxer_of(MuxerConfig::new());
     let payload = vec![0xaa; 400];
-    let mut out = Vec::new();
-    for (pid_value, dts, carriage) in inputs {
-        let stream_id = if *pid_value == VIDEO_PID { 0xe0 } else { 0xc0 };
-        muxer
-            .handle_pes_packet_with_carriage(
+    let results = inputs
+        .iter()
+        .map(|(pid_value, dts, carriage)| {
+            let stream_id = if *pid_value == VIDEO_PID { 0xe0 } else { 0xc0 };
+            muxer.handle_pes_packet_with_carriage(
                 pid(*pid_value),
                 &pes_packet(stream_id, &payload, Some(*dts)),
                 carriage,
             )
-            .unwrap();
-    }
+        })
+        .collect();
+    let mut out = Vec::new();
     muxer.poll_output(&mut out);
+    (results, out)
+}
+
+/// The output of [`multiplexed`], each PES packet taken
+fn output_of(inputs: &[(u16, u64, PesPacketCarriage<'_>)]) -> Vec<u8> {
+    let (results, out) = multiplexed(inputs);
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
     out
+}
+
+/// The Transport Packets of `pid` in `out`
+fn of_pid(out: &[u8], pid_value: u16) -> Vec<Carried> {
+    carried(out)
+        .into_iter()
+        .filter(|packet| packet.pid == pid_value)
+        .collect()
 }
 
 #[test]
@@ -79,24 +95,15 @@ fn the_fields_set_go_in_the_adaptation_field_of_the_first_transport_packet_only(
         .with_random_access_indicator(true)
         .with_elementary_stream_priority_indicator(true)
         .with_transport_private_data(&private_data);
-    let out = output_of(&[(AUDIO_PID, 90_000, carriage)]);
-    let audio: Vec<&[u8]> = out
-        .chunks(188)
-        .filter(|chunk| u16::from_be_bytes([chunk[1] & 0x1f, chunk[2]]) == AUDIO_PID)
-        .collect();
-    let first = audio.first().unwrap();
-    let rest: Vec<Carried> = carried(&audio[1..].concat());
-    // adaptation_field_control '11', then the byte of flags (§2.4.3.4):
-    // random_access_indicator, elementary_stream_priority_indicator and
-    // transport_private_data_flag, then transport_private_data_length
-    assert_eq!(
-        (
-            first[3] & 0x30,
-            &first[5..10],
-            rest.iter().all(|packet| *packet == plain(AUDIO_PID, false))
-        ),
-        (0x30, &[0x62, 0x03, 0x01, 0x02, 0x03][..], true)
-    );
+    let audio = of_pid(&output_of(&[(AUDIO_PID, 90_000, carriage)]), AUDIO_PID);
+    let mut expected = vec![Carried {
+        random_access_indicator: true,
+        elementary_stream_priority_indicator: true,
+        transport_private_data: Some(private_data.to_vec()),
+        ..plain(AUDIO_PID, true)
+    }];
+    expected.resize(audio.len(), plain(AUDIO_PID, false));
+    assert_eq!((audio, expected.len() > 1), (expected, true));
 }
 
 #[test]
@@ -106,27 +113,25 @@ fn transport_priority_is_set_on_every_transport_packet_of_the_pes_packet_only() 
         (VIDEO_PID, 90_000, PesPacketCarriage::new()),
         (AUDIO_PID, 93_600, carriage),
     ]);
-    let priorities: Vec<(u16, bool)> = carried(&out)
-        .iter()
-        .map(|packet| (packet.pid, packet.transport_priority))
-        .collect();
-    let expected: Vec<(u16, bool)> = priorities
-        .iter()
-        .map(|&(pid_value, _)| (pid_value, pid_value == AUDIO_PID))
+    let audio = of_pid(&out, AUDIO_PID);
+    let mut expected = vec![Carried {
+        transport_priority: true,
+        ..plain(AUDIO_PID, true)
+    }];
+    expected.resize(
+        audio.len(),
+        Carried {
+            transport_priority: true,
+            ..plain(AUDIO_PID, false)
+        },
+    );
+    let others_with_priority: Vec<Carried> = carried(&out)
+        .into_iter()
+        .filter(|packet| packet.pid != AUDIO_PID && packet.transport_priority)
         .collect();
     assert_eq!(
-        (
-            priorities.clone(),
-            priorities
-                .iter()
-                .filter(|(pid_value, _)| *pid_value == AUDIO_PID)
-                .count()
-                > 1,
-            priorities
-                .iter()
-                .any(|&(pid_value, _)| pid_value == VIDEO_PID)
-        ),
-        (expected, true, true)
+        (audio, others_with_priority, expected.len() > 1),
+        (expected, Vec::new(), true)
     );
 }
 
@@ -136,10 +141,7 @@ fn the_fields_set_go_beside_a_pcr_in_the_same_packet() {
     let carriage = PesPacketCarriage::new()
         .with_random_access_indicator(true)
         .with_transport_private_data(&private_data);
-    let video: Vec<Carried> = carried(&output_of(&[(VIDEO_PID, 90_000, carriage)]))
-        .into_iter()
-        .filter(|packet| packet.pid == VIDEO_PID)
-        .collect();
+    let video = of_pid(&output_of(&[(VIDEO_PID, 90_000, carriage)]), VIDEO_PID);
     assert_eq!(
         video.first().cloned(),
         Some(Carried {
@@ -219,22 +221,17 @@ fn with_private_data(
     random_access_indicator: bool,
     private_data: &[u8],
 ) -> (Result<(), Error>, Vec<u8>) {
-    let mut muxer = muxer_of(MuxerConfig::new());
-    let payload = vec![0xaa; 400];
-    muxer
-        .handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &payload, Some(90_000)))
-        .unwrap();
-    let stream_id = if pid_value == VIDEO_PID { 0xe0 } else { 0xc0 };
-    let result = muxer.handle_pes_packet_with_carriage(
-        pid(pid_value),
-        &pes_packet(stream_id, &payload, Some(dts)),
-        &PesPacketCarriage::new()
-            .with_random_access_indicator(random_access_indicator)
-            .with_transport_private_data(private_data),
-    );
-    let mut out = Vec::new();
-    muxer.poll_output(&mut out);
-    (result, out)
+    let (results, out) = multiplexed(&[
+        (VIDEO_PID, 90_000, PesPacketCarriage::new()),
+        (
+            pid_value,
+            dts,
+            PesPacketCarriage::new()
+                .with_random_access_indicator(random_access_indicator)
+                .with_transport_private_data(private_data),
+        ),
+    ]);
+    (*results.last().unwrap(), out)
 }
 
 #[test]
@@ -269,10 +266,7 @@ fn transport_private_data_past_the_adaptation_field_is_refused_and_leaves_the_mu
 fn a_pcr_due_with_transport_private_data_too_long_to_share_its_packet_goes_alone_before_it() {
     let private_data = [0x0c; 180];
     let (result, out) = with_private_data(VIDEO_PID, 93_600, false, &private_data);
-    let video: Vec<Carried> = carried(&out)
-        .into_iter()
-        .filter(|packet| packet.pid == VIDEO_PID)
-        .collect();
+    let video = of_pid(&out, VIDEO_PID);
     let first_pes_packet = video
         .iter()
         .position(|packet| packet.payload_unit_start_indicator)
@@ -309,8 +303,7 @@ fn random_access_on_the_pcr_pid_takes_as_much_transport_private_data_as_fits_bes
     let (refused, _) = with_private_data(VIDEO_PID, 90_900, true, &[0x0d; 175]);
     let last_start = carried(&out)
         .into_iter()
-        .filter(|packet| packet.pid == VIDEO_PID && packet.payload_unit_start_indicator)
-        .last();
+        .rfind(|packet| packet.pid == VIDEO_PID && packet.payload_unit_start_indicator);
     assert_eq!(
         (taken, refused, last_start),
         (
@@ -354,10 +347,14 @@ fn a_pes_packet_after_an_adaptation_field_that_leaves_one_byte_of_payload_reads_
             payloads.push(packet.payload.to_vec());
         }
     }
-    let first_audio = out
-        .chunks(188)
-        .find(|chunk| u16::from_be_bytes([chunk[1] & 0x1f, chunk[2]]) == AUDIO_PID)
-        .unwrap();
-    // adaptation_field_length 182 leaves one byte of payload (§2.4.3.5)
-    assert_eq!((first_audio[4], payloads), (182, vec![payload]));
+    assert_eq!(
+        (of_pid(&out, AUDIO_PID).first().cloned(), payloads),
+        (
+            Some(Carried {
+                transport_private_data: Some(vec![0x0e; 180]),
+                ..plain(AUDIO_PID, true)
+            }),
+            vec![payload]
+        )
+    );
 }

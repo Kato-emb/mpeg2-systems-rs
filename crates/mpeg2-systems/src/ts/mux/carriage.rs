@@ -101,18 +101,21 @@ impl<'a> PesPacketCarriage<'a> {
     /// `random_access_indicator` on the PCR PID takes a PCR beside it
     /// (§2.4.3.5), which leaves less room.
     pub(super) fn check(&self, on_pcr_pid: bool) -> Result<(), Error> {
-        let length = self.transport_private_data.map_or(0, <[u8]>::len);
-        let limit = transport_private_data_limit(on_pcr_pid && self.random_access_indicator);
-        if length > limit {
-            return Err(Error::TransportPrivateDataLength { length, limit });
+        let beside_pcr = on_pcr_pid && self.random_access_indicator;
+        if self.fits(beside_pcr) {
+            return Ok(());
         }
-        Ok(())
+        Err(Error::TransportPrivateDataLength {
+            length: self.transport_private_data.map_or(0, <[u8]>::len),
+            limit: transport_private_data_limit(beside_pcr),
+        })
     }
 
-    /// Returns whether a PCR fits in the adaptation field of the first
-    /// Transport Packet beside `transport_private_data`
-    pub(super) fn fits_beside_pcr(&self) -> bool {
-        self.transport_private_data.map_or(0, <[u8]>::len) <= transport_private_data_limit(true)
+    /// Returns whether `transport_private_data` fits in the adaptation field
+    /// of the first Transport Packet, with a PCR beside it when `beside_pcr`
+    pub(super) fn fits(&self, beside_pcr: bool) -> bool {
+        self.transport_private_data.map_or(0, <[u8]>::len)
+            <= transport_private_data_limit(beside_pcr)
     }
 
     /// Returns the adaptation field of the first Transport Packet, with
