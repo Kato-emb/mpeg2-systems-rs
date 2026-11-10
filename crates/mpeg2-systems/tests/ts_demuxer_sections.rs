@@ -31,7 +31,7 @@ mod sections;
     reason = "streams are cut at constant offsets well inside their length"
 )]
 mod tests {
-    use mpeg2_systems::psi::section::Section;
+    use mpeg2_systems::psi::section::{self, Section};
     use mpeg2_systems::ts::Pid;
     use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Error, PacketSize};
 
@@ -490,6 +490,101 @@ mod tests {
                 )
             ),
             (Some(seen_section(0x0300, &read(&section))), true)
+        );
+    }
+
+    #[test]
+    fn a_section_in_flight_when_the_pid_is_subscribed_to_is_not_reported_and_the_next_one_is() {
+        let in_flight = private_section(0, true, &[0xAA; 300]);
+        let after = short_section(0x81, &[0xBB; 10]);
+        let (head, tail) = in_flight.split_at(184 - 1);
+        let before = behind_null_packets(&[packet(
+            0x0300,
+            true,
+            0,
+            None,
+            Some(&[&[0x00][..], head].concat()),
+        )]);
+        let next = packet(
+            0x0300,
+            true,
+            1,
+            None,
+            Some(&[&[u8::try_from(tail.len()).unwrap()][..], tail, &after].concat()),
+        );
+        let mut demuxer = Demuxer::new(DemuxerConfig::default());
+        let mut seen = Vec::new();
+        // Why hand over the first byte of the next packet: the packet before
+        // it is cut, and its section started, only once that sync_byte
+        // confirms the grid
+        demuxer.handle_input(&[&before[..], &next[..1]].concat());
+        drain(&mut demuxer, &mut seen);
+        demuxer.subscribe_sections(Pid::try_from(0x0300).unwrap());
+        demuxer.handle_input(&next[1..]);
+        drain(&mut demuxer, &mut seen);
+        demuxer.finish();
+        drain(&mut demuxer, &mut seen);
+        assert_eq!(
+            seen,
+            acquired_then(
+                PacketSize::Standard188,
+                vec![seen_section(0x0300, &read(&after))]
+            )
+        );
+    }
+
+    #[test]
+    fn subscribing_the_cat_pid_keeps_its_resends_unreported() {
+        let descriptors = [0x09, 0x04, 0x0B, 0x00, 0xE1, 0x23];
+        let cat = |version_number: u8| table_section(0x01, 0xFFFF, version_number, &descriptors);
+        let packets: Vec<Vec<u8>> = (0u8..)
+            .zip([cat(4), cat(4), cat(5)])
+            .map(|(continuity_counter, section)| {
+                packet(
+                    0x0001,
+                    true,
+                    continuity_counter,
+                    None,
+                    Some(&[&[0x00][..], &section].concat()),
+                )
+            })
+            .collect();
+        let reported = |version_number: u8| Seen::CaSection {
+            version_number: version(version_number),
+            current_next_indicator: true,
+            section_number: 0,
+            last_section_number: 0,
+            descriptors: descriptors.to_vec(),
+        };
+        assert_eq!(
+            demux_subscribed(&behind_null_packets(&packets), &[0x0001]),
+            acquired_then(PacketSize::Standard188, vec![reported(4), reported(5)])
+        );
+    }
+
+    #[test]
+    fn a_section_of_a_subscribed_pid_that_cannot_be_read_is_reported_as_an_error() {
+        let mut broken = private_section(0, true, &[0xAA; 10]);
+        let crc_start = broken.len() - 4;
+        let computed = u32::from_be_bytes(broken[crc_start..].try_into().unwrap());
+        broken[crc_start + 3] ^= 0x01;
+        let crc_32 = u32::from_be_bytes(broken[crc_start..].try_into().unwrap());
+        let stream = behind_null_packets(&[packet(
+            0x0300,
+            true,
+            0,
+            None,
+            Some(&[&[0x00][..], &broken].concat()),
+        )]);
+        assert_eq!(
+            demux_subscribed(&stream, &[0x0300]),
+            acquired_then(
+                PacketSize::Standard188,
+                vec![Seen::Error(Error::Section {
+                    pid: Pid::try_from(0x0300).unwrap(),
+                    error: section::Error::Crc32 { crc_32, computed },
+                })]
+            )
         );
     }
 }
