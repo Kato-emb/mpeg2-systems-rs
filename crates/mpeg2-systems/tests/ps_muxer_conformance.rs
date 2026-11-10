@@ -31,6 +31,7 @@ mod tests {
     use mpeg2_systems::pes::StreamId;
     use mpeg2_systems::pes::extension::PStdBuffer;
     use mpeg2_systems::ps::mux::{Muxer, MuxerConfig};
+    use mpeg2_systems::ps::psm::ElementaryStream;
     use mpeg2_systems::stream_type::StreamType;
     use mpeg2_systems::time::Timestamp;
 
@@ -83,20 +84,14 @@ mod tests {
         let mut muxer = Muxer::new(MuxerConfig::new(25_200)).unwrap();
         muxer
             .add_stream(
-                StreamId::from(VIDEO),
-                None,
-                StreamType::ISO_IEC_13818_2_VIDEO,
+                ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, StreamId::from(VIDEO)),
                 PStdBuffer::new(true, 224),
-                &[],
             )
             .unwrap();
         muxer
             .add_stream(
-                StreamId::from(AUDIO),
-                None,
-                StreamType::ISO_IEC_11172_3_AUDIO,
+                ElementaryStream::new(StreamType::ISO_IEC_11172_3_AUDIO, StreamId::from(AUDIO)),
                 PStdBuffer::new(false, 32),
-                &[],
             )
             .unwrap();
         let mut stream = Vec::new();

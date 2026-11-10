@@ -3,10 +3,12 @@ use alloc::vec::Vec;
 
 use super::*;
 use crate::descriptor;
+use crate::descriptor::DescriptorLoop;
 use crate::pes::OptionalHeader;
 use crate::ps::psm::{ElementaryStream, ElementaryStreamLoop};
 use crate::ps::{ProgramStreamMap, StreamBound, StreamBoundLoop, SystemHeader, psm};
 use crate::psi::VersionNumber;
+use crate::stream_type::StreamType;
 use crate::time::{ClockReference, Timestamp};
 
 const VIDEO: u8 = 0xe0;
@@ -40,20 +42,14 @@ fn muxer_of(config: MuxerConfig) -> Muxer {
     let mut muxer = Muxer::new(config).unwrap();
     muxer
         .add_stream(
-            StreamId::from(VIDEO),
-            None,
-            StreamType::ISO_IEC_13818_2_VIDEO,
+            ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, StreamId::from(VIDEO)),
             VIDEO_BUFFER,
-            &[],
         )
         .unwrap();
     muxer
         .add_stream(
-            StreamId::from(AUDIO),
-            None,
-            StreamType::ISO_IEC_11172_3_AUDIO,
+            ElementaryStream::new(StreamType::ISO_IEC_11172_3_AUDIO, StreamId::from(AUDIO)),
             AUDIO_BUFFER,
-            &[],
         )
         .unwrap();
     muxer
@@ -306,20 +302,17 @@ fn the_first_pes_packet_of_each_stream_carries_the_p_std_buffer_registered_unles
     let mut private = Muxer::new(MuxerConfig::new(RATE)).unwrap();
     private
         .add_stream(
-            StreamId::from(VIDEO),
-            None,
-            StreamType::ISO_IEC_13818_2_VIDEO,
+            ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, StreamId::from(VIDEO)),
             VIDEO_BUFFER,
-            &[],
         )
         .unwrap();
     private
         .add_stream(
-            StreamId::PRIVATE_STREAM_2,
-            None,
-            StreamType::ISO_IEC_13818_1_PES_PRIVATE_DATA,
+            ElementaryStream::new(
+                StreamType::ISO_IEC_13818_1_PES_PRIVATE_DATA,
+                StreamId::PRIVATE_STREAM_2,
+            ),
             PStdBuffer::new(false, 8),
-            &[],
         )
         .unwrap();
 
@@ -357,13 +350,13 @@ fn the_first_pes_packet_of_each_stream_carries_the_p_std_buffer_registered_unles
 #[test]
 fn a_stream_is_refused_for_its_stream_id_its_extension_a_bound_or_its_descriptors() {
     let add = |muxer: &mut Muxer, value: u8, extension: Option<u8>, es_info: &[u8]| {
-        muxer.add_stream(
-            StreamId::from(value),
-            extension,
+        let mut stream = ElementaryStream::new(
             StreamType::ISO_IEC_13818_1_PES_PRIVATE_DATA,
-            PStdBuffer::new(false, 8),
-            es_info,
+            StreamId::from(value),
         )
+        .with_elementary_stream_info(DescriptorLoop::from(es_info));
+        stream.elementary_stream_id_extension = extension;
+        muxer.add_stream(stream, PStdBuffer::new(false, 8))
     };
     let mut muxer = muxer();
     assert_eq!(
@@ -375,11 +368,8 @@ fn a_stream_is_refused_for_its_stream_id_its_extension_a_bound_or_its_descriptor
             add(&mut muxer, VIDEO, None, &[]),
             add(&mut muxer, 0xbd, None, &[0x0a, 0x05, 0x00]),
             muxer.add_stream(
-                StreamId::from(0xc1),
-                None,
-                StreamType::ISO_IEC_11172_3_AUDIO,
-                PStdBuffer::new(true, 8),
-                &[],
+                ElementaryStream::new(StreamType::ISO_IEC_11172_3_AUDIO, StreamId::from(0xc1)),
+                PStdBuffer::new(true, 8)
             ),
         ],
         [
@@ -429,32 +419,23 @@ fn a_stream_past_32_audio_or_16_video_streams_is_refused() {
     for value in 0xc0..=0xdf {
         muxer
             .add_stream(
-                StreamId::from(value),
-                None,
-                StreamType::ISO_IEC_13818_3_AUDIO,
+                ElementaryStream::new(StreamType::ISO_IEC_13818_3_AUDIO, StreamId::from(value)),
                 AUDIO_BUFFER,
-                &[],
             )
             .unwrap();
     }
     for value in 0xe0..=0xef {
         muxer
             .add_stream(
-                StreamId::from(value),
-                None,
-                StreamType::AVC_VIDEO,
+                ElementaryStream::new(StreamType::AVC_VIDEO, StreamId::from(value)),
                 VIDEO_BUFFER,
-                &[],
             )
             .unwrap();
     }
     let add = |muxer: &mut Muxer, stream_type| {
         muxer.add_stream(
-            StreamId::PRIVATE_STREAM_1,
-            None,
-            stream_type,
+            ElementaryStream::new(stream_type, StreamId::PRIVATE_STREAM_1),
             PStdBuffer::new(true, 8),
-            &[],
         )
     };
     assert_eq!(
@@ -478,11 +459,8 @@ fn a_stream_is_refused_whose_first_pack_would_not_fit_pack_size() {
     let mut muxer = Muxer::new(config).unwrap();
     let add = |muxer: &mut Muxer| {
         muxer.add_stream(
-            StreamId::from(VIDEO),
-            None,
-            StreamType::ISO_IEC_13818_2_VIDEO,
+            ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, StreamId::from(VIDEO)),
             VIDEO_BUFFER,
-            &[],
         )
     };
     // 14 of pack header, 15 of system header, 20 of map, 6 of PES packet
@@ -527,11 +505,12 @@ fn a_stream_of_stream_id_0xfd_is_told_by_the_stream_id_extension_of_its_packets(
     for extension in [0x55, 0x56] {
         muxer
             .add_stream(
-                StreamId::EXTENDED_STREAM_ID,
-                Some(extension),
-                StreamType::ISO_IEC_13818_1_PES_PRIVATE_DATA,
+                ElementaryStream::new(
+                    StreamType::ISO_IEC_13818_1_PES_PRIVATE_DATA,
+                    StreamId::EXTENDED_STREAM_ID,
+                )
+                .with_elementary_stream_id_extension(extension),
                 PStdBuffer::new(false, 8),
-                &[],
             )
             .unwrap();
     }
@@ -627,11 +606,11 @@ fn a_first_pes_packet_without_a_time_stamp_is_refused_on_a_stream_without_an_opt
     let mut muxer = Muxer::new(MuxerConfig::new(RATE)).unwrap();
     muxer
         .add_stream(
-            StreamId::PRIVATE_STREAM_2,
-            None,
-            StreamType::ISO_IEC_13818_1_PES_PRIVATE_DATA,
+            ElementaryStream::new(
+                StreamType::ISO_IEC_13818_1_PES_PRIVATE_DATA,
+                StreamId::PRIVATE_STREAM_2,
+            ),
             PStdBuffer::new(false, 8),
-            &[],
         )
         .unwrap();
     assert_eq!(
@@ -820,11 +799,8 @@ fn a_stream_registered_after_the_first_pes_packet_panics() {
         .handle_pes_packet(&pes_packet(VIDEO, &[0xaa], Some(0)))
         .unwrap();
     let _ = muxer.add_stream(
-        StreamId::from(0xe1),
-        None,
-        StreamType::ISO_IEC_13818_2_VIDEO,
+        ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, StreamId::from(0xe1)),
         VIDEO_BUFFER,
-        &[],
     );
 }
 
@@ -881,11 +857,12 @@ fn a_stream_is_taken_whose_descriptors_fill_the_map_and_refused_one_byte_past_it
     };
     let add = |es_info: &[u8]| {
         muxer().add_stream(
-            StreamId::PRIVATE_STREAM_1,
-            None,
-            StreamType::ISO_IEC_13818_1_PES_PRIVATE_DATA,
+            ElementaryStream::new(
+                StreamType::ISO_IEC_13818_1_PES_PRIVATE_DATA,
+                StreamId::PRIVATE_STREAM_1,
+            )
+            .with_elementary_stream_info(DescriptorLoop::from(es_info)),
             PStdBuffer::new(false, 8),
-            es_info,
         )
     };
     assert_eq!(
@@ -926,11 +903,9 @@ fn a_stream_is_refused_whose_first_pack_would_not_arrive_within_0_7_s() {
     // bytes, and 70 with 14 bytes of descriptors
     let add = |es_info: &[u8]| {
         Muxer::new(MuxerConfig::new(2)).unwrap().add_stream(
-            StreamId::from(VIDEO),
-            None,
-            StreamType::ISO_IEC_13818_2_VIDEO,
+            ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, StreamId::from(VIDEO))
+                .with_elementary_stream_info(DescriptorLoop::from(es_info)),
             VIDEO_BUFFER,
-            es_info,
         )
     };
     let descriptor = |length: u8| {
@@ -959,11 +934,8 @@ fn a_p_std_buffer_size_past_the_bound_registered_is_refused_on_any_pes_packet() 
         let mut muxer = Muxer::new(MuxerConfig::new(RATE)).unwrap();
         muxer
             .add_stream(
-                StreamId::from(VIDEO),
-                None,
-                StreamType::ISO_IEC_13818_2_VIDEO,
+                ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, StreamId::from(VIDEO)),
                 PStdBuffer::new(true, 1),
-                &[],
             )
             .unwrap();
         muxer

@@ -123,6 +123,7 @@
 //! # #[cfg(feature = "alloc")]
 //! # {
 //! use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
+//! use mpeg2_systems::psi::pmt::ElementaryStream;
 //! use mpeg2_systems::stream_type::StreamType;
 //! use mpeg2_systems::time::Timestamp;
 //! use mpeg2_systems::ts::Pid;
@@ -133,8 +134,8 @@
 //! let mut muxer = Muxer::new(MuxerConfig::new())?;
 //! let mut stream = Vec::new();
 //! // Register the program and its stream before the first PES packet
-//! muxer.add_program(1, pmt_pid, None, &[])?;
-//! muxer.add_stream(1, video_pid, StreamType::ISO_IEC_13818_2_VIDEO, &[])?;
+//! muxer.add_program(1, pmt_pid)?;
+//! muxer.add_stream(1, ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, video_pid))?;
 //! // Give an access unit in a PES packet, and take the Transport Packets
 //! let access_unit = vec![0xaa; 1_000];
 //! let mut header = OptionalHeader::new();

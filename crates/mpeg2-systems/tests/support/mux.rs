@@ -3,6 +3,7 @@
 //! stream the muxer writes of them
 
 use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
+use mpeg2_systems::psi::pmt::ElementaryStream;
 use mpeg2_systems::stream_type::StreamType;
 use mpeg2_systems::time::Timestamp;
 use mpeg2_systems::ts::Pid;
@@ -70,12 +71,18 @@ pub(crate) fn inputs() -> Vec<Input> {
 /// A muxer of `config` with program 1, its video and its audio stream
 pub(crate) fn muxer(config: MuxerConfig) -> Muxer {
     let mut muxer = Muxer::new(config).unwrap();
-    muxer.add_program(1, pid(PMT_PID), None, &[]).unwrap();
+    muxer.add_program(1, pid(PMT_PID)).unwrap();
     muxer
-        .add_stream(1, pid(VIDEO_PID), StreamType::ISO_IEC_13818_2_VIDEO, &[])
+        .add_stream(
+            1,
+            ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, pid(VIDEO_PID)),
+        )
         .unwrap();
     muxer
-        .add_stream(1, pid(AUDIO_PID), StreamType::ISO_IEC_13818_3_AUDIO, &[])
+        .add_stream(
+            1,
+            ElementaryStream::new(StreamType::ISO_IEC_13818_3_AUDIO, pid(AUDIO_PID)),
+        )
         .unwrap();
     muxer
 }
