@@ -619,22 +619,19 @@ impl Muxer {
         // on `pid`, so the program has one.
         let pcr_pid = program.pcr_pid().unwrap_or(pid);
         let on_pcr_pid = pcr_pid == pid;
-        carriage.check(on_pcr_pid)?;
         let pcr_due = on_pcr_pid && pcr_times.last() == Some(clock);
-        // Why not wait for the PCR's time on random access: §2.4.3.5 lets
-        // random_access_indicator be set on the PCR PID only in a packet that
-        // carries a PCR. Why not always put the PCR due in the packet: it may
-        // not fit beside transport_private_data, and then goes alone.
-        let pcr_in_packet =
-            on_pcr_pid && (carriage.random_access_indicator || (pcr_due && carriage.fits(true)));
+        let pcr_in_packet = carriage.pcr_in_first_packet(on_pcr_pid, pcr_due)?;
         let adaptation_field =
             carriage.adaptation_field(pcr_in_packet.then(|| pcr_at(config, clock)));
         let pcrs_alone = pcr_times
             .count
             .saturating_sub(u64::from(pcr_due && pcr_in_packet));
+        // Why not count the PCR due at the PES packet, split from it, with the
+        // PCRs that fill a leap: it is sent at the PES packet's time, and is
+        // part of what the PES packet adds to the output.
+        let pcr_split = pcr_due && !pcr_in_packet;
         if pcr_in_packet && !pcr_due {
-            next.pcr_sent_at = clock;
-            next.several_pcrs = true;
+            next = next.with_pcr_sent_at(clock);
         }
 
         section_bodies.clear();
@@ -652,13 +649,17 @@ impl Muxer {
         let as_length = |count: u64| usize::try_from(count).unwrap_or(usize::MAX);
         let filling = psi_length
             .saturating_mul(as_length(psi_times.count))
-            .saturating_add(PACKET_LENGTH.saturating_mul(as_length(pcrs_alone)));
+            .saturating_add(
+                PACKET_LENGTH
+                    .saturating_mul(as_length(pcrs_alone.saturating_sub(u64::from(pcr_split)))),
+            );
         if filling > config.buffer_limit {
             return Err(Error::TimestampGap {
                 gap: clock.timestamp_ticks_since(reached.unwrap_or(clock)),
             });
         }
         let length = filling
+            .saturating_add(if pcr_split { PACKET_LENGTH } else { 0 })
             .saturating_add(
                 packet_count(
                     pes_length,

@@ -17,6 +17,18 @@ pub(super) struct Schedule {
     pub(super) several_pcrs: bool,
 }
 
+impl Schedule {
+    /// Returns the schedule with a PCR sent at `at` beside those sent before
+    /// it, from which the next PCR is due
+    pub(super) const fn with_pcr_sent_at(self, at: SystemTimeClock) -> Self {
+        Self {
+            pcr_sent_at: at,
+            several_pcrs: true,
+            ..self
+        }
+    }
+}
+
 /// The times at which the PAT and the PMT, or the PCR, are sent before a
 /// PES packet: `count` times `step` ticks of the STC apart from `first`
 #[derive(Debug, Clone, Copy)]
