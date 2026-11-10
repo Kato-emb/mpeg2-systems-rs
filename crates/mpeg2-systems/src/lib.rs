@@ -107,7 +107,7 @@
 //! Multiplexing AVC video and AAC audio access units, as an encoder or
 //! another demuxer gives them in the order of their time, into a Transport
 //! Stream through the multiplexing layer, writing it to any
-//! [`std::io::Write`], and reading it back:
+//! `std::io::Write`, and reading it back:
 //!
 //! ```
 //! # #[cfg(feature = "alloc")]
