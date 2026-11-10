@@ -39,8 +39,8 @@
 //!     }],
 //!     &mut programs,
 //! )?;
-//! let mut pat = ProgramAssociationSection::new(1, VersionNumber::try_from(0)?);
-//! pat.programs = ProgramLoop::from(&programs[..]);
+//! let pat = ProgramAssociationSection::new(1, VersionNumber::try_from(0)?)
+//!     .with_programs(ProgramLoop::from(&programs[..]));
 //! writer.write_program_association_section(&pat, &mut stream)?;
 //! // The PMT, its PCR on the video PID
 //! let mut streams = Vec::new();
@@ -48,9 +48,9 @@
 //!     [ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, video_pid)],
 //!     &mut streams,
 //! )?;
-//! let mut pmt = TsProgramMapSection::new(1, VersionNumber::try_from(0)?);
-//! pmt.pcr_pid = Some(video_pid);
-//! pmt.elementary_streams = ElementaryStreamLoop::from(&streams[..]);
+//! let pmt = TsProgramMapSection::new(1, VersionNumber::try_from(0)?)
+//!     .with_pcr_pid(video_pid)
+//!     .with_elementary_streams(ElementaryStreamLoop::from(&streams[..]));
 //! writer.write_ts_program_map_section(pmt_pid, &pmt, &mut stream)?;
 //! // An access unit, with the PCR of the program
 //! let access_unit = vec![0xaa; 1_000];
@@ -474,21 +474,14 @@ impl MuxerConfig {
 /// muxer.finish();
 /// muxer.poll_output(&mut stream);
 ///
-/// // Read back
-/// let mut demuxer = Demuxer::new(DemuxerConfig::default());
+/// // Read back, the demuxer subscribing to the PIDs the PMT names
+/// let mut demuxer = Demuxer::new(DemuxerConfig::default().with_subscribe_elementary_pids(true));
 /// demuxer.handle_input(&stream);
 /// demuxer.finish();
-/// let mut pids = Vec::new();
 /// let mut payloads = Vec::new();
 /// while let Some(event) = demuxer.poll_event() {
-///     if let Event::TsProgramMapSection { section, .. } = &event {
-///         pids.extend(section.elementary_streams.iter().flatten().map(|stream| stream.elementary_pid));
-///     } else if let Event::PesPacket { packet, .. } = &event {
+///     if let Event::PesPacket { packet, .. } = event {
 ///         payloads.push(packet.payload.to_vec());
-///     }
-///     drop(event);
-///     for pid in pids.drain(..) {
-///         demuxer.subscribe_pes(pid);
 ///     }
 /// }
 /// assert_eq!(payloads, [access_unit]);

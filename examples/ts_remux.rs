@@ -5,9 +5,10 @@
 //! cargo run -p examples --example ts_remux -- <in.ts> <out.ts>
 //! ```
 //!
+//! The demuxer subscribes itself to the elementary streams the PMTs name.
 //! Each event lends what it reports from the demuxer: the packet writer takes
-//! the section or the PES packet while the event is alive, the PIDs to
-//! subscribe to are copied out of it, and it is dropped before the next poll.
+//! the section or the PES packet while the event is alive, and it is dropped
+//! before the next poll.
 //!
 //! The demuxer reports a table once for each version, so the output carries
 //! the PAT and each PMT once; how often to send them again is the caller's
@@ -22,7 +23,6 @@ use std::error::Error;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 
-use mpeg2_systems::ts::Pid;
 use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event};
 use mpeg2_systems::ts::mux::PacketWriter;
 
@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let mut reader = BufReader::with_capacity(CHUNK_LENGTH, File::open(input)?);
     let mut writer = BufWriter::new(File::create(output)?);
-    let mut demuxer = Demuxer::new(DemuxerConfig::default());
+    let mut demuxer = Demuxer::new(DemuxerConfig::default().with_subscribe_elementary_pids(true));
     let mut packet_writer = PacketWriter::new();
     let mut out = Vec::new();
 
@@ -84,19 +84,8 @@ fn remux_events(
             packet_writer.write_program_clock_reference(*pid, *program_clock_reference, out)?;
         } else if let Event::PesPacket { pid, packet, .. } = &event {
             packet_writer.write_pes_packet(*pid, packet, None, out)?;
-        }
-        let Event::TsProgramMapSection { pid, section } = event else {
-            continue;
-        };
-        packet_writer.write_ts_program_map_section(pid, &section, out)?;
-        let pids: Vec<Pid> = section
-            .elementary_streams
-            .iter()
-            .flatten()
-            .map(|stream| stream.elementary_pid)
-            .collect();
-        for pid in pids {
-            demuxer.subscribe_pes(pid);
+        } else if let Event::TsProgramMapSection { pid, section } = &event {
+            packet_writer.write_ts_program_map_section(*pid, section, out)?;
         }
     }
     Ok(())

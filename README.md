@@ -21,25 +21,21 @@ Rust: the Transport Stream and the Program Stream.
 No type does I/O: the caller hands the bytes it has read to a demuxer in
 pieces of any length, calls `finish` at the end of the input, and takes the
 events. Handing input over never fails; what the demuxer cannot read is
-reported in an event. The demuxer reads the bytes as the events are taken,
-so a subscription made at a PMT applies from the packet after it. An event
-borrows the bytes it reports from the demuxer, so the PIDs of a PMT are
-copied out of it before they are subscribed to. This one hands over a whole
-file at once.
+reported in an event. With `subscribe_elementary_pids` set, the demuxer
+reassembles the PES packets of the elementary streams each PMT names, as a
+caller subscribing to them at the PMT's event would. This one hands over a
+whole file at once.
 
 ```rust
 use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event};
 
 let stream = std::fs::read("tests/fixtures/188.ts")?;
-let mut demuxer = Demuxer::new(DemuxerConfig::default());
+let mut demuxer = Demuxer::new(DemuxerConfig::default().with_subscribe_elementary_pids(true));
 demuxer.handle_input(&stream);
 demuxer.finish();
 let mut payloads = Vec::new();
 while let Some(event) = demuxer.poll_event() {
-    if let Event::TsProgramMapSection { section, .. } = &event {
-        let pids: Vec<_> = section.elementary_streams.iter().flatten().map(|stream| stream.elementary_pid).collect();
-        pids.into_iter().for_each(|pid| demuxer.subscribe_pes(pid));
-    } else if let Event::PesPacket { packet, .. } = &event {
+    if let Event::PesPacket { packet, .. } = event {
         payloads.push(packet.payload.to_vec());
     }
 }
@@ -58,34 +54,39 @@ The multiplexing layer, `ts::mux::Muxer` and `ps::mux::Muxer`, takes the PES
 packets of the streams registered with it and builds the stream around them:
 the PAT, the PMT and the PCRs of a Transport Stream, or the packs, their
 SCRs, the system header and the program stream map of a Program Stream. The
-caller gives the PES packets in the order of their DTS across the streams;
-both `Muxer`s are driven the same way.
+caller gives the access units it has, from an encoder or another demuxer, in
+the order of their time across the streams.
 
 ```rust
 use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
 use mpeg2_systems::psi::pmt::ElementaryStream;
 use mpeg2_systems::stream_type::StreamType;
 use mpeg2_systems::time::Timestamp;
-use mpeg2_systems::ts::Pid;
-use mpeg2_systems::ts::mux::{Muxer, MuxerConfig};
+use mpeg2_systems::ts::{Pid, mux::{Muxer, MuxerConfig}};
 
-let video = Pid::try_from(0x0100)?;
+let (video, audio) = (Pid::try_from(0x0100)?, Pid::try_from(0x0101)?);
 let mut muxer = Muxer::new(MuxerConfig::new())?;
 muxer.add_program(1, Pid::try_from(0x1000)?)?;
-muxer.add_stream(1, ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, video))?;
-let access_unit = [0xaa; 1_000];
-let mut header = OptionalHeader::new();
-header.pts = Some(Timestamp::try_from(90_000)?);
-let mut packet = PesPacket::new(StreamId::from(0xe0), &access_unit);
-packet.optional_header = Some(header);
+muxer.add_stream(1, ElementaryStream::new(StreamType::AVC_VIDEO, video))?;
+muxer.add_stream(1, ElementaryStream::new(StreamType::ISO_IEC_13818_7_AUDIO, audio))?;
+
+// Your encoder's access units: PID, stream_id and PTS, in time order
+let frame = vec![0u8; 1_000];
+let access_units = [(video, 0xe0, 0), (audio, 0xc0, 0), (audio, 0xc0, 1_920), (video, 0xe0, 3_003)];
 let mut stream = Vec::new();
-muxer.handle_pes_packet(video, &packet)?;
-muxer.poll_output(&mut stream);
+for (pid, stream_id, pts) in access_units {
+    let header = OptionalHeader::new().with_pts(Timestamp::try_from(pts)?);
+    let packet = PesPacket::new(StreamId::from(stream_id), &frame).with_optional_header(header);
+    muxer.handle_pes_packet(pid, &packet)?;
+    muxer.poll_output(&mut stream); // write `stream` out and clear it as it grows
+}
 muxer.finish();
 muxer.poll_output(&mut stream);
-assert_eq!(stream.len() % 188, 0);
 Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+The crate doc of `mpeg2-systems` carries a version that writes to a
+`std::io::Write`.
 
 ## Writing element by element
 

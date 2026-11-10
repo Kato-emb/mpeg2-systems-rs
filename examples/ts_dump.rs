@@ -4,9 +4,8 @@
 //! cargo run -p examples --example ts_dump -- crates/mpeg2-systems/tests/fixtures/188.ts
 //! ```
 //!
-//! The PIDs of the elementary streams are learnt from the PMTs the stream
-//! carries: each `TsProgramMapSection` event names them, and the demuxer is
-//! subscribed to them once that event is dropped, as the event borrows it.
+//! The demuxer subscribes itself to the elementary streams the PMTs the
+//! stream carries name, so the PES packets of each come as events.
 //!
 //! Each event is a numbered heading with its main fields in aligned columns,
 //! the entries it lists as a table under it, and a blank line before the
@@ -34,7 +33,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .nth(1)
         .ok_or("usage: ts_dump <Transport Stream file>")?;
     let mut reader = BufReader::with_capacity(CHUNK_LENGTH, File::open(path)?);
-    let mut demuxer = Demuxer::new(DemuxerConfig::default());
+    let mut demuxer = Demuxer::new(DemuxerConfig::default().with_subscribe_elementary_pids(true));
     let mut printed = 0;
 
     loop {
@@ -68,18 +67,6 @@ fn print_events(demuxer: &mut Demuxer, printed: &mut usize) {
             &lines,
         );
         *printed = printed.saturating_add(1);
-        let Event::TsProgramMapSection { section, .. } = event else {
-            continue;
-        };
-        let pids: Vec<Pid> = section
-            .elementary_streams
-            .iter()
-            .flatten()
-            .map(|stream| stream.elementary_pid)
-            .collect();
-        for pid in pids {
-            demuxer.subscribe_pes(pid);
-        }
     }
 }
 
