@@ -17,7 +17,8 @@ const LONGEST_SCR_INTERVAL: u64 = 18_900_000;
 /// their bytes and the `stream_id` of their PES packets: `longest` each but
 /// the last, which takes the rest, the one before it giving up what the
 /// last needs to make a pack header; a pack header carries the bytes past
-/// it as stuffing up to 7, and a PES packet of padding past them
+/// it as stuffing up to 7, and past them as many PES packets of padding as
+/// the longest PES packet, 65 541 bytes, needs
 #[expect(
     clippy::arithmetic_side_effects,
     reason = "the lengths are those of a few packs, written as the rule reads"
@@ -34,7 +35,12 @@ fn padding_packs(bytes: usize, longest: usize) -> Vec<(usize, Vec<u8>)> {
     lengths
         .into_iter()
         .map(|length| {
-            let stream_ids = if length > 14 + 7 { vec![0xbe] } else { vec![] };
+            let padding = length - 14;
+            let stream_ids = if padding > 7 {
+                vec![0xbe; padding.div_ceil(65_541)]
+            } else {
+                vec![]
+            };
             (length, stream_ids)
         })
         .collect()
@@ -151,12 +157,14 @@ fn the_time_before_a_pes_packet_is_filled_with_padding_up_to_its_time() {
 }
 
 #[test]
-fn padding_past_the_longest_pes_packet_is_cut_into_packs_of_a_pack_header_and_one() {
+fn a_pack_of_padding_past_the_longest_pes_packet_carries_more_than_one_padding_packet() {
     let (stream, padding) = padded_across_a_second_and_a_half(fixed_rate().with_pack_size(100_000));
 
+    // Packs of padding up to pack_size, past the 14 + 65 541 bytes of a pack
+    // header and the longest PES packet
     let packs = carried(&stream);
     let mut expected = vec![(packs[0].length, vec![VIDEO])];
-    expected.extend(padding_packs(padding, 14 + 65_541));
+    expected.extend(padding_packs(padding, 100_000));
     expected.push((packs.last().unwrap().length, vec![VIDEO]));
     assert_eq!(pack_shapes(&stream), expected);
 }

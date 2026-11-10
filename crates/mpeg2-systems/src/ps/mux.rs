@@ -92,10 +92,10 @@ const PROGRAM_MUX_RATE_LIMIT: u32 = 1 << 22;
 /// until `poll_output` is called; after [`finish`](Self::finish),
 /// `poll_output` gives all that is held, then `MPEG_program_end_code`.
 ///
-/// - A pack is a pack header and one PES packet, at most
-///   [`MuxerConfig::pack_size`] bytes and at most the bytes that arrive
-///   within 0.7 s at [`MuxerConfig::program_mux_rate`]. A PES packet too
-///   long for one pack is
+/// - A pack is at most [`MuxerConfig::pack_size`] bytes and at most the
+///   bytes that arrive within 0.7 s at [`MuxerConfig::program_mux_rate`].
+///   It carries one PES packet given, or at a fixed rate padding
+///   ([`MuxerConfig::fixed_rate`]). A PES packet too long for one pack is
 ///   split into several, each in a pack of its own: the first has the
 ///   optional header given, the ones after it the same header without its
 ///   PTS, DTS and ESCR.

@@ -5,7 +5,6 @@
 
 use core::time::Duration;
 
-use crate::pes;
 use crate::ps::pack_header;
 use crate::time::{SYSTEM_CLOCK_FREQUENCY, SystemTimeClock};
 
@@ -140,22 +139,20 @@ impl VariableRate {
 }
 
 /// The SCRs of a fixed rate: each on [`Line`], one pack after another, with
-/// packs of padding at most `longest_padding` bytes before a PES packet
+/// packs of padding at most `largest_pack` bytes before a PES packet
 #[derive(Debug, Clone, Copy)]
 pub(super) struct FixedRate {
     line: Line,
-    longest_padding: usize,
+    largest_pack: usize,
 }
 
 impl FixedRate {
-    /// Returns the fixed rate `program_mux_rate`, its packs of padding at
-    /// most `largest_pack` bytes and no longer than a pack header and the
-    /// longest PES packet
-    pub(super) fn new(program_mux_rate: u32, largest_pack: usize) -> Self {
+    /// Returns the fixed rate `program_mux_rate`, its packs at most
+    /// `largest_pack` bytes
+    pub(super) const fn new(program_mux_rate: u32, largest_pack: usize) -> Self {
         Self {
             line: Line::new(program_mux_rate),
-            longest_padding: largest_pack
-                .min(pack_header::FIXED_LENGTH.saturating_add(pes::LONGEST_PES_PACKET)),
+            largest_pack,
         }
     }
 
@@ -186,7 +183,7 @@ impl FixedRate {
             .line
             .reached(before, time)
             .checked_sub(before.next_offset())?;
-        let layout = padding_layout(missing, as_u64(self.longest_padding))?;
+        let layout = padding_layout(missing, as_u64(self.largest_pack))?;
         Some(Gap::Padding {
             before,
             line: self.line,

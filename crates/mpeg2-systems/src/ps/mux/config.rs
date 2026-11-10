@@ -74,10 +74,10 @@ pub struct MuxerConfig {
     ///
     /// A pack of padding is at most the most bytes of a pack
     /// ([`pack_size`](Self::pack_size), or fewer where fewer arrive within
-    /// 0.7 s at `program_mux_rate`) and at most a pack header and the longest
-    /// PES packet, with `stuffing_byte`s where 7 or fewer fill it (§2.5.3.4)
-    /// and a PES packet of `padding_stream` past them (§2.4.3.6). The system
-    /// header names no bound for `padding_stream`.
+    /// 0.7 s at `program_mux_rate`), with `stuffing_byte`s where 7 or fewer
+    /// fill it (§2.5.3.4) and PES packets of `padding_stream` past them
+    /// (§2.4.3.6), as many as the 65 535 bytes of `PES_packet_length` need.
+    /// The system header names no bound for `padding_stream`.
     pub fixed_rate: bool,
 }
 

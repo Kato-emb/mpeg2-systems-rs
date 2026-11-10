@@ -251,4 +251,24 @@ mod tests {
             .count();
         assert!(padding > 0, "{padding} padding packets");
     }
+
+    #[test]
+    #[ignore = "runs ffprobe from FFmpeg"]
+    fn the_pes_packets_read_in_ffprobe_as_given_at_a_fixed_rate_in_packs_past_the_longest_pes_packet()
+     {
+        let stream = multiplex_read_as_given(
+            "ps_muxer_fixed_rate_large_packs.mpg",
+            MuxerConfig::new(25_200)
+                .with_fixed_rate(true)
+                .with_pack_size(200_000),
+            &inputs_at(|index| 90_000 + index * STEP + if index >= 50 { 180_000 } else { 0 }),
+            |_, _| {},
+        );
+
+        let padding = stream
+            .windows(4)
+            .filter(|code| code == &[0, 0, 1, 0xbe])
+            .count();
+        assert!(padding > 0, "{padding} padding packets");
+    }
 }
