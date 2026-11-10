@@ -159,11 +159,12 @@ impl SectionReassembly {
             .unwrap_or_default()
     }
 
-    /// Drops every section of every PID, those completed and those in flight,
-    /// keeping the PIDs reassembled and the subscriptions
+    /// Drops the section in flight on every PID, keeping the sections
+    /// completed, which the queued events lend, the PIDs reassembled and the
+    /// subscriptions
     pub(super) fn discard_in_flight(&mut self) {
         for section_pid in self.pids.values_mut() {
-            section_pid.reassembler.clear();
+            section_pid.reassembler.discard_in_flight();
         }
     }
 
@@ -209,12 +210,6 @@ impl SectionReassembler {
     #[cfg(test)]
     pub(super) fn buffer_len(&self) -> usize {
         self.buffer.len()
-    }
-
-    /// Drops every byte, the completed sections and the section in flight
-    pub(super) fn clear(&mut self) {
-        self.buffer.clear();
-        self.in_flight_start = 0;
     }
 
     /// Drops the section in flight

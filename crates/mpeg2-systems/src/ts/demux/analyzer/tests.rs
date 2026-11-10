@@ -13,9 +13,7 @@ use crate::ts::demux::tests::packet;
 use crate::ts::demux::{Demuxer, DemuxerConfig, Error, Event, PacketSize};
 
 // Why not test through poll_event: a section kept in the buffer changes no
-// event, only the memory the demuxer holds, so the test reads the buffer. Why
-// no finish between the inputs: the end of input clears the buffer, which
-// would hide a buffer that grows.
+// event, only the memory the demuxer holds, so the test reads the buffer.
 #[test]
 fn a_section_that_fails_to_read_does_not_grow_the_buffer_input_after_input() {
     // A CAT section of 203 bytes whose CRC_32 fails, across two packets

@@ -211,3 +211,75 @@ fn a_section_across_packets_is_lent_from_the_buffer_until_the_next_push() {
     reassembler.push(false, &[], &mut |_, _| {});
     assert_eq!(reassembler, SectionReassembler::new());
 }
+
+/// Reassembly of PID 0x0300, subscribed to, after a section across two
+/// packets completed and another started: the section completed and where
+/// it lies
+fn completed_across_packets_with_one_in_flight(
+    reassembly: &mut SectionReassembly,
+) -> (Vec<u8>, Vec<Completed>) {
+    let pid = Pid::try_from(0x0300).unwrap();
+    let bytes = section(0x80, &[0xAA; 30]);
+    let in_flight = section(0x80, &[0xBB; 300]);
+    let (head, tail) = bytes.split_at(10);
+    reassembly.subscribe(pid);
+    let reassembler = reassembly.reassembler_mut(pid).unwrap();
+    reassembler.push(true, &unit_start(&[], head), &mut |_, _| {});
+    let mut lent = Vec::new();
+    reassembler.push(
+        true,
+        &unit_start(tail, in_flight.split_at(50).0),
+        &mut |completed, _| lent.push(completed),
+    );
+    (bytes, lent)
+}
+
+#[test]
+fn discarding_in_flight_keeps_the_sections_lent_and_drops_the_one_in_flight() {
+    let pid = Pid::try_from(0x0300).unwrap();
+    let mut reassembly = SectionReassembly::new();
+    let (bytes, lent) = completed_across_packets_with_one_in_flight(&mut reassembly);
+    reassembly.discard_in_flight();
+    assert_eq!(
+        (
+            lent,
+            reassembly.bytes(pid, 0..bytes.len()).to_vec(),
+            reassembly.buffer_len(pid)
+        ),
+        (
+            vec![Completed::Reassembled(0)],
+            bytes.clone(),
+            Some(bytes.len())
+        )
+    );
+}
+
+#[test]
+fn the_sections_kept_by_discarding_in_flight_leave_the_next_section_of_the_pid_as_it_is() {
+    let pid = Pid::try_from(0x0300).unwrap();
+    let mut reassembly = SectionReassembly::new();
+    completed_across_packets_with_one_in_flight(&mut reassembly);
+    reassembly.discard_in_flight();
+    let next = section(0x81, &[0xCC; 200]);
+    let (head, tail) = next.split_at(150);
+    let reassembler = reassembly.reassembler_mut(pid).unwrap();
+    let mut completed = Vec::new();
+    for (payload_unit_start_indicator, payload) in
+        [(true, unit_start(&[], head)), (false, tail.to_vec())]
+    {
+        reassembler.push(
+            payload_unit_start_indicator,
+            &payload,
+            &mut |at, section| {
+                completed.push((at, section.to_vec()));
+            },
+        );
+    }
+    assert_eq!(
+        (completed, reassembly.buffer_len(pid)),
+        (
+            vec![(Completed::Reassembled(0), next.clone())],
+            Some(next.len())
+        )
+    );
+}

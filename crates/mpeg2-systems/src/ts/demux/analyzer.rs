@@ -126,10 +126,10 @@ impl PacketAnalyzer {
         self.reset();
     }
 
-    /// Drops the continuity history, every section and every PES packet in
-    /// flight, once no event is queued; the PIDs learned from a PAT, the PAT
-    /// sections gathered, the versions reported and the PES subscriptions
-    /// stay
+    /// Drops the continuity history, and the section and the PES packet in
+    /// flight on every PID; the bytes the queued events lend, the PIDs
+    /// learned from a PAT, the PAT sections gathered, the versions reported
+    /// and the subscriptions stay
     pub(super) fn reset(&mut self) {
         // Why not forget the versions reported, nor the PAT sections
         // gathered: after a resynchronization or across an end of input, the
