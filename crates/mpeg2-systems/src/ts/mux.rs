@@ -93,12 +93,14 @@ use schedule::{Schedule, Times};
 /// The longest time from one PCR to the next, ISO/IEC 13818-1 §2.7.2
 const LONGEST_PCR_INTERVAL: Duration = Duration::from_millis(100);
 
+mod carriage;
 mod config;
 mod error;
 mod packet_writer;
 mod program_definition;
 mod schedule;
 
+pub use carriage::PesPacketCarriage;
 pub use config::MuxerConfig;
 pub use error::Error;
 pub use packet_writer::PacketWriter;
@@ -455,11 +457,76 @@ impl Muxer {
     /// # Panics
     ///
     /// Panics if [`finish`](Self::finish) has been called.
+    pub fn handle_pes_packet(&mut self, pid: Pid, packet: &PesPacket<'_>) -> Result<(), Error> {
+        self.handle_pes_packet_with_carriage(pid, packet, &PesPacketCarriage::new())
+    }
+
+    /// Takes `packet`, a PES packet of the stream on `pid`, as
+    /// [`handle_pes_packet`](Self::handle_pes_packet) does, carried as
+    /// `carriage` says
+    ///
+    /// With `random_access_indicator` set on the PCR PID, the muxer sends a
+    /// PCR in the first Transport Packet, since ISO/IEC 13818-1 §2.4.3.5 sets
+    /// the indicator on the PCR PID only in a packet that carries one; the
+    /// next PCR is [`MuxerConfig::pcr_interval`] after it. A PCR due at the
+    /// first Transport Packet that does not fit beside
+    /// `transport_private_data` goes, at the same value, in a Transport
+    /// Packet of its own on the PCR PID before it. With
+    /// [`PesPacketCarriage::new`], the output is that of `handle_pes_packet`.
+    ///
+    /// ```
+    /// use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
+    /// use mpeg2_systems::psi::pmt::ElementaryStream;
+    /// use mpeg2_systems::stream_type::StreamType;
+    /// use mpeg2_systems::time::Timestamp;
+    /// use mpeg2_systems::ts::Pid;
+    /// use mpeg2_systems::ts::mux::{Muxer, MuxerConfig, PesPacketCarriage};
+    /// use mpeg2_systems::ts::packet::TransportPacket;
+    ///
+    /// let (pmt_pid, video_pid) = (Pid::try_from(0x1000)?, Pid::try_from(0x0100)?);
+    /// let mut muxer = Muxer::new(MuxerConfig::new())?;
+    /// muxer.add_program(1, pmt_pid)?;
+    /// muxer.add_stream(1, ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, video_pid))?;
+    ///
+    /// // An access unit that starts a video sequence, a point to begin decoding at
+    /// let access_unit = vec![0xaa; 1_000];
+    /// let packet = PesPacket::new(StreamId::from(0xe0), &access_unit)
+    ///     .with_optional_header(OptionalHeader::new().with_pts(Timestamp::try_from(90_000)?));
+    /// let carriage = PesPacketCarriage::new().with_random_access_indicator(true);
+    /// muxer.handle_pes_packet_with_carriage(video_pid, &packet, &carriage)?;
+    /// let mut stream = Vec::new();
+    /// muxer.poll_output(&mut stream);
+    ///
+    /// // The first Transport Packet of the PES packet, after the PAT and the PMT
+    /// let first = TransportPacket::read(&stream[2 * 188..3 * 188])?;
+    /// let field = first.adaptation_field.unwrap();
+    /// assert!(field.random_access_indicator && field.program_clock_reference.is_some());
+    /// # Ok::<(), Box<dyn core::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of `handle_pes_packet`, and
+    ///
+    /// * [`TransportPrivateDataLength`](Error::TransportPrivateDataLength):
+    ///   `transport_private_data` is longer than the 180 bytes the adaptation
+    ///   field of a Transport Packet with a payload holds, or, with
+    ///   `random_access_indicator` set on the PCR PID, than the 174 it holds
+    ///   beside the PCR (§2.4.3.5).
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`finish`](Self::finish) has been called.
     #[expect(
         clippy::panic_in_result_fn,
         reason = "a call out of order is the caller's mistake, which panics as documented"
     )]
-    pub fn handle_pes_packet(&mut self, pid: Pid, packet: &PesPacket<'_>) -> Result<(), Error> {
+    pub fn handle_pes_packet_with_carriage(
+        &mut self,
+        pid: Pid,
+        packet: &PesPacket<'_>,
+        carriage: &PesPacketCarriage<'_>,
+    ) -> Result<(), Error> {
         assert!(!self.finished, "a PES packet is given after finish");
         let Some((program, stream_index)) = self.program.as_ref().and_then(|program| {
             let index = program
@@ -501,7 +568,8 @@ impl Muxer {
         }
         let timestamp = header.and_then(|header| header.dts.or(header.pts));
         let reached = program.latest_timestamp();
-        let (clock, time, psi_times, pcr_times, next) = match (schedule.zip(reached), timestamp) {
+        let (clock, time, psi_times, pcr_times, mut next) = match (schedule.zip(reached), timestamp)
+        {
             (None, Some(timestamp)) => {
                 let clock = SystemTimeClock::first(timestamp);
                 let next = Schedule {
@@ -550,13 +618,23 @@ impl Muxer {
         // Why not refuse a program without a PCR PID: a stream is registered
         // on `pid`, so the program has one.
         let pcr_pid = program.pcr_pid().unwrap_or(pid);
-        let pcr_in_packet = pcr_pid == pid && pcr_times.last() == Some(clock);
-        let adaptation_field = pcr_in_packet.then(|| {
-            let mut adaptation_field = AdaptationField::new();
-            adaptation_field.program_clock_reference = Some(pcr_at(config, clock));
-            adaptation_field
-        });
-        let pcrs_alone = pcr_times.count.saturating_sub(u64::from(pcr_in_packet));
+        carriage.check(pcr_pid == pid)?;
+        let pcr_due_in_packet = pcr_pid == pid && pcr_times.last() == Some(clock);
+        // Why not wait for the PCR's time: §2.4.3.5 lets random_access_indicator
+        // be set on the PCR PID only in a packet that carries a PCR.
+        let pcr_for_random_access =
+            pcr_pid == pid && carriage.random_access_indicator && !pcr_due_in_packet;
+        let pcr_due_shares_packet = pcr_due_in_packet && carriage.fits_beside_pcr();
+        let adaptation_field = carriage.adaptation_field(
+            (pcr_due_shares_packet || pcr_for_random_access).then(|| pcr_at(config, clock)),
+        );
+        let pcrs_alone = pcr_times
+            .count
+            .saturating_sub(u64::from(pcr_due_shares_packet));
+        if pcr_for_random_access {
+            next.pcr_sent_at = clock;
+            next.several_pcrs = true;
+        }
 
         section_bodies.clear();
         let sections = if psi_times.count > 0 {
@@ -626,6 +704,7 @@ impl Muxer {
                 Ok(())
             },
             adaptation_field,
+            carriage.transport_priority,
             Stuffing::AdaptationField,
             pending,
         )?;

@@ -130,6 +130,7 @@ impl PacketWriter {
                     .map_err(|error| Error::PesPacket { error })
             },
             adaptation_field,
+            false,
             Stuffing::AdaptationField,
             out,
         )
@@ -325,18 +326,21 @@ impl PacketWriter {
                 write_section(out)
             },
             None,
+            false,
             Stuffing::Payload,
             out,
         )
     }
 
     /// Appends the payload unit `write_unit` writes as Transport Packets of
-    /// `pid`, the first with `adaptation_field`, and returns how many it wrote
+    /// `pid`, each with `transport_priority`, the first with
+    /// `adaptation_field`, and returns how many it wrote
     pub(super) fn write_payload_unit(
         &mut self,
         pid: Pid,
         write_unit: impl FnOnce(&mut Vec<u8>) -> Result<(), Error>,
         mut adaptation_field: Option<AdaptationField<'_>>,
+        transport_priority: bool,
         stuffing: Stuffing,
         out: &mut Vec<u8>,
     ) -> Result<usize, Error> {
@@ -384,6 +388,7 @@ impl PacketWriter {
 
                 let mut packet = TransportPacket::new(pid, continuity_counter);
                 packet.payload_unit_start_indicator = written == 0;
+                packet.transport_priority = transport_priority;
                 packet.adaptation_field = adaptation_field.take();
                 packet.payload = Some(payload.split_at(payload_length).0);
                 packet.write(out).map_err(|error| Error::Packet { error })?;

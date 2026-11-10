@@ -114,6 +114,15 @@ pub enum Error {
         /// The bytes the output held would grow to
         length: usize,
     },
+    /// The `transport_private_data` of a
+    /// [`PesPacketCarriage`](super::PesPacketCarriage) is longer than the
+    /// adaptation field of the PES packet's first Transport Packet holds
+    TransportPrivateDataLength {
+        /// The bytes of `transport_private_data` given
+        length: usize,
+        /// The most bytes the adaptation field holds
+        limit: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -188,6 +197,10 @@ impl fmt::Display for Error {
                 formatter,
                 "the output held would grow to {length} bytes, past buffer_limit"
             ),
+            Self::TransportPrivateDataLength { length, limit } => write!(
+                formatter,
+                "transport_private_data of {length} bytes is longer than the {limit} bytes the adaptation field holds"
+            ),
         }
     }
 }
@@ -211,7 +224,8 @@ impl core::error::Error for Error {
             | Self::MissingPts { .. }
             | Self::DecreasingTimestamp { .. }
             | Self::TimestampGap { .. }
-            | Self::BufferFull { .. } => None,
+            | Self::BufferFull { .. }
+            | Self::TransportPrivateDataLength { .. } => None,
         }
     }
 }

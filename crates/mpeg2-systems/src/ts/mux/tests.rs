@@ -647,6 +647,7 @@ fn the_packets_counted_are_those_a_payload_unit_is_cut_into() {
                             Ok(())
                         },
                         field,
+                        false,
                         Stuffing::AdaptationField,
                         &mut out,
                     )
@@ -1209,3 +1210,5 @@ fn a_config_built_from_new_and_every_with_method_equals_one_with_every_field_ass
 
     assert_eq!(built, assigned);
 }
+
+mod carriage;
