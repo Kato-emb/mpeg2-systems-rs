@@ -95,15 +95,16 @@ pub(super) fn check_map_length<'stream>(
     .map_err(|error| Error::ProgramStreamMap { error })
 }
 
-/// Appends the system header of `streams`, `rate_bound`
-/// `program_mux_rate`, and the program stream map of `program_stream_info`
-/// and `streams`, `program_stream_map_version` `version`, to `out`, writing
-/// their loops in `entries`
+/// Appends the system header of `streams`, `rate_bound` the
+/// `program_mux_rate` of `config` and `fixed_flag` its `fixed_rate`, and the
+/// program stream map of `program_stream_info` and `streams`,
+/// `program_stream_map_version` `version`, to `out`, writing their loops in
+/// `entries`
 pub(super) fn write_headers(
     streams: &[Stream],
     program_stream_info: &[u8],
     version: VersionNumber,
-    program_mux_rate: u32,
+    config: &MuxerConfig,
     entries: &mut Vec<u8>,
     out: &mut Vec<u8>,
 ) -> Result<(), Error> {
@@ -116,7 +117,8 @@ pub(super) fn write_headers(
     entries.clear();
     StreamBoundLoop::write_from(streams.iter().map(Stream::stream_bound), entries)
         .map_err(|error| Error::SystemHeader { error })?;
-    let mut system_header = SystemHeader::new(program_mux_rate, audio_bound, video_bound);
+    let mut system_header = SystemHeader::new(config.program_mux_rate, audio_bound, video_bound)
+        .with_fixed_flag(config.fixed_rate);
     system_header.stream_bounds = StreamBoundLoop::from(entries.as_slice());
     writer.write_system_header(&system_header, out)?;
     entries.clear();
@@ -324,7 +326,7 @@ pub(super) fn check_headers(
         streams,
         program_stream_info,
         version,
-        config.program_mux_rate,
+        config,
         &mut Vec::new(),
         &mut headers,
     )?;

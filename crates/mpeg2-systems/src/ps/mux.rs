@@ -15,8 +15,8 @@
 //!
 //! The crate does not write a program stream directory. [`PackWriter`]
 //! writes padding and pack stuffing as the caller gives them, and [`Muxer`]
-//! writes neither. The example writes through [`PackWriter`]; [`Muxer`] has
-//! its own.
+//! writes them at a fixed rate alone. The example writes through
+//! [`PackWriter`]; [`Muxer`] has its own.
 //!
 //! ```
 //! use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
@@ -65,7 +65,7 @@ use crate::ps::{PackHeader, pack_header, system_header};
 use crate::psi::VersionNumber;
 use crate::time::SystemTimeClock;
 use pack_writer::PesPacketPieces;
-use schedule::{Filling, Pack, bytes_within_longest_scr_interval};
+use schedule::{Gap, Pack, PackFill, bytes_within_longest_scr_interval, pack_fill};
 use stream_definition::Stream;
 
 mod config;
@@ -130,17 +130,20 @@ const PROGRAM_MUX_RATE_LIMIT: u32 = 1 << 22;
 ///   carries the rest of a split PES packet takes the latter.
 /// - A leap of the time stamps is filled with packs of a pack header alone,
 ///   so that consecutive SCRs are never more than 0.7 s apart (§2.7.1).
+/// - At a [`MuxerConfig::fixed_rate`], the SCR of each pack is on the line
+///   of §2.5.3.6 equations 2-22 and 2-23 through the first, the bytes of one
+///   pack after another arriving at `program_mux_rate`, and the time before
+///   a PES packet is filled with packs of padding in place of a leap.
 ///
 /// The muxer does not guarantee that the stream fits the buffers of the
 /// P-STD.
-/// It does not keep a fixed bitrate; `fixed_flag` is `'0'`.
+/// It writes padding and pack stuffing only at a fixed rate.
 /// It does not pace the output in real time; the caller sends it at the pace
 /// its SCRs give.
 /// It does not check the order of the PES packets across the streams; the
 /// caller gives them in the order of their DTS.
 /// It does not send a program stream map ahead of when it applies;
 /// `current_next_indicator` is `'1'`.
-/// It does not write padding or pack stuffing.
 ///
 /// ```
 /// use mpeg2_systems::pes::extension::PStdBuffer;
@@ -437,7 +440,8 @@ impl Muxer {
     ///   [`MuxerConfig::pack_size`], or in the bytes that arrive within 0.7 s
     ///   at [`MuxerConfig::program_mux_rate`].
     /// * [`TimestampGap`](Error::TimestampGap): the packs that fill the leap
-    ///   since the PES packet before do not fit
+    ///   since the PES packet before, or at a fixed rate the packs of padding
+    ///   before it, do not fit
     ///   [`MuxerConfig::buffer_limit`], however much `poll_output` takes.
     /// * [`BufferFull`](Error::BufferFull): the packs would grow the output
     ///   held past [`MuxerConfig::buffer_limit`]; once `poll_output` has
@@ -562,19 +566,15 @@ impl Muxer {
             ..
         } = self;
         let pack_header_length = pack_header::FIXED_LENGTH;
-        let filling = last_pack.zip(time).and_then(|(last_pack, time)| {
-            Filling::across(last_pack, time, config.program_mux_rate)
-        });
-        let before = filling
-            .map(|filling| Pack {
-                at: filling.last(),
-                length: pack_header_length,
-            })
-            .or(*last_pack);
+        let gap = last_pack
+            .zip(time)
+            .and_then(|(last, time)| Gap::before(last, time, config));
         // Why not `None` as the earliest: before the first pack there is no
         // pack to follow, and the first PES packet has a time.
-        let first_at = before
-            .map(|pack| pack.arrived(config.program_mux_rate))
+        let first_at = gap
+            .map(Gap::last)
+            .or(*last_pack)
+            .map(|pack| pack.following(config))
             .max(time);
         let headers_due = headers_sent_at.zip(first_at).is_none_or(|(sent_at, at)| {
             at.ticks_since(sent_at) >= SystemTimeClock::ticks_in(config.header_interval)
@@ -585,7 +585,7 @@ impl Muxer {
                 streams,
                 program_stream_info,
                 *map_version,
-                config.program_mux_rate,
+                config,
                 header_loops,
                 headers,
             )?;
@@ -604,19 +604,15 @@ impl Muxer {
             return Err(Error::PackLength { length });
         }
         let pieces = PesPacketPieces::new(packet, longest, longest_continued);
-        let filling_length = filling.map_or(0, |filling| {
-            usize::try_from(filling.count)
-                .unwrap_or(usize::MAX)
-                .saturating_mul(pack_header_length)
-        });
-        if filling_length > config.buffer_limit {
+        let gap_length = gap.map_or(0, |gap| usize::try_from(gap.bytes()).unwrap_or(usize::MAX));
+        if gap_length > config.buffer_limit {
             return Err(Error::TimestampGap {
                 gap: clock
                     .zip(time)
                     .map_or(0, |(clock, time)| time.timestamp_ticks_since(clock)),
             });
         }
-        let length = filling_length
+        let length = gap_length
             .saturating_add(headers.len())
             .saturating_add(pieces.len().saturating_mul(pack_header_length))
             .saturating_add(pieces.encoded_len())
@@ -630,28 +626,32 @@ impl Muxer {
         let mux_delay = config.mux_delay;
         let mut written = *last_pack;
         write_or_truncate(pending, |out| {
-            let write_pack_header = |at: SystemTimeClock, out: &mut Vec<u8>| {
-                let header = PackHeader::new(at.to_clock_reference(mux_delay), program_mux_rate);
+            let write_pack_header = |at: SystemTimeClock, stuffing: u8, out: &mut Vec<u8>| {
+                let header = PackHeader::new(at.to_clock_reference(mux_delay), program_mux_rate)
+                    .with_pack_stuffing_length(stuffing);
                 writer.write_pack_header(&header, out)
             };
-            for at in filling.into_iter().flat_map(Filling::iter) {
-                write_pack_header(at, out)?;
-                written = Some(Pack {
-                    at,
-                    length: pack_header_length,
-                });
+            for pack in gap.into_iter().flat_map(Gap::iter) {
+                match pack_fill(pack.length) {
+                    PackFill::Stuffing(stuffing) => write_pack_header(pack.at, stuffing, out)?,
+                    PackFill::PaddingPacket(pes_packet_length) => {
+                        write_pack_header(pack.at, 0, out)?;
+                        writer.write_padding_packet(pes_packet_length, out);
+                    }
+                }
+                written = Some(pack);
             }
             for (index, piece) in pieces.enumerate() {
                 let at = if index == 0 {
                     first_at
                 } else {
-                    written.map(|pack| pack.arrived(program_mux_rate))
+                    written.map(|pack| pack.following(config))
                 };
                 let Some(at) = at else {
                     return Err(missing_pts);
                 };
                 let start = out.len();
-                write_pack_header(at, out)?;
+                write_pack_header(at, 0, out)?;
                 if index == 0 {
                     out.extend_from_slice(headers);
                 }
@@ -659,6 +659,7 @@ impl Muxer {
                 written = Some(Pack {
                     at,
                     length: out.len().saturating_sub(start),
+                    offset: written.map_or(0, Pack::next_offset),
                 });
             }
             Ok(())

@@ -168,6 +168,21 @@ impl PackWriter {
         Ok(written)
     }
 
+    /// Appends a PES packet of `padding_stream` whose `PES_packet_length` is
+    /// `pes_packet_length`, its `padding_byte`s 0xFF (§2.4.3.6, §2.4.3.7)
+    pub(crate) fn write_padding_packet(&self, pes_packet_length: u16, out: &mut Vec<u8>) {
+        // Why not `PesPacket::write`: it takes the padding bytes as a slice,
+        // which the muxer would have to hold.
+        let start_code =
+            (pes::PACKET_START_CODE_PREFIX << 8) | u32::from(StreamId::PADDING_STREAM.get());
+        out.extend_from_slice(&start_code.to_be_bytes());
+        out.extend_from_slice(&pes_packet_length.to_be_bytes());
+        out.resize(
+            out.len().saturating_add(usize::from(pes_packet_length)),
+            0xff,
+        );
+    }
+
     /// Appends `MPEG_program_end_code`, which ends the Program Stream, to
     /// `out`
     pub fn write_program_end_code(&self, out: &mut Vec<u8>) {

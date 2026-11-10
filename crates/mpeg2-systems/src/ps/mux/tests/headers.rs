@@ -6,41 +6,6 @@ use super::*;
 /// 0.5 s in 90 kHz ticks
 const HALF_SECOND: u64 = 45_000;
 
-/// What a pack carries: its SCR in 27 MHz ticks, its system header, its
-/// program stream map, and how many PES packets
-#[derive(Debug, PartialEq)]
-struct Carried<'a> {
-    scr: u64,
-    system_header: Option<&'a [u8]>,
-    map: Option<ProgramStreamMap<'a>>,
-    pes_packets: usize,
-}
-
-/// What each pack of `bytes` carries
-fn carried(bytes: &[u8]) -> Vec<Carried<'_>> {
-    let mut packs: Vec<Carried<'_>> = Vec::new();
-    for (element, _) in elements(bytes) {
-        match element {
-            Element::PackHeader(header) => packs.push(Carried {
-                scr: header.system_clock_reference.ticks(),
-                system_header: None,
-                map: None,
-                pes_packets: 0,
-            }),
-            Element::SystemHeader(bytes) => packs.last_mut().unwrap().system_header = Some(bytes),
-            Element::ProgramStreamMap(bytes) => {
-                packs.last_mut().unwrap().map = Some(ProgramStreamMap::read(bytes).unwrap());
-            }
-            Element::PesPacket(_) => {
-                let pack = packs.last_mut().unwrap();
-                pack.pes_packets = pack.pes_packets.saturating_add(1);
-            }
-            Element::ProgramEnd => {}
-        }
-    }
-    packs
-}
-
 /// Whether each pack of `bytes` carries the system header and the map
 fn headers_by_pack(bytes: &[u8]) -> Vec<(bool, bool)> {
     carried(bytes)
@@ -151,7 +116,7 @@ fn at_a_header_interval_of_0_each_pes_packet_carries_the_headers_and_no_pack_aft
 
     let packs: Vec<_> = carried(&stream)
         .iter()
-        .map(|pack| (pack.system_header.is_some(), pack.pes_packets))
+        .map(|pack| (pack.system_header.is_some(), pack.stream_ids.len()))
         .collect();
     // The split PES packet, two packs of a pack header alone over the leap,
     // and the two PES packets at 1.5 s

@@ -18,7 +18,7 @@ pub use optional_header::OptionalHeader;
 pub use stream_id::StreamId;
 
 /// `packet_start_code_prefix`, the 24 bits every PES packet starts with
-const PACKET_START_CODE_PREFIX: u32 = 0x00_0001;
+pub(crate) const PACKET_START_CODE_PREFIX: u32 = 0x00_0001;
 
 /// Bytes from `packet_start_code_prefix` to `PES_packet_length`
 pub(crate) const PREFIX_LENGTH: usize = 6;

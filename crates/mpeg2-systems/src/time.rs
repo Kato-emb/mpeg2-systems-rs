@@ -186,6 +186,11 @@ impl Timestamp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct SystemTimeClock(u64);
 
+/// Ticks of the STC in a second, `system_clock_frequency` of ISO/IEC
+/// 13818-1 §2.4.2.1 and §2.5.2.1
+#[cfg(feature = "alloc")]
+pub(crate) const SYSTEM_CLOCK_FREQUENCY: u64 = 27_000_000;
+
 #[cfg(feature = "alloc")]
 impl SystemTimeClock {
     /// Ticks of the STC in one tick of the 90 kHz clock of PTS and DTS
@@ -245,8 +250,13 @@ impl SystemTimeClock {
 
     /// Returns `duration` in ticks of the STC
     pub(crate) fn ticks_in(duration: Duration) -> u64 {
-        u64::try_from(duration.as_nanos().saturating_mul(27_000_000) / 1_000_000_000)
-            .unwrap_or(u64::MAX)
+        u64::try_from(
+            duration
+                .as_nanos()
+                .saturating_mul(u128::from(SYSTEM_CLOCK_FREQUENCY))
+                / 1_000_000_000,
+        )
+        .unwrap_or(u64::MAX)
     }
 }
 
