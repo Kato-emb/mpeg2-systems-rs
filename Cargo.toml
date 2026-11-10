@@ -18,7 +18,9 @@ mpeg2-systems = { path = "crates/mpeg2-systems", version = "0.0.0", default-feat
 
 # This is the one lint table: a target that must relax a lint, such as an
 # example that prints, does so at the site with `#[expect(lint, reason = "...")]`
-# rather than carrying a copy of this table that drifts out of step.
+# rather than carrying a copy of this table that drifts out of step. benches/,
+# outside the workspace, cannot inherit it, so rather than copy it, it keeps
+# only the lints that bear on its own code.
 [workspace.lints.rust]
 # Memory safety: the demuxers are fed untrusted broadcast streams, so safety
 # must not rest on reviewing unsafe blocks. forbid (not deny) cannot be lifted
