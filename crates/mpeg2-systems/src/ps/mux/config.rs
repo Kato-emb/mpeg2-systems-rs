@@ -64,11 +64,20 @@ pub struct MuxerConfig {
     /// 2-23, c1 the time a byte takes to arrive at `program_mux_rate`
     /// (§2.5.2.2 equation 2-21): each pack follows the one before without a
     /// gap. Where the SCR of a PES packet's pack would be before its time
-    /// less `mux_delay`, packs of padding fill the time before it, each at
-    /// most [`pack_size`](Self::pack_size) bytes, with `stuffing_byte`s where
-    /// 7 or fewer fill it (§2.5.3.4) and a PES packet of `padding_stream`
-    /// past them (§2.4.3.6). The system header names no bound for
-    /// `padding_stream`.
+    /// less `mux_delay`, packs of padding fill the bytes up to the first SCR
+    /// on the line at or after that time. Where fewer than the bytes of a
+    /// pack header would be left over, they are not filled, and the SCR is
+    /// earlier than that time by no more than those fewer than 14 bytes take
+    /// to arrive: the SCR of a PES packet's pack is at its time less
+    /// `mux_delay`, or up to 13 bytes earlier, unless the packs before it
+    /// end later.
+    ///
+    /// A pack of padding is at most the most bytes of a pack
+    /// ([`pack_size`](Self::pack_size), or fewer where fewer arrive within
+    /// 0.7 s at `program_mux_rate`) and at most a pack header and the longest
+    /// PES packet, with `stuffing_byte`s where 7 or fewer fill it (§2.5.3.4)
+    /// and a PES packet of `padding_stream` past them (§2.4.3.6). The system
+    /// header names no bound for `padding_stream`.
     pub fixed_rate: bool,
 }
 

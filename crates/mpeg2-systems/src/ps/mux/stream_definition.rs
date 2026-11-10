@@ -3,7 +3,7 @@
 
 use alloc::vec::Vec;
 
-use super::{Error, Muxer, PackWriter, largest_pack, shortest_pack};
+use super::{Error, Muxer, PackWriter, shortest_pack};
 use crate::descriptor::DescriptorLoop;
 use crate::pes::StreamId;
 use crate::pes::extension::PStdBuffer;
@@ -256,14 +256,7 @@ impl Muxer {
             registered.stream_type = stream.stream_type;
             registered.es_info = es_info.to_vec();
         }
-        check_headers(
-            &streams,
-            &self.program_stream_info,
-            self.map_version,
-            self.config.program_mux_rate,
-            self.config.fixed_rate,
-            largest_pack(&self.config),
-        )?;
+        self.check_headers_of(&streams, &self.program_stream_info)?;
         self.streams = streams;
         self.change_map();
         Ok(())
@@ -298,14 +291,7 @@ impl Muxer {
         if program_stream_info == self.program_stream_info {
             return Ok(());
         }
-        check_headers(
-            &self.streams,
-            program_stream_info,
-            self.map_version,
-            self.config.program_mux_rate,
-            self.config.fixed_rate,
-            largest_pack(&self.config),
-        )?;
+        self.check_headers_of(&self.streams, program_stream_info)?;
         self.program_stream_info = program_stream_info.to_vec();
         self.change_map();
         Ok(())

@@ -73,9 +73,8 @@ pub(super) struct Pack {
     pub(super) length: usize,
     /// The bytes from the one that carries the last bit of the first SCR to
     /// the one that carries the last bit of the SCR of this pack
-    // Why not a count of the bytes the muxer has written: the SCR of the
-    // pack after it at a fixed rate follows from this pack alone, made with
-    // it as one value.
+    // Why not a count of the bytes the muxer has written: it would have to
+    // move with `last_pack` on every pack written.
     pub(super) offset: u64,
 }
 
@@ -112,50 +111,50 @@ impl Pack {
     }
 }
 
-/// The packs that fill the time from the pack after `last` to a PES packet
+/// The packs that fill the time from the pack after the one before them to
+/// a PES packet
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Gap {
     /// `count` packs of a pack header alone over a leap of the time stamps,
     /// [`LONGEST_SCR_INTERVAL`] apart from `first` (§2.7.1)
     Filling {
-        last: Pack,
+        before: Pack,
         first: SystemTimeClock,
         count: u64,
     },
-    /// `count` packs of padding at a fixed rate, each `length` bytes but the
-    /// last, of `last_length`, on the line through `last` (§2.5.3.6)
+    /// `bytes` of packs of padding at a fixed rate, on the line through
+    /// `before` (§2.5.3.6), cut as [`padding_layout`] says
     Padding {
-        last: Pack,
+        before: Pack,
         program_mux_rate: u32,
-        count: u64,
-        length: usize,
-        last_length: usize,
+        bytes: u64,
+        longest: usize,
     },
 }
 
 impl Gap {
     /// Returns the packs of a pack header alone that fill a leap from
-    /// `last`, the last pack written, to a PES packet due at `time`, at the
+    /// `before`, the last pack written, to a PES packet due at `time`, at the
     /// variable rate `program_mux_rate`: each [`LONGEST_SCR_INTERVAL`] after
     /// the SCR before it, or once the bytes before it have arrived if that is
     /// later, while the pack at `time` would be more than
     /// [`LONGEST_SCR_INTERVAL`] after the SCR before it; `None` where there
     /// is no leap to fill
     pub(super) fn filling(
-        last: Pack,
+        before: Pack,
         time: SystemTimeClock,
         program_mux_rate: u32,
     ) -> Option<Self> {
         let longest = longest_scr_interval();
-        // Why compare with `time` alone, not with when `last` has arrived:
+        // Why compare with `time` alone, not with when `before` has arrived:
         // `largest_pack` keeps every pack arriving within the longest
         // interval, so only the time stamp can carry the next SCR past it.
-        if time.ticks_since(last.at) <= longest {
+        if time.ticks_since(before.at) <= longest {
             return None;
         }
-        let first = last
+        let first = before
             .arrived(program_mux_rate)
-            .max(last.at.add_ticks(longest));
+            .max(before.at.add_ticks(longest));
         // Why each one the longest interval after the one before, not after
         // its bytes have arrived: a pack header alone arrives within the
         // longest interval at any program_mux_rate of 1 or more.
@@ -164,38 +163,55 @@ impl Gap {
             .saturating_sub(longest)
             .div_ceil(longest)
             .saturating_add(1);
-        Some(Self::Filling { last, first, count })
+        Some(Self::Filling {
+            before,
+            first,
+            count,
+        })
     }
 
-    /// Returns the packs of padding, each at most `longest` bytes and the
-    /// last at least a pack header, that bring the line of the fixed rate
-    /// `program_mux_rate` through `last`, the last pack written, to a PES
-    /// packet due at `time`; `None` where the line reaches it already
+    /// Returns the packs of padding that bring the line of the fixed rate
+    /// `program_mux_rate` through `before`, the last pack written, to a PES
+    /// packet due at `time`, or `None` where the line reaches it already
+    ///
+    /// The packs take the bytes missing, each at most `longest` bytes and
+    /// none shorter than a pack header; where fewer bytes than a pack header
+    /// are missing, or are left for the last pack and the one before it
+    /// cannot make them up without falling below a pack header itself, those
+    /// bytes are left out, `None` where they are all.
     pub(super) fn padding(
-        last: Pack,
+        before: Pack,
         time: SystemTimeClock,
         program_mux_rate: u32,
         longest: usize,
     ) -> Option<Self> {
         let reached = line_bytes(
-            line_ticks(last.offset, program_mux_rate).saturating_add(time.ticks_since(last.at)),
+            line_ticks(before.offset, program_mux_rate).saturating_add(time.ticks_since(before.at)),
             program_mux_rate,
         );
         let bytes = reached
-            .checked_sub(last.next_offset())
+            .checked_sub(before.next_offset())
             .filter(|&bytes| bytes > 0)?;
+        let header = u64::try_from(pack_header::FIXED_LENGTH).unwrap_or(u64::MAX);
         let longest_bytes = u64::try_from(longest).unwrap_or(u64::MAX);
-        let count = bytes.div_ceil(longest_bytes);
-        let last_length =
-            bytes.saturating_sub(count.saturating_sub(1).saturating_mul(longest_bytes));
+        let (count, rest, _) = padding_layout(bytes, longest_bytes);
+        // Why not a pack header where fewer bytes are left: the PES packet
+        // would come after its time, where leaving them has it come early.
+        let bytes = if count == 1 {
+            if bytes < header {
+                return None;
+            }
+            bytes
+        } else if rest < header && longest_bytes.saturating_add(rest) < header.saturating_mul(2) {
+            bytes.saturating_sub(rest)
+        } else {
+            bytes
+        };
         Some(Self::Padding {
-            last,
+            before,
             program_mux_rate,
-            count,
-            length: longest,
-            last_length: usize::try_from(last_length)
-                .unwrap_or(usize::MAX)
-                .max(pack_header::FIXED_LENGTH),
+            bytes,
+            longest,
         })
     }
 
@@ -205,15 +221,7 @@ impl Gap {
             Self::Filling { count, .. } => {
                 count.saturating_mul(u64::try_from(pack_header::FIXED_LENGTH).unwrap_or(u64::MAX))
             }
-            Self::Padding {
-                count,
-                length,
-                last_length,
-                ..
-            } => u64::try_from(length)
-                .unwrap_or(u64::MAX)
-                .saturating_mul(count.saturating_sub(1))
-                .saturating_add(u64::try_from(last_length).unwrap_or(u64::MAX)),
+            Self::Padding { bytes, .. } => bytes,
         }
     }
 
@@ -228,44 +236,68 @@ impl Gap {
 
     fn count(self) -> u64 {
         match self {
-            Self::Filling { count, .. } | Self::Padding { count, .. } => count,
+            Self::Filling { count, .. } => count,
+            Self::Padding { bytes, longest, .. } => {
+                padding_layout(bytes, u64::try_from(longest).unwrap_or(u64::MAX)).0
+            }
         }
     }
 
     /// Returns the pack at `index`
     fn pack(self, index: u64) -> Pack {
         match self {
-            Self::Filling { last, first, .. } => {
+            Self::Filling { before, first, .. } => {
                 Pack {
                     at: first.add_ticks(index.saturating_mul(longest_scr_interval())),
                     length: pack_header::FIXED_LENGTH,
-                    offset: last.next_offset().saturating_add(index.saturating_mul(
+                    offset: before.next_offset().saturating_add(index.saturating_mul(
                         u64::try_from(pack_header::FIXED_LENGTH).unwrap_or(u64::MAX),
                     )),
                 }
             }
             Self::Padding {
-                last,
+                before,
                 program_mux_rate,
-                count,
-                length,
-                last_length,
+                bytes,
+                longest,
             } => {
-                let offset = last.next_offset().saturating_add(
-                    index.saturating_mul(u64::try_from(length).unwrap_or(u64::MAX)),
-                );
+                let longest = u64::try_from(longest).unwrap_or(u64::MAX);
+                let (count, rest, shortfall) = padding_layout(bytes, longest);
+                let (length, shortened) = if index.saturating_add(1) == count {
+                    (rest.saturating_add(shortfall), shortfall)
+                } else if index.saturating_add(2) == count {
+                    (longest.saturating_sub(shortfall), 0)
+                } else {
+                    (longest, 0)
+                };
+                let offset = before
+                    .next_offset()
+                    .saturating_add(index.saturating_mul(longest))
+                    .saturating_sub(shortened);
                 Pack {
-                    at: last.on_line(offset, program_mux_rate),
-                    length: if index.saturating_add(1) == count {
-                        last_length
-                    } else {
-                        length
-                    },
+                    at: before.on_line(offset, program_mux_rate),
+                    length: usize::try_from(length).unwrap_or(usize::MAX),
                     offset,
                 }
             }
         }
     }
+}
+
+/// Returns how `bytes` of padding are cut into packs of at most `longest`
+/// bytes: how many, the bytes left for the last after the others are
+/// `longest` each, and the bytes the one before the last gives up so that
+/// the last is no shorter than a pack header
+fn padding_layout(bytes: u64, longest: u64) -> (u64, u64, u64) {
+    let count = bytes.div_ceil(longest).max(1);
+    let rest = bytes.saturating_sub(count.saturating_sub(1).saturating_mul(longest));
+    let header = u64::try_from(pack_header::FIXED_LENGTH).unwrap_or(u64::MAX);
+    let shortfall = if count > 1 {
+        header.saturating_sub(rest)
+    } else {
+        0
+    };
+    (count, rest, shortfall)
 }
 
 /// What fills a pack of a [`Gap`] after its pack header

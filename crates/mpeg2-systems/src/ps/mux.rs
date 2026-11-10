@@ -389,17 +389,56 @@ impl Muxer {
             });
         }
         self.streams.push(stream);
+        self.check_headers_of(&self.streams, &self.program_stream_info)
+            .inspect_err(|_| {
+                self.streams.pop();
+            })
+    }
+
+    /// Refuses the system header of `streams` and the program stream map of
+    /// `program_stream_info` and `streams` where
+    /// [`check_headers`](stream_definition::check_headers) does at the
+    /// settings and the map version of the muxer
+    fn check_headers_of(
+        &self,
+        streams: &[Stream],
+        program_stream_info: &[u8],
+    ) -> Result<(), Error> {
         stream_definition::check_headers(
-            &self.streams,
-            &self.program_stream_info,
+            streams,
+            program_stream_info,
             self.map_version,
             self.config.program_mux_rate,
             self.config.fixed_rate,
             largest_pack(&self.config),
         )
-        .inspect_err(|_| {
-            self.streams.pop();
-        })
+    }
+
+    /// Returns the earliest SCR under `config` of the pack after `pack`: once
+    /// its bytes have arrived, or at a fixed rate on the line through it
+    fn following(config: &MuxerConfig, pack: Pack) -> SystemTimeClock {
+        if config.fixed_rate {
+            pack.on_line(pack.next_offset(), config.program_mux_rate)
+        } else {
+            pack.arrived(config.program_mux_rate)
+        }
+    }
+
+    /// Returns the SCR of the first pack of a PES packet of `time` after
+    /// `before`, the pack written last: at a fixed rate on the line through
+    /// `before`, otherwise the later of `time` and the earliest SCR after
+    /// `before`
+    fn first_scr(
+        config: &MuxerConfig,
+        before: Option<Pack>,
+        time: Option<SystemTimeClock>,
+    ) -> Option<SystemTimeClock> {
+        match before {
+            Some(pack) if config.fixed_rate => Some(Self::following(config, pack)),
+            // Why not `None` as the earliest: before the first pack there is
+            // no pack to follow, and the first PES packet has a time.
+            before => before.map(|pack| Self::following(config, pack)).max(time),
+        }
     }
 
     /// Returns the stream registered of `stream_id` and `stream_id_extension`,
@@ -579,17 +618,8 @@ impl Muxer {
                 Gap::filling(last, time, program_mux_rate)
             }
         });
-        let fixed_rate = config.fixed_rate;
-        let following = move |pack: Pack| {
-            if fixed_rate {
-                pack.on_line(pack.next_offset(), program_mux_rate)
-            } else {
-                pack.arrived(program_mux_rate)
-            }
-        };
-        // Why not `None` as the earliest: before the first pack there is no
-        // pack to follow, and the first PES packet has a time.
-        let first_at = gap.map(Gap::last).or(*last_pack).map(following).max(time);
+        let following = |pack: Pack| Self::following(config, pack);
+        let first_at = Self::first_scr(config, gap.map(Gap::last).or(*last_pack), time);
         let headers_due = headers_sent_at.zip(first_at).is_none_or(|(sent_at, at)| {
             at.ticks_since(sent_at) >= SystemTimeClock::ticks_in(config.header_interval)
         });
