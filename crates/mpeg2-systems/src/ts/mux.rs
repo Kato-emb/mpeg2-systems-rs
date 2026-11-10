@@ -666,8 +666,7 @@ impl Muxer {
     ///
     /// # Panics
     ///
-    /// Panics if a PES packet has been given already, which sent the PMT at
-    /// its one `version_number` (§2.4.4.10).
+    /// Panics if a PES packet has been given already.
     #[expect(
         clippy::panic_in_result_fn,
         reason = "a call out of order is the caller's mistake, which panics as documented"
@@ -703,8 +702,7 @@ impl Muxer {
     ///
     /// # Panics
     ///
-    /// Panics if a PES packet has been given already, which sent the PMT at
-    /// its one `version_number` (§2.4.4.10).
+    /// Panics if a PES packet has been given already.
     #[expect(
         clippy::panic_in_result_fn,
         reason = "a call out of order is the caller's mistake, which panics as documented"
