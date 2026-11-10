@@ -93,17 +93,17 @@ use schedule::{Schedule, Times};
 /// The longest time from one PCR to the next, ISO/IEC 13818-1 §2.7.2
 const LONGEST_PCR_INTERVAL: Duration = Duration::from_millis(100);
 
-mod carriage;
 mod config;
 mod error;
 mod packet_writer;
 mod program_definition;
 mod schedule;
+mod transport_packet_fields;
 
-pub use carriage::PesPacketCarriage;
 pub use config::MuxerConfig;
 pub use error::Error;
 pub use packet_writer::PacketWriter;
+pub use transport_packet_fields::TransportPacketFields;
 
 /// Multiplexer of PES packets into a Transport Stream, which sends the PAT,
 /// the PMT and the PCRs the stream needs on its own
@@ -458,12 +458,16 @@ impl Muxer {
     ///
     /// Panics if [`finish`](Self::finish) has been called.
     pub fn handle_pes_packet(&mut self, pid: Pid, packet: &PesPacket<'_>) -> Result<(), Error> {
-        self.handle_pes_packet_with_carriage(pid, packet, &PesPacketCarriage::new())
+        self.handle_pes_packet_with_transport_packet_fields(
+            pid,
+            packet,
+            &TransportPacketFields::new(),
+        )
     }
 
     /// Takes `packet`, a PES packet of the stream on `pid`, as
-    /// [`handle_pes_packet`](Self::handle_pes_packet) does, carried as
-    /// `carriage` says
+    /// [`handle_pes_packet`](Self::handle_pes_packet) does, its Transport
+    /// Packets carrying `fields`
     ///
     /// With `random_access_indicator` set on the PCR PID, the muxer sends a
     /// PCR in the first Transport Packet, since ISO/IEC 13818-1 §2.4.3.5 sets
@@ -472,7 +476,8 @@ impl Muxer {
     /// first Transport Packet that does not fit beside
     /// `transport_private_data` goes, at the same value, in a Transport
     /// Packet of its own on the PCR PID before it. With
-    /// [`PesPacketCarriage::new`], the output is that of `handle_pes_packet`.
+    /// [`TransportPacketFields::new`], the output is that of
+    /// `handle_pes_packet`.
     ///
     /// ```
     /// use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
@@ -480,7 +485,7 @@ impl Muxer {
     /// use mpeg2_systems::stream_type::StreamType;
     /// use mpeg2_systems::time::Timestamp;
     /// use mpeg2_systems::ts::Pid;
-    /// use mpeg2_systems::ts::mux::{Muxer, MuxerConfig, PesPacketCarriage};
+    /// use mpeg2_systems::ts::mux::{Muxer, MuxerConfig, TransportPacketFields};
     /// use mpeg2_systems::ts::packet::TransportPacket;
     ///
     /// let (pmt_pid, video_pid) = (Pid::try_from(0x1000)?, Pid::try_from(0x0100)?);
@@ -492,8 +497,8 @@ impl Muxer {
     /// let access_unit = vec![0xaa; 1_000];
     /// let packet = PesPacket::new(StreamId::from(0xe0), &access_unit)
     ///     .with_optional_header(OptionalHeader::new().with_pts(Timestamp::try_from(90_000)?));
-    /// let carriage = PesPacketCarriage::new().with_random_access_indicator(true);
-    /// muxer.handle_pes_packet_with_carriage(video_pid, &packet, &carriage)?;
+    /// let fields = TransportPacketFields::new().with_random_access_indicator(true);
+    /// muxer.handle_pes_packet_with_transport_packet_fields(video_pid, &packet, &fields)?;
     /// let mut stream = Vec::new();
     /// muxer.poll_output(&mut stream);
     ///
@@ -521,11 +526,11 @@ impl Muxer {
         clippy::panic_in_result_fn,
         reason = "a call out of order is the caller's mistake, which panics as documented"
     )]
-    pub fn handle_pes_packet_with_carriage(
+    pub fn handle_pes_packet_with_transport_packet_fields(
         &mut self,
         pid: Pid,
         packet: &PesPacket<'_>,
-        carriage: &PesPacketCarriage<'_>,
+        fields: &TransportPacketFields<'_>,
     ) -> Result<(), Error> {
         assert!(!self.finished, "a PES packet is given after finish");
         let Some((program, stream_index)) = self.program.as_ref().and_then(|program| {
@@ -620,8 +625,8 @@ impl Muxer {
         let pcr_pid = program.pcr_pid().unwrap_or(pid);
         let on_pcr_pid = pcr_pid == pid;
         let pcr_due = on_pcr_pid && pcr_times.last() == Some(clock);
-        let pcr_in_packet = carriage.pcr_in_first_packet(on_pcr_pid, pcr_due)?;
-        let adaptation_field = carriage
+        let pcr_in_packet = fields.pcr_in_first_packet(on_pcr_pid, pcr_due)?;
+        let adaptation_field = fields
             .adaptation_field(pcr_in_packet.then(|| clock.to_clock_reference(config.mux_delay)));
         let pcrs_alone = pcr_times
             .count
@@ -710,7 +715,7 @@ impl Muxer {
                 Ok(())
             },
             adaptation_field,
-            carriage.transport_priority,
+            fields.transport_priority,
             Stuffing::AdaptationField,
             pending,
         )?;

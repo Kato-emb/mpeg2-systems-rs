@@ -1,5 +1,5 @@
-//! What the caller of a [`Muxer`](super::Muxer) sets on the Transport
-//! Packets that carry a PES packet
+//! The fields of the Transport Packets of a PES packet that the caller of a
+//! [`Muxer`](super::Muxer) sets
 
 use super::Error;
 use crate::time::ClockReference;
@@ -10,11 +10,12 @@ use crate::ts::adaptation_field::AdaptationField;
 /// the byte of `adaptation_field_length` itself
 const LONGEST_ADAPTATION_FIELD_WITH_PAYLOAD: usize = 183;
 
-/// How a [`Muxer`](super::Muxer) carries a PES packet in Transport Packets,
-/// beyond what it decides itself
+/// The fields of `transport_packet()` the caller sets on the Transport
+/// Packets of a PES packet a [`Muxer`](super::Muxer) carries
 ///
-/// `transport_priority`, ISO/IEC 13818-1 §2.4.3.3, and the fields of
-/// `adaptation_field`, §2.4.3.5, of the Transport Packets of the PES packet
+/// `transport_packet()`, ISO/IEC 13818-1 Table 2-2, its `adaptation_field()`
+/// included: `transport_priority` (§2.4.3.3), and `random_access_indicator`,
+/// `elementary_stream_priority_indicator` and `private_data_byte`s (§2.4.3.5)
 ///
 /// The muxer sets the PCR, `discontinuity_indicator` and the stuffing bytes
 /// itself; nothing here overrides them. It does not read the elementary
@@ -24,17 +25,17 @@ const LONGEST_ADAPTATION_FIELD_WITH_PAYLOAD: usize = 183;
 /// `elementary_stream_priority_indicator`, are the caller's to keep.
 ///
 /// ```
-/// use mpeg2_systems::ts::mux::PesPacketCarriage;
+/// use mpeg2_systems::ts::mux::TransportPacketFields;
 ///
 /// // An access point, its Transport Packets of the higher priority
-/// let carriage = PesPacketCarriage::new()
+/// let fields = TransportPacketFields::new()
 ///     .with_random_access_indicator(true)
 ///     .with_transport_priority(true);
-/// # let _ = carriage;
+/// # let _ = fields;
 /// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PesPacketCarriage<'a> {
+pub struct TransportPacketFields<'a> {
     /// `random_access_indicator` of the first Transport Packet
     pub random_access_indicator: bool,
     /// `elementary_stream_priority_indicator` of the first Transport Packet
@@ -46,8 +47,8 @@ pub struct PesPacketCarriage<'a> {
     pub transport_priority: bool,
 }
 
-impl<'a> PesPacketCarriage<'a> {
-    /// Returns the carriage with no field set: the PES packet is carried as
+impl<'a> TransportPacketFields<'a> {
+    /// Returns the fields with none set: the PES packet is carried as
     /// [`Muxer::handle_pes_packet`](super::Muxer::handle_pes_packet) carries it
     #[expect(
         clippy::new_without_default,

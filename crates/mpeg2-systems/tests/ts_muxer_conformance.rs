@@ -36,7 +36,7 @@ mod tests {
     use mpeg2_systems::stream_type::StreamType;
     use mpeg2_systems::time::{ClockReference, Timestamp};
     use mpeg2_systems::ts::Pid;
-    use mpeg2_systems::ts::mux::{Muxer, MuxerConfig, PesPacketCarriage};
+    use mpeg2_systems::ts::mux::{Muxer, MuxerConfig, TransportPacketFields};
 
     use crate::tools::{
         ProgramAssociation, ProgramMap, Timing, ffprobe, integer, pes_packet, pes_packets_of_188,
@@ -505,7 +505,7 @@ mod tests {
 
     #[test]
     #[ignore = "runs tsp from TSDuck"]
-    fn the_carriage_set_on_each_pes_packet_reads_in_tsp_dump_on_its_transport_packets() {
+    fn the_transport_packet_fields_set_on_each_pes_packet_read_in_tsp_dump() {
         let pid = |value: u16| Pid::try_from(value).unwrap();
         let inputs = inputs();
         let private_data: Vec<Vec<u8>> = (0..inputs.len())
@@ -518,19 +518,19 @@ mod tests {
                 _ => Vec::new(),
             })
             .collect();
-        let carriage_of = |index: usize| {
+        let fields_of = |index: usize| {
             let data = private_data[index].as_slice();
             match index % 6 {
-                0 => PesPacketCarriage::new().with_random_access_indicator(true),
-                1 => PesPacketCarriage::new()
+                0 => TransportPacketFields::new().with_random_access_indicator(true),
+                1 => TransportPacketFields::new()
                     .with_elementary_stream_priority_indicator(true)
                     .with_transport_private_data(data),
-                2 => PesPacketCarriage::new().with_transport_priority(true),
-                3 => PesPacketCarriage::new(),
-                4 => PesPacketCarriage::new()
+                2 => TransportPacketFields::new().with_transport_priority(true),
+                3 => TransportPacketFields::new(),
+                4 => TransportPacketFields::new()
                     .with_transport_priority(true)
                     .with_transport_private_data(data),
-                _ => PesPacketCarriage::new()
+                _ => TransportPacketFields::new()
                     .with_random_access_indicator(true)
                     .with_transport_private_data(data),
             }
@@ -545,28 +545,31 @@ mod tests {
         let mut stream = Vec::new();
         for (index, (pid_value, stream_id, timing, payload)) in inputs.iter().enumerate() {
             muxer
-                .handle_pes_packet_with_carriage(
+                .handle_pes_packet_with_transport_packet_fields(
                     pid(*pid_value),
                     &pes_packet(*stream_id, *timing, payload),
-                    &carriage_of(index),
+                    &fields_of(index),
                 )
                 .unwrap();
         }
         muxer.finish();
         muxer.poll_output(&mut stream);
-        let path = format!("{}/muxer_carriage.ts", env!("CARGO_TARGET_TMPDIR"));
+        let path = format!(
+            "{}/muxer_transport_packet_fields.ts",
+            env!("CARGO_TARGET_TMPDIR")
+        );
         std::fs::write(&path, &stream).unwrap();
 
         let mut expected = Vec::new();
         let mut read = Vec::new();
         let mut starts = 0..;
-        let mut carriage = PesPacketCarriage::new();
+        let mut fields = TransportPacketFields::new();
         for packet in dumped(&path) {
             if ![VIDEO_PID, AUDIO_PID].map(u64::from).contains(&packet.pid) {
                 continue;
             }
             if packet.payload_unit_start_indicator {
-                carriage = carriage_of(starts.next().unwrap());
+                fields = fields_of(starts.next().unwrap());
             }
             let first = packet.payload_unit_start_indicator;
             expected.push(Dumped {
@@ -575,16 +578,16 @@ mod tests {
                 // Why not set the priority on a packet without a payload:
                 // that is a PCR the muxer sends alone, not a packet of the
                 // PES packet
-                transport_priority: carriage.transport_priority && packet.payload,
+                transport_priority: fields.transport_priority && packet.payload,
                 payload: packet.payload,
-                random_access_indicator: first && carriage.random_access_indicator,
+                random_access_indicator: first && fields.random_access_indicator,
                 elementary_stream_priority_indicator: first
-                    && carriage.elementary_stream_priority_indicator,
+                    && fields.elementary_stream_priority_indicator,
                 // Why not check every PCR: their times are checked against
                 // the PCR interval elsewhere; here only the one
                 // random_access_indicator needs on the PCR PID (§2.4.3.5)
                 program_clock_reference: packet.program_clock_reference,
-                transport_private_data: carriage
+                transport_private_data: fields
                     .transport_private_data
                     .filter(|_| first)
                     .map(<[u8]>::to_vec),

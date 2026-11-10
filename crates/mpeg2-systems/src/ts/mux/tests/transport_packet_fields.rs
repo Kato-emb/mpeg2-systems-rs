@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use super::*;
 use crate::ts::demux::{Demuxer, DemuxerConfig, Event};
 
-/// What a Transport Packet carries of what a [`PesPacketCarriage`] sets, and
+/// What a Transport Packet carries of what a [`TransportPacketFields`] sets, and
 /// of what the muxer sets beside it
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Carried {
@@ -39,7 +39,7 @@ fn carried(bytes: &[u8]) -> Vec<Carried> {
         .collect()
 }
 
-/// A Transport Packet of `pid` that carries none of what a carriage sets
+/// A Transport Packet of `pid` that carries none of the fields set
 fn plain(pid: u16, payload_unit_start_indicator: bool) -> Carried {
     Carried {
         pid,
@@ -53,18 +53,20 @@ fn plain(pid: u16, payload_unit_start_indicator: bool) -> Carried {
 }
 
 /// What the muxer of the default settings makes of the PES packets given
-/// in turn, each `(pid, dts, carriage)`: the result of each, and the output
-fn multiplexed(inputs: &[(u16, u64, PesPacketCarriage<'_>)]) -> (Vec<Result<(), Error>>, Vec<u8>) {
+/// in turn, each `(pid, dts, fields)`: the result of each, and the output
+fn multiplexed(
+    inputs: &[(u16, u64, TransportPacketFields<'_>)],
+) -> (Vec<Result<(), Error>>, Vec<u8>) {
     let mut muxer = muxer_of(MuxerConfig::new());
     let payload = vec![0xaa; 400];
     let results = inputs
         .iter()
-        .map(|(pid_value, dts, carriage)| {
+        .map(|(pid_value, dts, fields)| {
             let stream_id = if *pid_value == VIDEO_PID { 0xe0 } else { 0xc0 };
-            muxer.handle_pes_packet_with_carriage(
+            muxer.handle_pes_packet_with_transport_packet_fields(
                 pid(*pid_value),
                 &pes_packet(stream_id, &payload, Some(*dts)),
-                carriage,
+                fields,
             )
         })
         .collect();
@@ -74,7 +76,7 @@ fn multiplexed(inputs: &[(u16, u64, PesPacketCarriage<'_>)]) -> (Vec<Result<(), 
 }
 
 /// The output of [`multiplexed`], each PES packet taken
-fn output_of(inputs: &[(u16, u64, PesPacketCarriage<'_>)]) -> Vec<u8> {
+fn output_of(inputs: &[(u16, u64, TransportPacketFields<'_>)]) -> Vec<u8> {
     let (results, out) = multiplexed(inputs);
     assert!(results.iter().all(Result::is_ok), "{results:?}");
     out
@@ -139,11 +141,11 @@ fn first_packet_head(out: &[u8], pid_value: u16) -> Vec<u8> {
 #[test]
 fn the_fields_set_go_in_the_adaptation_field_of_the_first_transport_packet_only() {
     let private_data = [0x01, 0x02, 0x03];
-    let carriage = PesPacketCarriage::new()
+    let fields = TransportPacketFields::new()
         .with_random_access_indicator(true)
         .with_elementary_stream_priority_indicator(true)
         .with_transport_private_data(&private_data);
-    let audio = of_pid(&output_of(&[(AUDIO_PID, 90_000, carriage)]), AUDIO_PID);
+    let audio = of_pid(&output_of(&[(AUDIO_PID, 90_000, fields)]), AUDIO_PID);
     assert_eq!(
         audio,
         [
@@ -160,10 +162,10 @@ fn the_fields_set_go_in_the_adaptation_field_of_the_first_transport_packet_only(
 }
 #[test]
 fn transport_priority_is_set_on_every_transport_packet_of_the_pes_packet_only() {
-    let carriage = PesPacketCarriage::new().with_transport_priority(true);
+    let fields = TransportPacketFields::new().with_transport_priority(true);
     let out = output_of(&[
-        (VIDEO_PID, 90_000, PesPacketCarriage::new()),
-        (AUDIO_PID, 93_600, carriage),
+        (VIDEO_PID, 90_000, TransportPacketFields::new()),
+        (AUDIO_PID, 93_600, fields),
     ]);
     let others_with_priority: Vec<Carried> = carried(&out)
         .into_iter()
@@ -189,12 +191,12 @@ fn transport_priority_is_set_on_every_transport_packet_of_the_pes_packet_only() 
 #[test]
 fn transport_priority_is_not_set_on_a_pcr_split_from_the_pes_packet_on_its_pid() {
     let private_data: Vec<u8> = (0..180).collect();
-    let carriage = PesPacketCarriage::new()
+    let fields = TransportPacketFields::new()
         .with_transport_priority(true)
         .with_transport_private_data(&private_data);
     let out = output_of(&[
-        (VIDEO_PID, 90_000, PesPacketCarriage::new()),
-        (VIDEO_PID, 93_600, carriage),
+        (VIDEO_PID, 90_000, TransportPacketFields::new()),
+        (VIDEO_PID, 93_600, fields),
     ]);
     let video = of_pid(&out, VIDEO_PID);
     let with_priority = |payload_unit_start_indicator| Carried {
@@ -233,10 +235,10 @@ fn transport_priority_is_not_set_on_a_pcr_split_from_the_pes_packet_on_its_pid()
 #[test]
 fn the_fields_set_go_beside_a_pcr_in_the_same_packet() {
     let private_data = [0x0a; 8];
-    let carriage = PesPacketCarriage::new()
+    let fields = TransportPacketFields::new()
         .with_random_access_indicator(true)
         .with_transport_private_data(&private_data);
-    let video = of_pid(&output_of(&[(VIDEO_PID, 90_000, carriage)]), VIDEO_PID);
+    let video = of_pid(&output_of(&[(VIDEO_PID, 90_000, fields)]), VIDEO_PID);
     assert_eq!(
         video.first().cloned(),
         Some(Carried {
@@ -261,12 +263,12 @@ fn pcrs_of(out: &[u8]) -> Vec<(u16, ClockReference)> {
 
 #[test]
 fn random_access_on_the_pcr_pid_puts_a_pcr_in_the_packet_and_starts_the_pcr_interval_there() {
-    let random_access = PesPacketCarriage::new().with_random_access_indicator(true);
+    let random_access = TransportPacketFields::new().with_random_access_indicator(true);
     let out = output_of(&[
-        (VIDEO_PID, 90_000, PesPacketCarriage::new()),
+        (VIDEO_PID, 90_000, TransportPacketFields::new()),
         (VIDEO_PID, 90_900, random_access),
-        (VIDEO_PID, 93_600, PesPacketCarriage::new()),
-        (VIDEO_PID, 94_500, PesPacketCarriage::new()),
+        (VIDEO_PID, 93_600, TransportPacketFields::new()),
+        (VIDEO_PID, 94_500, TransportPacketFields::new()),
     ]);
     let at = |dts: u64| (VIDEO_PID, pcr((dts - DELAY) * 300));
     assert_eq!(pcrs_of(&out), [at(90_000), at(90_900), at(94_500)]);
@@ -274,19 +276,19 @@ fn random_access_on_the_pcr_pid_puts_a_pcr_in_the_packet_and_starts_the_pcr_inte
 
 #[test]
 fn random_access_off_the_pcr_pid_adds_no_pcr() {
-    let random_access = PesPacketCarriage::new().with_random_access_indicator(true);
+    let random_access = TransportPacketFields::new().with_random_access_indicator(true);
     let out = output_of(&[
-        (VIDEO_PID, 90_000, PesPacketCarriage::new()),
+        (VIDEO_PID, 90_000, TransportPacketFields::new()),
         (AUDIO_PID, 90_900, random_access),
     ]);
     assert_eq!(pcrs_of(&out), [(VIDEO_PID, pcr((90_000 - DELAY) * 300))]);
 }
 
 #[test]
-fn a_carriage_that_sets_nothing_adds_no_adaptation_field_where_no_pcr_is_due() {
+fn fields_that_set_nothing_add_no_adaptation_field_where_no_pcr_is_due() {
     let out = output_of(&[
-        (VIDEO_PID, 90_000, PesPacketCarriage::new()),
-        (AUDIO_PID, 90_900, PesPacketCarriage::new()),
+        (VIDEO_PID, 90_000, TransportPacketFields::new()),
+        (AUDIO_PID, 90_900, TransportPacketFields::new()),
     ]);
     // adaptation_field_control '01': a payload alone (§2.4.3.2)
     assert_eq!(
@@ -304,11 +306,11 @@ fn with_private_data(
     private_data: &[u8],
 ) -> (Result<(), Error>, Vec<u8>) {
     let (results, out) = multiplexed(&[
-        (VIDEO_PID, 90_000, PesPacketCarriage::new()),
+        (VIDEO_PID, 90_000, TransportPacketFields::new()),
         (
             pid_value,
             dts,
-            PesPacketCarriage::new()
+            TransportPacketFields::new()
                 .with_random_access_indicator(random_access_indicator)
                 .with_transport_private_data(private_data),
         ),
@@ -318,17 +320,18 @@ fn with_private_data(
 
 #[test]
 fn transport_private_data_past_the_adaptation_field_is_refused_and_leaves_the_muxer_as_it_was() {
-    let next = (AUDIO_PID, 93_600, PesPacketCarriage::new());
+    let next = (AUDIO_PID, 93_600, TransportPacketFields::new());
     let (results, after_refusal) = multiplexed(&[
-        (VIDEO_PID, 90_000, PesPacketCarriage::new()),
+        (VIDEO_PID, 90_000, TransportPacketFields::new()),
         (
             AUDIO_PID,
             90_900,
-            PesPacketCarriage::new().with_transport_private_data(&[0x0b; 181]),
+            TransportPacketFields::new().with_transport_private_data(&[0x0b; 181]),
         ),
         next,
     ]);
-    let (_, without_refusal) = multiplexed(&[(VIDEO_PID, 90_000, PesPacketCarriage::new()), next]);
+    let (_, without_refusal) =
+        multiplexed(&[(VIDEO_PID, 90_000, TransportPacketFields::new()), next]);
     let (taken, _) = with_private_data(AUDIO_PID, 90_900, false, &[0x0b; 180]);
     let (taken_off_the_pcr_pid, _) = with_private_data(AUDIO_PID, 90_900, true, &[0x0b; 180]);
     assert_eq!(
@@ -407,10 +410,10 @@ fn a_pes_packet_after_an_adaptation_field_that_leaves_one_byte_of_payload_reads_
     let mut muxer = muxer_of(MuxerConfig::new());
     let packet = pes_packet(0xc0, &payload, Some(90_000));
     muxer
-        .handle_pes_packet_with_carriage(
+        .handle_pes_packet_with_transport_packet_fields(
             pid(AUDIO_PID),
             &packet,
-            &PesPacketCarriage::new().with_transport_private_data(&[0x0e; 180]),
+            &TransportPacketFields::new().with_transport_private_data(&[0x0e; 180]),
         )
         .unwrap();
     muxer.finish();
@@ -449,10 +452,10 @@ fn a_pcr_split_from_its_pes_packet_counts_with_the_pes_packet_against_the_buffer
     muxer.poll_output(&mut Vec::new());
     // Why 91 800: two PCRs are then due, the second at the PES packet, where
     // 180 bytes of private data leave it no room
-    let refused = muxer.handle_pes_packet_with_carriage(
+    let refused = muxer.handle_pes_packet_with_transport_packet_fields(
         pid(VIDEO_PID),
         &pes_packet(0xe0, &payload, Some(91_800)),
-        &PesPacketCarriage::new().with_transport_private_data(&[0x0f; 180]),
+        &TransportPacketFields::new().with_transport_private_data(&[0x0f; 180]),
     );
     assert_eq!(refused, Err(Error::BufferFull { length: 188 * 6 }));
 }

@@ -114,9 +114,9 @@ pub enum Error {
         /// The bytes the output held would grow to
         length: usize,
     },
-    /// The `transport_private_data` of a
-    /// [`PesPacketCarriage`](super::PesPacketCarriage) is longer than the
-    /// adaptation field of the PES packet's first Transport Packet holds
+    /// The `transport_private_data` of
+    /// [`TransportPacketFields`](super::TransportPacketFields) is longer than
+    /// the adaptation field of the PES packet's first Transport Packet holds
     TransportPrivateDataLength {
         /// The bytes of `transport_private_data` given
         length: usize,
