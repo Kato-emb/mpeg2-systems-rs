@@ -84,6 +84,20 @@ impl Language {
         }
     }
 
+    /// Returns the value with the given `iso_639_language_code`
+    #[must_use]
+    pub const fn with_iso_639_language_code(mut self, iso_639_language_code: [u8; 3]) -> Self {
+        self.iso_639_language_code = iso_639_language_code;
+        self
+    }
+
+    /// Returns the value with the given `audio_type`
+    #[must_use]
+    pub const fn with_audio_type(mut self, audio_type: AudioType) -> Self {
+        self.audio_type = audio_type;
+        self
+    }
+
     /// Returns the bytes of the entry, refusing a reserved `audio_type`
     #[cfg(feature = "alloc")]
     const fn to_bytes(self) -> Result<[u8; ENTRY_LENGTH], Error> {
@@ -268,6 +282,13 @@ impl<'input> Iso639LanguageDescriptor<'input> {
     #[must_use]
     pub const fn new(languages: LanguageLoop<'input>) -> Self {
         Self { languages }
+    }
+
+    /// Returns the value with the given `languages`
+    #[must_use]
+    pub const fn with_languages(mut self, languages: LanguageLoop<'input>) -> Self {
+        self.languages = languages;
+        self
     }
 
     /// Returns the number of bytes [`write`](Self::write) appends

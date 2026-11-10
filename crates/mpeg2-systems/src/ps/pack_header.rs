@@ -175,6 +175,30 @@ impl PackHeader {
         }
     }
 
+    /// Returns the value with the given `system_clock_reference`
+    #[must_use]
+    pub const fn with_system_clock_reference(
+        mut self,
+        system_clock_reference: ClockReference,
+    ) -> Self {
+        self.system_clock_reference = system_clock_reference;
+        self
+    }
+
+    /// Returns the value with the given `program_mux_rate`
+    #[must_use]
+    pub const fn with_program_mux_rate(mut self, program_mux_rate: u32) -> Self {
+        self.program_mux_rate = program_mux_rate;
+        self
+    }
+
+    /// Returns the value with the given `pack_stuffing_length`
+    #[must_use]
+    pub const fn with_pack_stuffing_length(mut self, pack_stuffing_length: u8) -> Self {
+        self.pack_stuffing_length = pack_stuffing_length;
+        self
+    }
+
     /// Reads a pack header from `bytes`, which hold it and nothing else
     ///
     /// # Errors
@@ -262,8 +286,8 @@ impl PackHeader {
     /// use mpeg2_systems::ps::PackHeader;
     /// use mpeg2_systems::time::ClockReference;
     ///
-    /// let mut pack_header = PackHeader::new(ClockReference::new(0x1_2345_6789, 123)?, 1_101_198);
-    /// pack_header.pack_stuffing_length = 2;
+    /// let pack_header = PackHeader::new(ClockReference::new(0x1_2345_6789, 123)?, 1_101_198)
+    ///     .with_pack_stuffing_length(2);
     /// let mut written = Vec::new();
     /// pack_header.write(&mut written)?;
     /// assert_eq!(

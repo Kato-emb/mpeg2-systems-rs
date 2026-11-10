@@ -42,7 +42,7 @@ pub struct ElementaryStream<'input> {
     pub elementary_stream_info: DescriptorLoop<'input>,
 }
 
-impl ElementaryStream<'_> {
+impl<'input> ElementaryStream<'input> {
     /// Creates an entry without `elementary_stream_id_extension` or
     /// descriptors
     #[must_use]
@@ -53,6 +53,40 @@ impl ElementaryStream<'_> {
             elementary_stream_id_extension: None,
             elementary_stream_info: DescriptorLoop(&[]),
         }
+    }
+
+    /// Returns the value with the given `stream_type`
+    #[must_use]
+    pub const fn with_stream_type(mut self, stream_type: StreamType) -> Self {
+        self.stream_type = stream_type;
+        self
+    }
+
+    /// Returns the value with the given `elementary_stream_id`
+    #[must_use]
+    pub const fn with_elementary_stream_id(mut self, elementary_stream_id: StreamId) -> Self {
+        self.elementary_stream_id = elementary_stream_id;
+        self
+    }
+
+    /// Returns the value with `elementary_stream_id_extension` present, set to the one given
+    #[must_use]
+    pub const fn with_elementary_stream_id_extension(
+        mut self,
+        elementary_stream_id_extension: u8,
+    ) -> Self {
+        self.elementary_stream_id_extension = Some(elementary_stream_id_extension);
+        self
+    }
+
+    /// Returns the value with the given `elementary_stream_info`
+    #[must_use]
+    pub const fn with_elementary_stream_info(
+        mut self,
+        elementary_stream_info: DescriptorLoop<'input>,
+    ) -> Self {
+        self.elementary_stream_info = elementary_stream_info;
+        self
     }
 
     /// Returns `elementary_stream_info_length`: the descriptors, and the

@@ -116,8 +116,8 @@ const CLOCK_REFERENCE_LENGTH: usize = 6;
 /// let bytes = [0x07, 0x10, 0x00, 0x00, 0x00, 0x01, 0x7e, 0x64];
 /// let adaptation_field = AdaptationField::read(&bytes)?;
 /// assert_eq!(
-///     adaptation_field.program_clock_reference,
-///     Some(ClockReference::new(2, 100).unwrap())
+///     adaptation_field,
+///     AdaptationField::new().with_program_clock_reference(ClockReference::new(2, 100).unwrap())
 /// );
 ///
 /// // Written back (with the `alloc` feature), it gives the same bytes
@@ -177,6 +177,84 @@ impl<'input> AdaptationField<'input> {
             adaptation_field_extension: None,
             stuffing_bytes: 0,
         }
+    }
+
+    /// Returns the value with the given `discontinuity_indicator`
+    #[must_use]
+    pub const fn with_discontinuity_indicator(mut self, discontinuity_indicator: bool) -> Self {
+        self.discontinuity_indicator = discontinuity_indicator;
+        self
+    }
+
+    /// Returns the value with the given `random_access_indicator`
+    #[must_use]
+    pub const fn with_random_access_indicator(mut self, random_access_indicator: bool) -> Self {
+        self.random_access_indicator = random_access_indicator;
+        self
+    }
+
+    /// Returns the value with the given `elementary_stream_priority_indicator`
+    #[must_use]
+    pub const fn with_elementary_stream_priority_indicator(
+        mut self,
+        elementary_stream_priority_indicator: bool,
+    ) -> Self {
+        self.elementary_stream_priority_indicator = elementary_stream_priority_indicator;
+        self
+    }
+
+    /// Returns the value with `program_clock_reference` present, set to the one given
+    #[must_use]
+    pub const fn with_program_clock_reference(
+        mut self,
+        program_clock_reference: ClockReference,
+    ) -> Self {
+        self.program_clock_reference = Some(program_clock_reference);
+        self
+    }
+
+    /// Returns the value with `original_program_clock_reference` present, set to the one given
+    #[must_use]
+    pub const fn with_original_program_clock_reference(
+        mut self,
+        original_program_clock_reference: ClockReference,
+    ) -> Self {
+        self.original_program_clock_reference = Some(original_program_clock_reference);
+        self
+    }
+
+    /// Returns the value with `splice_countdown` present, set to the one given
+    #[must_use]
+    pub const fn with_splice_countdown(mut self, splice_countdown: i8) -> Self {
+        self.splice_countdown = Some(splice_countdown);
+        self
+    }
+
+    /// Returns the value with `transport_private_data` present, set to the one given
+    #[must_use]
+    pub const fn with_transport_private_data(
+        mut self,
+        transport_private_data: &'input [u8],
+    ) -> Self {
+        self.transport_private_data = Some(transport_private_data);
+        self
+    }
+
+    /// Returns the value with `adaptation_field_extension` present, set to the one given
+    #[must_use]
+    pub const fn with_adaptation_field_extension(
+        mut self,
+        adaptation_field_extension: &'input [u8],
+    ) -> Self {
+        self.adaptation_field_extension = Some(adaptation_field_extension);
+        self
+    }
+
+    /// Returns the value with the given `stuffing_bytes`
+    #[must_use]
+    pub const fn with_stuffing_bytes(mut self, stuffing_bytes: usize) -> Self {
+        self.stuffing_bytes = stuffing_bytes;
+        self
     }
 
     /// Returns whether any flag of the byte of flags is set
@@ -482,8 +560,36 @@ mod tests {
 
     use super::{AdaptationField, Error};
     use crate::field;
-    #[cfg(feature = "alloc")]
     use crate::time::ClockReference;
+
+    #[test]
+    fn a_field_built_with_every_with_method_equals_one_with_every_field_assigned() {
+        let pcr = ClockReference::new(2, 100).unwrap();
+        let opcr = ClockReference::new(3, 299).unwrap();
+        let mut assigned = AdaptationField::new();
+        assigned.discontinuity_indicator = true;
+        assigned.random_access_indicator = true;
+        assigned.elementary_stream_priority_indicator = true;
+        assigned.program_clock_reference = Some(pcr);
+        assigned.original_program_clock_reference = Some(opcr);
+        assigned.splice_countdown = Some(-1);
+        assigned.transport_private_data = Some(&[0x01, 0x02]);
+        assigned.adaptation_field_extension = Some(&[0x00]);
+        assigned.stuffing_bytes = 3;
+
+        let built = AdaptationField::new()
+            .with_discontinuity_indicator(true)
+            .with_random_access_indicator(true)
+            .with_elementary_stream_priority_indicator(true)
+            .with_program_clock_reference(pcr)
+            .with_original_program_clock_reference(opcr)
+            .with_splice_countdown(-1)
+            .with_transport_private_data(&[0x01, 0x02])
+            .with_adaptation_field_extension(&[0x00])
+            .with_stuffing_bytes(3);
+
+        assert_eq!(built, assigned);
+    }
 
     #[test]
     fn a_field_its_flag_announces_but_that_runs_past_the_end_names_itself() {

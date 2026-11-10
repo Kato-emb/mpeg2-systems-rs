@@ -34,6 +34,20 @@ impl LtwOffsetBounds {
             ltw_offset_upper_bound,
         }
     }
+
+    /// Returns the value with the given `ltw_offset_lower_bound`
+    #[must_use]
+    pub const fn with_ltw_offset_lower_bound(mut self, ltw_offset_lower_bound: u16) -> Self {
+        self.ltw_offset_lower_bound = ltw_offset_lower_bound;
+        self
+    }
+
+    /// Returns the value with the given `ltw_offset_upper_bound`
+    #[must_use]
+    pub const fn with_ltw_offset_upper_bound(mut self, ltw_offset_upper_bound: u16) -> Self {
+        self.ltw_offset_upper_bound = ltw_offset_upper_bound;
+        self
+    }
 }
 
 /// Multiplex buffer utilization descriptor, which bounds the occupancy of
@@ -57,7 +71,11 @@ impl LtwOffsetBounds {
 /// // LTW_offset between 100 and 2000
 /// let bytes = [0x0c, 0x04, 0x80, 0x64, 0x87, 0xd0];
 /// let descriptor = MultiplexBufferUtilizationDescriptor::try_from(&RawDescriptor::read(&bytes)?)?;
-/// assert_eq!(descriptor.ltw_offset_bounds, Some(LtwOffsetBounds::new(100, 2000)));
+/// assert_eq!(
+///     descriptor,
+///     MultiplexBufferUtilizationDescriptor::new()
+///         .with_ltw_offset_bounds(LtwOffsetBounds::new(100, 2000))
+/// );
 ///
 /// // Written back (with the `alloc` feature), it gives the same bytes
 /// # #[cfg(feature = "alloc")]
@@ -90,6 +108,13 @@ impl MultiplexBufferUtilizationDescriptor {
         Self {
             ltw_offset_bounds: None,
         }
+    }
+
+    /// Returns the value with `ltw_offset_bounds` present, set to the one given
+    #[must_use]
+    pub const fn with_ltw_offset_bounds(mut self, ltw_offset_bounds: LtwOffsetBounds) -> Self {
+        self.ltw_offset_bounds = Some(ltw_offset_bounds);
+        self
     }
 
     /// Returns whether the bounds are valid

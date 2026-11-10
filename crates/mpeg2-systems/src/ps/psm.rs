@@ -261,6 +261,53 @@ impl<'input> ProgramStreamMap<'input> {
         }
     }
 
+    /// Returns the value with the given `current_next_indicator`
+    #[must_use]
+    pub const fn with_current_next_indicator(mut self, current_next_indicator: bool) -> Self {
+        self.current_next_indicator = current_next_indicator;
+        self
+    }
+
+    /// Returns the value with the given `single_extension_stream_flag`
+    #[must_use]
+    pub const fn with_single_extension_stream_flag(
+        mut self,
+        single_extension_stream_flag: bool,
+    ) -> Self {
+        self.single_extension_stream_flag = single_extension_stream_flag;
+        self
+    }
+
+    /// Returns the value with the given `program_stream_map_version`
+    #[must_use]
+    pub const fn with_program_stream_map_version(
+        mut self,
+        program_stream_map_version: VersionNumber,
+    ) -> Self {
+        self.program_stream_map_version = program_stream_map_version;
+        self
+    }
+
+    /// Returns the value with the given `program_stream_info`
+    #[must_use]
+    pub const fn with_program_stream_info(
+        mut self,
+        program_stream_info: DescriptorLoop<'input>,
+    ) -> Self {
+        self.program_stream_info = program_stream_info;
+        self
+    }
+
+    /// Returns the value with the given `elementary_streams`
+    #[must_use]
+    pub const fn with_elementary_streams(
+        mut self,
+        elementary_streams: ElementaryStreamLoop<'input>,
+    ) -> Self {
+        self.elementary_streams = elementary_streams;
+        self
+    }
+
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
@@ -408,8 +455,9 @@ impl<'input> ProgramStreamMap<'input> {
     /// use mpeg2_systems::psi::VersionNumber;
     ///
     /// // Version 0 of a map of MPEG-2 video on 0xE0
-    /// let mut psm = ProgramStreamMap::new(VersionNumber::try_from(0)?);
-    /// psm.elementary_streams = ElementaryStreamLoop::from([0x02, 0xe0, 0x00, 0x00].as_slice());
+    /// let streams = [0x02, 0xe0, 0x00, 0x00];
+    /// let psm = ProgramStreamMap::new(VersionNumber::try_from(0)?)
+    ///     .with_elementary_streams(ElementaryStreamLoop::from(streams.as_slice()));
     /// let mut written = Vec::new();
     /// psm.write(&mut written)?;
     /// assert_eq!(

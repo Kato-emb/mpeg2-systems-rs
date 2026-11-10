@@ -52,9 +52,9 @@ const DTS_PREFIX: u8 = 0b0001;
 /// use mpeg2_systems::time::Timestamp;
 ///
 /// // A header that carries a PTS of one second
-/// let mut header = OptionalHeader::new();
-/// header.pts = Some(Timestamp::try_from(90_000).unwrap());
-/// header.data_alignment_indicator = true;
+/// let header = OptionalHeader::new()
+///     .with_pts(Timestamp::try_from(90_000).unwrap())
+///     .with_data_alignment_indicator(true);
 ///
 /// // Written (with the `alloc` feature) and read back, it holds the same values
 /// # #[cfg(feature = "alloc")]
@@ -127,6 +127,107 @@ impl<'input> OptionalHeader<'input> {
             pes_extension: None,
             stuffing_bytes: 0,
         }
+    }
+
+    /// Returns the value with the given `pes_scrambling_control`
+    #[must_use]
+    pub const fn with_pes_scrambling_control(
+        mut self,
+        pes_scrambling_control: PesScramblingControl,
+    ) -> Self {
+        self.pes_scrambling_control = pes_scrambling_control;
+        self
+    }
+
+    /// Returns the value with the given `pes_priority`
+    #[must_use]
+    pub const fn with_pes_priority(mut self, pes_priority: bool) -> Self {
+        self.pes_priority = pes_priority;
+        self
+    }
+
+    /// Returns the value with the given `data_alignment_indicator`
+    #[must_use]
+    pub const fn with_data_alignment_indicator(mut self, data_alignment_indicator: bool) -> Self {
+        self.data_alignment_indicator = data_alignment_indicator;
+        self
+    }
+
+    /// Returns the value with the given `copyright`
+    #[must_use]
+    pub const fn with_copyright(mut self, copyright: bool) -> Self {
+        self.copyright = copyright;
+        self
+    }
+
+    /// Returns the value with the given `original_or_copy`
+    #[must_use]
+    pub const fn with_original_or_copy(mut self, original_or_copy: bool) -> Self {
+        self.original_or_copy = original_or_copy;
+        self
+    }
+
+    /// Returns the value with `pts` present, set to the one given
+    #[must_use]
+    pub const fn with_pts(mut self, pts: Timestamp) -> Self {
+        self.pts = Some(pts);
+        self
+    }
+
+    /// Returns the value with `dts` present, set to the one given
+    #[must_use]
+    pub const fn with_dts(mut self, dts: Timestamp) -> Self {
+        self.dts = Some(dts);
+        self
+    }
+
+    /// Returns the value with `escr` present, set to the one given
+    #[must_use]
+    pub const fn with_escr(mut self, escr: ClockReference) -> Self {
+        self.escr = Some(escr);
+        self
+    }
+
+    /// Returns the value with `es_rate` present, set to the one given
+    #[must_use]
+    pub const fn with_es_rate(mut self, es_rate: u32) -> Self {
+        self.es_rate = Some(es_rate);
+        self
+    }
+
+    /// Returns the value with `dsm_trick_mode` present, set to the one given
+    #[must_use]
+    pub const fn with_dsm_trick_mode(mut self, dsm_trick_mode: DsmTrickMode) -> Self {
+        self.dsm_trick_mode = Some(dsm_trick_mode);
+        self
+    }
+
+    /// Returns the value with `additional_copy_info` present, set to the one given
+    #[must_use]
+    pub const fn with_additional_copy_info(mut self, additional_copy_info: u8) -> Self {
+        self.additional_copy_info = Some(additional_copy_info);
+        self
+    }
+
+    /// Returns the value with `previous_pes_packet_crc` present, set to the one given
+    #[must_use]
+    pub const fn with_previous_pes_packet_crc(mut self, previous_pes_packet_crc: u16) -> Self {
+        self.previous_pes_packet_crc = Some(previous_pes_packet_crc);
+        self
+    }
+
+    /// Returns the value with `pes_extension` present, set to the one given
+    #[must_use]
+    pub const fn with_pes_extension(mut self, pes_extension: PesExtension<'input>) -> Self {
+        self.pes_extension = Some(pes_extension);
+        self
+    }
+
+    /// Returns the value with the given `stuffing_bytes`
+    #[must_use]
+    pub const fn with_stuffing_bytes(mut self, stuffing_bytes: usize) -> Self {
+        self.stuffing_bytes = stuffing_bytes;
+        self
     }
 
     /// Returns the `PES_header_data_length` the fields and the stuffing add up to
@@ -487,6 +588,59 @@ mod tests {
         expected.stuffing_bytes = 2;
 
         assert_eq!(OptionalHeader::read(&EVERY_FIELD), Ok(expected));
+    }
+
+    #[test]
+    fn a_header_built_with_every_with_method_equals_one_with_every_field_assigned() {
+        let mut extension = PesExtension::new();
+        extension.pes_private_data = Some(&PRIVATE_DATA);
+        extension.pack_header_field = Some(&[0xaa, 0xbb, 0xcc]);
+        extension.program_packet_sequence_counter =
+            Some(ProgramPacketSequenceCounter::new(0x2a, true, 5));
+        extension.p_std_buffer = Some(PStdBuffer::new(true, 0x1234));
+        extension.pes_extension_field = Some(&[0x80, 0x01]);
+        let mut assigned = OptionalHeader::new();
+        assigned.pes_scrambling_control = PesScramblingControl::try_from(0b01).unwrap();
+        assigned.pes_priority = true;
+        assigned.data_alignment_indicator = true;
+        assigned.copyright = true;
+        assigned.original_or_copy = true;
+        assigned.pts = Some(timestamp(0x1_2345_6789));
+        assigned.dts = Some(timestamp(0x0_8765_4321));
+        assigned.escr = Some(ClockReference::new(0x1_0000_0001, 299).unwrap());
+        assigned.es_rate = Some(0x2a_bcde);
+        assigned.dsm_trick_mode = Some(DsmTrickMode::from(0x15));
+        assigned.additional_copy_info = Some(0x55);
+        assigned.previous_pes_packet_crc = Some(0xbeef);
+        assigned.pes_extension = Some(extension);
+        assigned.stuffing_bytes = 2;
+
+        let built = OptionalHeader::new()
+            .with_pes_scrambling_control(PesScramblingControl::try_from(0b01).unwrap())
+            .with_pes_priority(true)
+            .with_data_alignment_indicator(true)
+            .with_copyright(true)
+            .with_original_or_copy(true)
+            .with_pts(timestamp(0x1_2345_6789))
+            .with_dts(timestamp(0x0_8765_4321))
+            .with_escr(ClockReference::new(0x1_0000_0001, 299).unwrap())
+            .with_es_rate(0x2a_bcde)
+            .with_dsm_trick_mode(DsmTrickMode::from(0x15))
+            .with_additional_copy_info(0x55)
+            .with_previous_pes_packet_crc(0xbeef)
+            .with_pes_extension(
+                PesExtension::new()
+                    .with_pes_private_data(&PRIVATE_DATA)
+                    .with_pack_header_field(&[0xaa, 0xbb, 0xcc])
+                    .with_program_packet_sequence_counter(ProgramPacketSequenceCounter::new(
+                        0x2a, true, 5,
+                    ))
+                    .with_p_std_buffer(PStdBuffer::new(true, 0x1234))
+                    .with_pes_extension_field(&[0x80, 0x01]),
+            )
+            .with_stuffing_bytes(2);
+
+        assert_eq!(built, assigned);
     }
 
     #[cfg(feature = "alloc")]

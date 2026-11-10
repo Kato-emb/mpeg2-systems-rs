@@ -50,6 +50,20 @@ impl TemporalLayerSubset {
             temporal_id_max,
         }
     }
+
+    /// Returns the value with the given `temporal_id_min`
+    #[must_use]
+    pub const fn with_temporal_id_min(mut self, temporal_id_min: u8) -> Self {
+        self.temporal_id_min = temporal_id_min;
+        self
+    }
+
+    /// Returns the value with the given `temporal_id_max`
+    #[must_use]
+    pub const fn with_temporal_id_max(mut self, temporal_id_max: u8) -> Self {
+        self.temporal_id_max = temporal_id_max;
+        self
+    }
 }
 
 /// HEVC video descriptor, which identifies the profile, tier and level of an

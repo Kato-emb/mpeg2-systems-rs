@@ -54,6 +54,23 @@ impl<'input> RegistrationDescriptor<'input> {
         }
     }
 
+    /// Returns the value with the given `format_identifier`
+    #[must_use]
+    pub const fn with_format_identifier(mut self, format_identifier: u32) -> Self {
+        self.format_identifier = format_identifier;
+        self
+    }
+
+    /// Returns the value with the given `additional_identification_info`
+    #[must_use]
+    pub const fn with_additional_identification_info(
+        mut self,
+        additional_identification_info: &'input [u8],
+    ) -> Self {
+        self.additional_identification_info = additional_identification_info;
+        self
+    }
+
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     pub const fn encoded_len(&self) -> usize {

@@ -64,7 +64,7 @@ impl TryFrom<u8> for Layer {
 /// // Layer II with the ID bit set, of a constant bit rate
 /// let bytes = [0x03, 0x01, 0x67];
 /// let descriptor = AudioStreamDescriptor::try_from(&RawDescriptor::read(&bytes)?)?;
-/// assert_eq!(descriptor.layer, Layer::LAYER_II);
+/// assert_eq!(descriptor, AudioStreamDescriptor::new(Layer::LAYER_II).with_id(true));
 ///
 /// # #[cfg(feature = "alloc")]
 /// # {
@@ -98,6 +98,37 @@ impl AudioStreamDescriptor {
             layer,
             variable_rate_audio_indicator: false,
         }
+    }
+
+    /// Returns the value with the given `free_format_flag`
+    #[must_use]
+    pub const fn with_free_format_flag(mut self, free_format_flag: bool) -> Self {
+        self.free_format_flag = free_format_flag;
+        self
+    }
+
+    /// Returns the value with the given `id`
+    #[must_use]
+    pub const fn with_id(mut self, id: bool) -> Self {
+        self.id = id;
+        self
+    }
+
+    /// Returns the value with the given `layer`
+    #[must_use]
+    pub const fn with_layer(mut self, layer: Layer) -> Self {
+        self.layer = layer;
+        self
+    }
+
+    /// Returns the value with the given `variable_rate_audio_indicator`
+    #[must_use]
+    pub const fn with_variable_rate_audio_indicator(
+        mut self,
+        variable_rate_audio_indicator: bool,
+    ) -> Self {
+        self.variable_rate_audio_indicator = variable_rate_audio_indicator;
+        self
     }
 
     /// Returns the number of bytes [`write`](Self::write) appends

@@ -305,6 +305,34 @@ impl<'input> PesPacket<'input> {
         }
     }
 
+    /// Returns the value with the given `stream_id`
+    #[must_use]
+    pub const fn with_stream_id(mut self, stream_id: StreamId) -> Self {
+        self.stream_id = stream_id;
+        self
+    }
+
+    /// Returns the value with the given `length_unspecified`
+    #[must_use]
+    pub const fn with_length_unspecified(mut self, length_unspecified: bool) -> Self {
+        self.length_unspecified = length_unspecified;
+        self
+    }
+
+    /// Returns the value with `optional_header` present, set to the one given
+    #[must_use]
+    pub const fn with_optional_header(mut self, optional_header: OptionalHeader<'input>) -> Self {
+        self.optional_header = Some(optional_header);
+        self
+    }
+
+    /// Returns the value with the given `payload`
+    #[must_use]
+    pub const fn with_payload(mut self, payload: &'input [u8]) -> Self {
+        self.payload = payload;
+        self
+    }
+
     /// Returns the number of bytes after `PES_packet_length`
     fn body_length(&self) -> usize {
         self.optional_header
@@ -456,6 +484,23 @@ mod tests {
 
     use super::{EncodedLen, Error, OptionalHeader, PesPacket, StreamId};
     use crate::pes;
+
+    #[test]
+    fn a_packet_built_with_every_with_method_equals_one_with_every_field_assigned() {
+        let mut assigned = PesPacket::new(StreamId::PADDING_STREAM, &[0xff]);
+        assigned.stream_id = StreamId::from(0xe0);
+        assigned.length_unspecified = true;
+        assigned.optional_header = Some(OptionalHeader::new());
+        assigned.payload = &[0xaa, 0xbb];
+
+        let built = PesPacket::new(StreamId::PADDING_STREAM, &[0xff])
+            .with_stream_id(StreamId::from(0xe0))
+            .with_length_unspecified(true)
+            .with_optional_header(OptionalHeader::new())
+            .with_payload(&[0xaa, 0xbb]);
+
+        assert_eq!(built, assigned);
+    }
 
     #[test]
     fn a_stream_without_an_optional_header_has_every_byte_as_payload() {

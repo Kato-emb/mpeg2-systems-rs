@@ -261,6 +261,44 @@ impl<'input> Section<'input> {
         }
     }
 
+    /// Returns the value with the given `table_id`
+    #[must_use]
+    pub const fn with_table_id(mut self, table_id: TableId) -> Self {
+        self.table_id = table_id;
+        self
+    }
+
+    /// Returns the value with the given `private_indicator`
+    #[must_use]
+    pub const fn with_private_indicator(mut self, private_indicator: bool) -> Self {
+        self.private_indicator = private_indicator;
+        self
+    }
+
+    /// Returns the value with the given `reserved_before_section_length`
+    #[must_use]
+    pub const fn with_reserved_before_section_length(
+        mut self,
+        reserved_before_section_length: u8,
+    ) -> Self {
+        self.reserved_before_section_length = reserved_before_section_length;
+        self
+    }
+
+    /// Returns the value with `syntax` present, set to the one given
+    #[must_use]
+    pub const fn with_syntax(mut self, syntax: SectionSyntax) -> Self {
+        self.syntax = Some(syntax);
+        self
+    }
+
+    /// Returns the value with the given `body`
+    #[must_use]
+    pub const fn with_body(mut self, body: &'input [u8]) -> Self {
+        self.body = body;
+        self
+    }
+
     /// Returns whether the section has the fields from
     /// `table_id_extension` to `last_section_number`, and a `CRC_32`
     #[must_use]

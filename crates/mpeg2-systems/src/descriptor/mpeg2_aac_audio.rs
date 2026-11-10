@@ -60,8 +60,10 @@ impl From<u8> for Mpeg2AacAdditionalInformation {
 /// let bytes = [0x2b, 0x03, 0x01, 0x02, 0x01];
 /// let descriptor = Mpeg2AacAudioDescriptor::try_from(&RawDescriptor::read(&bytes)?)?;
 /// assert_eq!(
-///     descriptor.mpeg_2_aac_additional_information,
-///     Mpeg2AacAdditionalInformation::AAC_WITH_BANDWIDTH_EXTENSION
+///     descriptor,
+///     Mpeg2AacAudioDescriptor::new(0x01, 0x02).with_mpeg_2_aac_additional_information(
+///         Mpeg2AacAdditionalInformation::AAC_WITH_BANDWIDTH_EXTENSION
+///     )
 /// );
 ///
 /// // Written back (with the `alloc` feature), it gives the same bytes
@@ -96,6 +98,33 @@ impl Mpeg2AacAudioDescriptor {
             mpeg_2_aac_channel_configuration,
             mpeg_2_aac_additional_information: Mpeg2AacAdditionalInformation::AAC,
         }
+    }
+
+    /// Returns the value with the given `mpeg_2_aac_profile`
+    #[must_use]
+    pub const fn with_mpeg_2_aac_profile(mut self, mpeg_2_aac_profile: u8) -> Self {
+        self.mpeg_2_aac_profile = mpeg_2_aac_profile;
+        self
+    }
+
+    /// Returns the value with the given `mpeg_2_aac_channel_configuration`
+    #[must_use]
+    pub const fn with_mpeg_2_aac_channel_configuration(
+        mut self,
+        mpeg_2_aac_channel_configuration: u8,
+    ) -> Self {
+        self.mpeg_2_aac_channel_configuration = mpeg_2_aac_channel_configuration;
+        self
+    }
+
+    /// Returns the value with the given `mpeg_2_aac_additional_information`
+    #[must_use]
+    pub const fn with_mpeg_2_aac_additional_information(
+        mut self,
+        mpeg_2_aac_additional_information: Mpeg2AacAdditionalInformation,
+    ) -> Self {
+        self.mpeg_2_aac_additional_information = mpeg_2_aac_additional_information;
+        self
     }
 
     /// Returns the number of bytes [`write`](Self::write) appends

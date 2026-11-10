@@ -24,8 +24,7 @@ use framer::{Output, PacketFramer};
 /// ```
 /// use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, PacketSize};
 ///
-/// let mut config = DemuxerConfig::default();
-/// config.packet_size = Some(PacketSize::Timestamped192);
+/// let config = DemuxerConfig::default().with_packet_size(PacketSize::Timestamped192);
 /// let demuxer = Demuxer::new(config);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,6 +54,22 @@ impl Default for DemuxerConfig {
             packet_size: None,
             pes_buffer_limit: DEFAULT_PES_BUFFER_LIMIT,
         }
+    }
+}
+
+impl DemuxerConfig {
+    /// Returns the value with `packet_size` present, set to the one given
+    #[must_use]
+    pub const fn with_packet_size(mut self, packet_size: PacketSize) -> Self {
+        self.packet_size = Some(packet_size);
+        self
+    }
+
+    /// Returns the value with the given `pes_buffer_limit`
+    #[must_use]
+    pub const fn with_pes_buffer_limit(mut self, pes_buffer_limit: usize) -> Self {
+        self.pes_buffer_limit = pes_buffer_limit;
+        self
     }
 }
 

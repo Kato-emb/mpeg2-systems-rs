@@ -66,6 +66,27 @@ impl<'input> CaDescriptor<'input> {
         }
     }
 
+    /// Returns the value with the given `ca_system_id`
+    #[must_use]
+    pub const fn with_ca_system_id(mut self, ca_system_id: u16) -> Self {
+        self.ca_system_id = ca_system_id;
+        self
+    }
+
+    /// Returns the value with the given `ca_pid`
+    #[must_use]
+    pub const fn with_ca_pid(mut self, ca_pid: Pid) -> Self {
+        self.ca_pid = ca_pid;
+        self
+    }
+
+    /// Returns the value with the given `private_data_byte`
+    #[must_use]
+    pub const fn with_private_data_byte(mut self, private_data_byte: &'input [u8]) -> Self {
+        self.private_data_byte = private_data_byte;
+        self
+    }
+
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     pub const fn encoded_len(&self) -> usize {

@@ -51,6 +51,13 @@ impl StdDescriptor {
         Self { leak_valid_flag }
     }
 
+    /// Returns the value with the given `leak_valid_flag`
+    #[must_use]
+    pub const fn with_leak_valid_flag(mut self, leak_valid_flag: bool) -> Self {
+        self.leak_valid_flag = leak_valid_flag;
+        self
+    }
+
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     #[expect(

@@ -245,6 +245,20 @@ impl<'input> RawDescriptor<'input> {
         }
     }
 
+    /// Returns the value with the given `descriptor_tag`
+    #[must_use]
+    pub const fn with_descriptor_tag(mut self, descriptor_tag: DescriptorTag) -> Self {
+        self.descriptor_tag = descriptor_tag;
+        self
+    }
+
+    /// Returns the value with the given `body`
+    #[must_use]
+    pub const fn with_body(mut self, body: &'input [u8]) -> Self {
+        self.body = body;
+        self
+    }
+
     /// Takes the descriptor at the front of `bytes`, and returns it with the
     /// bytes after it
     fn frame(bytes: &'input [u8]) -> Result<(Self, &'input [u8]), Error> {

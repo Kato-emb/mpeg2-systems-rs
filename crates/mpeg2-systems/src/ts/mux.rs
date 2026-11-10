@@ -317,9 +317,9 @@ impl core::error::Error for Error {
 /// use core::time::Duration;
 /// use mpeg2_systems::ts::mux::MuxerConfig;
 ///
-/// let mut config = MuxerConfig::new();
-/// config.transport_stream_id = 0x7fe0;
-/// config.pcr_interval = Duration::from_millis(30);
+/// let config = MuxerConfig::new()
+///     .with_transport_stream_id(0x7fe0)
+///     .with_pcr_interval(Duration::from_millis(30));
 /// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -370,6 +370,41 @@ impl MuxerConfig {
             mux_delay: Duration::from_millis(700),
             buffer_limit: 4 * 1024 * 1024,
         }
+    }
+
+    /// Returns the value with the given `transport_stream_id`
+    #[must_use]
+    pub const fn with_transport_stream_id(mut self, transport_stream_id: u16) -> Self {
+        self.transport_stream_id = transport_stream_id;
+        self
+    }
+
+    /// Returns the value with the given `psi_interval`
+    #[must_use]
+    pub const fn with_psi_interval(mut self, psi_interval: Duration) -> Self {
+        self.psi_interval = psi_interval;
+        self
+    }
+
+    /// Returns the value with the given `pcr_interval`
+    #[must_use]
+    pub const fn with_pcr_interval(mut self, pcr_interval: Duration) -> Self {
+        self.pcr_interval = pcr_interval;
+        self
+    }
+
+    /// Returns the value with the given `mux_delay`
+    #[must_use]
+    pub const fn with_mux_delay(mut self, mux_delay: Duration) -> Self {
+        self.mux_delay = mux_delay;
+        self
+    }
+
+    /// Returns the value with the given `buffer_limit`
+    #[must_use]
+    pub const fn with_buffer_limit(mut self, buffer_limit: usize) -> Self {
+        self.buffer_limit = buffer_limit;
+        self
     }
 }
 

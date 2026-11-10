@@ -1028,3 +1028,22 @@ fn a_first_pes_packet_without_a_time_stamp_is_refused_on_a_stream_without_an_opt
         })
     );
 }
+
+#[test]
+fn a_config_built_with_every_with_method_equals_one_with_every_field_assigned() {
+    let mut assigned = MuxerConfig::new();
+    assigned.transport_stream_id = 0x7fe0;
+    assigned.psi_interval = Duration::from_millis(50);
+    assigned.pcr_interval = Duration::from_millis(30);
+    assigned.mux_delay = Duration::from_millis(500);
+    assigned.buffer_limit = 1024;
+
+    let built = MuxerConfig::new()
+        .with_transport_stream_id(0x7fe0)
+        .with_psi_interval(Duration::from_millis(50))
+        .with_pcr_interval(Duration::from_millis(30))
+        .with_mux_delay(Duration::from_millis(500))
+        .with_buffer_limit(1024);
+
+    assert_eq!(built, assigned);
+}

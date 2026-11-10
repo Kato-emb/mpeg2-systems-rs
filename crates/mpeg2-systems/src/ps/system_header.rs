@@ -226,7 +226,7 @@ pub struct SystemHeader<'input> {
     pub stream_bounds: StreamBoundLoop<'input>,
 }
 
-impl SystemHeader<'_> {
+impl<'input> SystemHeader<'input> {
     /// Creates a system header with no flag set and no stream bounds
     #[must_use]
     pub const fn new(rate_bound: u32, audio_bound: u8, video_bound: u8) -> Self {
@@ -241,6 +241,72 @@ impl SystemHeader<'_> {
             packet_rate_restriction_flag: false,
             stream_bounds: StreamBoundLoop(&[]),
         }
+    }
+
+    /// Returns the value with the given `rate_bound`
+    #[must_use]
+    pub const fn with_rate_bound(mut self, rate_bound: u32) -> Self {
+        self.rate_bound = rate_bound;
+        self
+    }
+
+    /// Returns the value with the given `audio_bound`
+    #[must_use]
+    pub const fn with_audio_bound(mut self, audio_bound: u8) -> Self {
+        self.audio_bound = audio_bound;
+        self
+    }
+
+    /// Returns the value with the given `fixed_flag`
+    #[must_use]
+    pub const fn with_fixed_flag(mut self, fixed_flag: bool) -> Self {
+        self.fixed_flag = fixed_flag;
+        self
+    }
+
+    /// Returns the value with the given `csps_flag`
+    #[must_use]
+    pub const fn with_csps_flag(mut self, csps_flag: bool) -> Self {
+        self.csps_flag = csps_flag;
+        self
+    }
+
+    /// Returns the value with the given `system_audio_lock_flag`
+    #[must_use]
+    pub const fn with_system_audio_lock_flag(mut self, system_audio_lock_flag: bool) -> Self {
+        self.system_audio_lock_flag = system_audio_lock_flag;
+        self
+    }
+
+    /// Returns the value with the given `system_video_lock_flag`
+    #[must_use]
+    pub const fn with_system_video_lock_flag(mut self, system_video_lock_flag: bool) -> Self {
+        self.system_video_lock_flag = system_video_lock_flag;
+        self
+    }
+
+    /// Returns the value with the given `video_bound`
+    #[must_use]
+    pub const fn with_video_bound(mut self, video_bound: u8) -> Self {
+        self.video_bound = video_bound;
+        self
+    }
+
+    /// Returns the value with the given `packet_rate_restriction_flag`
+    #[must_use]
+    pub const fn with_packet_rate_restriction_flag(
+        mut self,
+        packet_rate_restriction_flag: bool,
+    ) -> Self {
+        self.packet_rate_restriction_flag = packet_rate_restriction_flag;
+        self
+    }
+
+    /// Returns the value with the given `stream_bounds`
+    #[must_use]
+    pub const fn with_stream_bounds(mut self, stream_bounds: StreamBoundLoop<'input>) -> Self {
+        self.stream_bounds = stream_bounds;
+        self
     }
 
     /// Returns `header_length`, the bytes after it
@@ -363,8 +429,8 @@ impl<'input> SystemHeader<'input> {
     ///     [StreamBound::new(StreamId::from(0xe0), true, 230)],
     ///     &mut stream_bounds,
     /// )?;
-    /// let mut system_header = SystemHeader::new(1_101_198, 0, 1);
-    /// system_header.stream_bounds = StreamBoundLoop::from(stream_bounds.as_slice());
+    /// let system_header = SystemHeader::new(1_101_198, 0, 1)
+    ///     .with_stream_bounds(StreamBoundLoop::from(stream_bounds.as_slice()));
     ///
     /// let mut written = Vec::new();
     /// system_header.write(&mut written)?;

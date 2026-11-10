@@ -92,8 +92,7 @@ const PROGRAM_MUX_RATE_LIMIT: u32 = 1 << 22;
 /// use mpeg2_systems::ps::mux::MuxerConfig;
 ///
 /// // 1 260 000 bytes a second
-/// let mut config = MuxerConfig::new(25_200);
-/// config.mux_delay = Duration::from_millis(500);
+/// let config = MuxerConfig::new(25_200).with_mux_delay(Duration::from_millis(500));
 /// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -139,6 +138,34 @@ impl MuxerConfig {
             mux_delay: Duration::from_millis(700),
             buffer_limit: 4 * 1024 * 1024,
         }
+    }
+
+    /// Returns the value with the given `program_mux_rate`
+    #[must_use]
+    pub const fn with_program_mux_rate(mut self, program_mux_rate: u32) -> Self {
+        self.program_mux_rate = program_mux_rate;
+        self
+    }
+
+    /// Returns the value with the given `pack_size`
+    #[must_use]
+    pub const fn with_pack_size(mut self, pack_size: usize) -> Self {
+        self.pack_size = pack_size;
+        self
+    }
+
+    /// Returns the value with the given `mux_delay`
+    #[must_use]
+    pub const fn with_mux_delay(mut self, mux_delay: Duration) -> Self {
+        self.mux_delay = mux_delay;
+        self
+    }
+
+    /// Returns the value with the given `buffer_limit`
+    #[must_use]
+    pub const fn with_buffer_limit(mut self, buffer_limit: usize) -> Self {
+        self.buffer_limit = buffer_limit;
+        self
     }
 }
 

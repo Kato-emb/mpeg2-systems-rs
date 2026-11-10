@@ -53,6 +53,13 @@ impl PrivateDataIndicatorDescriptor {
         }
     }
 
+    /// Returns the value with the given `private_data_indicator`
+    #[must_use]
+    pub const fn with_private_data_indicator(mut self, private_data_indicator: u32) -> Self {
+        self.private_data_indicator = private_data_indicator;
+        self
+    }
+
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     #[expect(

@@ -60,6 +60,27 @@ impl VideoWindowDescriptor {
         }
     }
 
+    /// Returns the value with the given `horizontal_offset`
+    #[must_use]
+    pub const fn with_horizontal_offset(mut self, horizontal_offset: u16) -> Self {
+        self.horizontal_offset = horizontal_offset;
+        self
+    }
+
+    /// Returns the value with the given `vertical_offset`
+    #[must_use]
+    pub const fn with_vertical_offset(mut self, vertical_offset: u16) -> Self {
+        self.vertical_offset = vertical_offset;
+        self
+    }
+
+    /// Returns the value with the given `window_priority`
+    #[must_use]
+    pub const fn with_window_priority(mut self, window_priority: u8) -> Self {
+        self.window_priority = window_priority;
+        self
+    }
+
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     #[expect(
