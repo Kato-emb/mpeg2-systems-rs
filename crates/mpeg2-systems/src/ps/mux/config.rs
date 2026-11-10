@@ -57,6 +57,28 @@ pub struct MuxerConfig {
     /// ISO/IEC 13818-1 places no requirement on how often they are sent
     /// (§2.7.8, §2.5.4).
     pub header_interval: Duration,
+    /// Whether the stream has a fixed bitrate, `fixed_flag` `'1'` (`false`
+    /// by default)
+    ///
+    /// The SCRs then follow ISO/IEC 13818-1 §2.5.3.6 equations 2-22 and
+    /// 2-23, c1 the time a byte takes to arrive at `program_mux_rate`
+    /// (§2.5.2.2 equation 2-21): each pack follows the one before without a
+    /// gap. Where the SCR of a PES packet's pack would be before its time
+    /// less `mux_delay`, packs of padding fill the bytes up to the first SCR
+    /// on the line at or after that time. Where fewer than the bytes of a
+    /// pack header would be left over, they are not filled, and the SCR is
+    /// earlier than that time by no more than those fewer than 14 bytes take
+    /// to arrive: the SCR of a PES packet's pack is at its time less
+    /// `mux_delay`, or up to 13 bytes earlier, unless the packs before it
+    /// end later.
+    ///
+    /// A pack of padding is at most the most bytes of a pack
+    /// ([`pack_size`](Self::pack_size), or fewer where fewer arrive within
+    /// 0.7 s at `program_mux_rate`), with `stuffing_byte`s where 7 or fewer
+    /// fill it (§2.5.3.4) and PES packets of `padding_stream` past them
+    /// (§2.4.3.6), as many as the 65 535 bytes of `PES_packet_length` need.
+    /// The system header names no bound for `padding_stream`.
+    pub fixed_rate: bool,
 }
 
 impl MuxerConfig {
@@ -69,6 +91,7 @@ impl MuxerConfig {
             mux_delay: Duration::from_millis(700),
             buffer_limit: 4 * 1024 * 1024,
             header_interval: Duration::MAX,
+            fixed_rate: false,
         }
     }
 
@@ -97,6 +120,13 @@ impl MuxerConfig {
     #[must_use]
     pub const fn with_header_interval(mut self, header_interval: Duration) -> Self {
         self.header_interval = header_interval;
+        self
+    }
+
+    /// Returns the value with the given `fixed_rate`
+    #[must_use]
+    pub const fn with_fixed_rate(mut self, fixed_rate: bool) -> Self {
+        self.fixed_rate = fixed_rate;
         self
     }
 }

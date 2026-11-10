@@ -423,3 +423,45 @@ fn pack_stuffing_past_7_bytes_is_refused_leaving_out_as_it_was() {
         )
     );
 }
+
+#[test]
+fn a_pack_of_padding_takes_stuffing_up_to_7_bytes_and_padding_packets_past_them() {
+    let header = PackHeader::new(ClockReference::new(0, 0).unwrap(), 2_000);
+    let written = |length: usize| {
+        let mut out = Vec::new();
+        PackWriter::new()
+            .write_padding_pack(&header, length, &mut out)
+            .unwrap();
+        let stuffing = out.get(13).unwrap() & 0x07;
+        let (pack_header, rest) = out.split_at(14 + usize::from(stuffing));
+        let padding: Vec<_> = packets(rest)
+            .into_iter()
+            .map(|packet| {
+                (
+                    packet.stream_id,
+                    packet.payload.len(),
+                    packet.payload.iter().all(|&byte| byte == 0xff),
+                )
+            })
+            .collect();
+        (
+            out.len(),
+            PackHeader::read(pack_header).unwrap().pack_stuffing_length,
+            padding,
+        )
+    };
+    let padding = |length: usize| (StreamId::PADDING_STREAM, length, true);
+
+    // Past the longest PES packet, two of as near the same length
+    assert_eq!(
+        [14, 21, 22, 23, 14 + 65_541, 14 + 65_542].map(written),
+        [
+            (14, 0, vec![]),
+            (21, 7, vec![]),
+            (22, 0, vec![padding(2)]),
+            (23, 0, vec![padding(3)]),
+            (14 + 65_541, 0, vec![padding(65_535)]),
+            (14 + 65_542, 0, vec![padding(32_765), padding(32_765)]),
+        ]
+    );
+}
