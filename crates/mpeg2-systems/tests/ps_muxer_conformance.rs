@@ -1,8 +1,8 @@
 //! What the Program Stream `Muxer` writes, checked against ffprobe: the
 //! streams the program stream map names and the PES packets with their
 //! time stamps, with the time stamps as they come, leaping, and across the
-//! wrap of 33 bits, and with the system header and the map sent again or
-//! updated
+//! wrap of 33 bits, with the system header and the map sent again or
+//! updated, and at a fixed rate with padding
 //!
 //! The tests run `ffprobe` from `PATH`, so they are ignored unless asked
 //! for; once asked for, a tool missing is a failure.
@@ -233,5 +233,42 @@ mod tests {
         // One change of the map, version 0 then 1 (§2.5.4.2); the system
         // header unchanged (§2.7.8)
         assert_eq!(headers_reported(&stream), (1, vec![0, 1]));
+    }
+
+    #[test]
+    #[ignore = "runs ffprobe from FFmpeg"]
+    fn the_pes_packets_read_in_ffprobe_as_given_at_a_fixed_rate_across_a_leap() {
+        let stream = multiplex_read_as_given(
+            "ps_muxer_fixed_rate.mpg",
+            MuxerConfig::new(25_200).with_fixed_rate(true),
+            &inputs_at(|index| 90_000 + index * STEP + if index >= 50 { 180_000 } else { 0 }),
+            |_, _| {},
+        );
+
+        let padding = stream
+            .windows(4)
+            .filter(|code| code == &[0, 0, 1, 0xbe])
+            .count();
+        assert!(padding > 0, "{padding} padding packets");
+    }
+
+    #[test]
+    #[ignore = "runs ffprobe from FFmpeg"]
+    fn the_pes_packets_read_in_ffprobe_as_given_at_a_fixed_rate_in_packs_past_the_longest_pes_packet()
+     {
+        let stream = multiplex_read_as_given(
+            "ps_muxer_fixed_rate_large_packs.mpg",
+            MuxerConfig::new(25_200)
+                .with_fixed_rate(true)
+                .with_pack_size(200_000),
+            &inputs_at(|index| 90_000 + index * STEP + if index >= 50 { 180_000 } else { 0 }),
+            |_, _| {},
+        );
+
+        let padding = stream
+            .windows(4)
+            .filter(|code| code == &[0, 0, 1, 0xbe])
+            .count();
+        assert!(padding > 0, "{padding} padding packets");
     }
 }

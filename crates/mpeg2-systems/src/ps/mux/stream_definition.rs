@@ -3,7 +3,7 @@
 
 use alloc::vec::Vec;
 
-use super::{Error, Muxer, MuxerConfig, PackWriter, largest_pack, shortest_pack};
+use super::{Error, Muxer, PackWriter, shortest_pack};
 use crate::descriptor::DescriptorLoop;
 use crate::pes::StreamId;
 use crate::pes::extension::PStdBuffer;
@@ -95,15 +95,16 @@ pub(super) fn check_map_length<'stream>(
     .map_err(|error| Error::ProgramStreamMap { error })
 }
 
-/// Appends the system header of `streams`, `rate_bound`
-/// `program_mux_rate`, and the program stream map of `program_stream_info`
-/// and `streams`, `program_stream_map_version` `version`, to `out`, writing
-/// their loops in `entries`
+/// Appends the system header of `streams`, `rate_bound` and `fixed_flag`
+/// as given, and the program stream map of `program_stream_info` and
+/// `streams`, `program_stream_map_version` `version`, to `out`, writing their
+/// loops in `entries`
 pub(super) fn write_headers(
     streams: &[Stream],
     program_stream_info: &[u8],
     version: VersionNumber,
-    program_mux_rate: u32,
+    rate_bound: u32,
+    fixed_flag: bool,
     entries: &mut Vec<u8>,
     out: &mut Vec<u8>,
 ) -> Result<(), Error> {
@@ -116,7 +117,8 @@ pub(super) fn write_headers(
     entries.clear();
     StreamBoundLoop::write_from(streams.iter().map(Stream::stream_bound), entries)
         .map_err(|error| Error::SystemHeader { error })?;
-    let mut system_header = SystemHeader::new(program_mux_rate, audio_bound, video_bound);
+    let mut system_header =
+        SystemHeader::new(rate_bound, audio_bound, video_bound).with_fixed_flag(fixed_flag);
     system_header.stream_bounds = StreamBoundLoop::from(entries.as_slice());
     writer.write_system_header(&system_header, out)?;
     entries.clear();
@@ -164,6 +166,9 @@ impl Muxer {
     ///   with the system header and the program stream map, could not carry a
     ///   PES packet in [`MuxerConfig::pack_size`], or in the bytes that
     ///   arrive within 0.7 s at [`MuxerConfig::program_mux_rate`] (§2.7.1).
+    ///
+    /// [`MuxerConfig::pack_size`]: super::MuxerConfig::pack_size
+    /// [`MuxerConfig::program_mux_rate`]: super::MuxerConfig::program_mux_rate
     ///
     /// ```
     /// use mpeg2_systems::descriptor::DescriptorLoop;
@@ -251,12 +256,7 @@ impl Muxer {
             registered.stream_type = stream.stream_type;
             registered.es_info = es_info.to_vec();
         }
-        check_headers(
-            &streams,
-            &self.program_stream_info,
-            self.map_version,
-            &self.config,
-        )?;
+        self.check_headers_of(&streams, &self.program_stream_info)?;
         self.streams = streams;
         self.change_map();
         Ok(())
@@ -280,6 +280,9 @@ impl Muxer {
     ///   with the system header and the program stream map, could not carry a
     ///   PES packet in [`MuxerConfig::pack_size`], or in the bytes that
     ///   arrive within 0.7 s at [`MuxerConfig::program_mux_rate`] (§2.7.1).
+    ///
+    /// [`MuxerConfig::pack_size`]: super::MuxerConfig::pack_size
+    /// [`MuxerConfig::program_mux_rate`]: super::MuxerConfig::program_mux_rate
     pub fn set_program_stream_info(
         &mut self,
         program_stream_info: DescriptorLoop<'_>,
@@ -288,12 +291,7 @@ impl Muxer {
         if program_stream_info == self.program_stream_info {
             return Ok(());
         }
-        check_headers(
-            &self.streams,
-            program_stream_info,
-            self.map_version,
-            &self.config,
-        )?;
+        self.check_headers_of(&self.streams, program_stream_info)?;
         self.program_stream_info = program_stream_info.to_vec();
         self.change_map();
         Ok(())
@@ -308,28 +306,31 @@ impl Muxer {
     }
 }
 
-/// Refuses the system header of `streams` and the program stream map of
-/// `program_stream_info` and `streams`, `program_stream_map_version`
-/// `version`, where [`SystemHeader::write`] or [`ProgramStreamMap::write`]
-/// does, or where the first pack of a PES packet, with them, could not carry
-/// a PES packet under `config`
+/// Refuses the system header of `streams`, `rate_bound` and `fixed_flag` as
+/// given, and the program stream map of `program_stream_info` and `streams`,
+/// `program_stream_map_version` `version`, where [`SystemHeader::write`] or
+/// [`ProgramStreamMap::write`] does, or where the first pack of a PES packet,
+/// with them, could not carry a PES packet in `largest_pack` bytes
 pub(super) fn check_headers(
     streams: &[Stream],
     program_stream_info: &[u8],
     version: VersionNumber,
-    config: &MuxerConfig,
+    rate_bound: u32,
+    fixed_flag: bool,
+    largest_pack: usize,
 ) -> Result<(), Error> {
     let mut headers = Vec::new();
     write_headers(
         streams,
         program_stream_info,
         version,
-        config.program_mux_rate,
+        rate_bound,
+        fixed_flag,
         &mut Vec::new(),
         &mut headers,
     )?;
     let length = shortest_pack(headers.len());
-    if length > largest_pack(config) {
+    if length > largest_pack {
         return Err(Error::PackLength { length });
     }
     Ok(())
