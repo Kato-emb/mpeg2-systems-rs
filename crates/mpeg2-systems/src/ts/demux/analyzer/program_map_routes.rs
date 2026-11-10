@@ -1,10 +1,10 @@
 //! The program maps a PAT names, version by version
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::mem;
 
-use super::section_reassembly::SectionReassembler;
+use super::SectionPid;
 use super::version_gate::VersionGate;
 use crate::psi::VersionNumber;
 use crate::psi::pat::{Program, ProgramAssociationSection};
@@ -81,15 +81,14 @@ impl ProgramMapRoutes {
     /// Each program a section names is named at once, and its program map
     /// gains a reassembler. Once every section of the version is in, the
     /// version's programs replace those of the previous one: a program map
-    /// PID the version no longer names loses its reassembler unless it is in
-    /// `subscribed`, and a program
+    /// PID the version no longer names loses its entry in `section_pids`
+    /// unless the caller subscribed to it, and a program
     /// it no longer names, or a PAT section past its `last_section_number`,
     /// loses its version memory.
     pub(super) fn follow(
         &mut self,
         pat: &ProgramAssociationSection<'_>,
-        reassemblers: &mut BTreeMap<Pid, SectionReassembler>,
-        subscribed: &BTreeSet<Pid>,
+        section_pids: &mut BTreeMap<Pid, SectionPid>,
         gate: &mut VersionGate,
     ) {
         let gathering = match (observe(self.gathering.as_ref(), pat), &mut self.gathering) {
@@ -128,9 +127,9 @@ impl ProgramMapRoutes {
             }) = program
                 && ![Pid::PAT, Pid::CAT, Pid::NULL].contains(&program_map_pid)
             {
-                reassemblers
+                section_pids
                     .entry(program_map_pid)
-                    .or_insert_with(SectionReassembler::new);
+                    .or_insert_with(SectionPid::new);
                 self.gathered.push((program_map_pid, program_number.get()));
             }
         }
@@ -155,8 +154,8 @@ impl ProgramMapRoutes {
         }
         mem::swap(&mut self.named, &mut self.gathered);
         self.gathered.clear();
-        reassemblers.retain(|pid, _| {
-            [Pid::PAT, Pid::CAT].contains(pid) || subscribed.contains(pid) || self.follows(*pid)
+        section_pids.retain(|pid, section_pid| {
+            [Pid::PAT, Pid::CAT].contains(pid) || section_pid.subscribed || self.follows(*pid)
         });
         gate.retain(
             pat.transport_stream_id,
@@ -194,7 +193,7 @@ fn observe(gathering: Option<&Gathering>, pat: &ProgramAssociationSection<'_>) -
 
 #[cfg(test)]
 mod tests {
-    use alloc::collections::{BTreeMap, BTreeSet};
+    use alloc::collections::BTreeMap;
     use alloc::vec;
     use alloc::vec::Vec;
 
@@ -203,7 +202,7 @@ mod tests {
     use crate::psi::pat::ProgramAssociationSection;
     use crate::psi::section::Section;
     use crate::ts::Pid;
-    use crate::ts::demux::analyzer::section_reassembly::SectionReassembler;
+    use crate::ts::demux::analyzer::SectionPid;
     use crate::ts::demux::analyzer::version_gate::{Admission, TableSection, VersionGate};
 
     /// A PAT section of `transport_stream_id` 1 naming `programs`, each a
@@ -236,12 +235,12 @@ mod tests {
         bytes
     }
 
-    /// Program routes, the reassembler map of a demuxer that has seen the
+    /// Program routes, the section PIDs of a demuxer that has seen the
     /// PAT PID only, and a version memory
     #[derive(Debug, Clone, PartialEq)]
     struct Fixture {
         routes: ProgramMapRoutes,
-        reassemblers: BTreeMap<Pid, SectionReassembler>,
+        section_pids: BTreeMap<Pid, SectionPid>,
         gate: VersionGate,
     }
 
@@ -254,7 +253,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 routes: ProgramMapRoutes::new(),
-                reassemblers: BTreeMap::from([(Pid::PAT, SectionReassembler::new())]),
+                section_pids: BTreeMap::from([(Pid::PAT, SectionPid::new())]),
                 gate: VersionGate::new(),
             }
         }
@@ -262,12 +261,8 @@ mod tests {
         fn follow(&mut self, bytes: &[u8]) -> &mut Self {
             let section = Section::read(bytes).unwrap();
             let pat = ProgramAssociationSection::try_from(&section).unwrap();
-            self.routes.follow(
-                &pat,
-                &mut self.reassemblers,
-                &BTreeSet::new(),
-                &mut self.gate,
-            );
+            self.routes
+                .follow(&pat, &mut self.section_pids, &mut self.gate);
             self
         }
 
@@ -281,7 +276,7 @@ mod tests {
         }
 
         fn state(&self, programs: &[(u16, u16)]) -> State {
-            let pids = self.reassemblers.keys().map(|pid| pid.get()).collect();
+            let pids = self.section_pids.keys().map(|pid| pid.get()).collect();
             let listed = |programs: &[(Pid, u16)]| {
                 programs
                     .iter()

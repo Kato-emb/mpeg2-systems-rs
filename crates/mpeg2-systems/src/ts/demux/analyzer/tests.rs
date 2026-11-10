@@ -34,8 +34,8 @@ fn a_section_that_fails_to_read_does_not_grow_the_buffer_input_after_input() {
     for _ in 0..4 {
         demuxer.handle_input(&stream);
         while demuxer.poll_event().is_some() {}
-        let cat = demuxer.analyzer.reassemblers.get(&Pid::CAT).unwrap();
-        lengths.push(cat.buffer_len());
+        let cat = demuxer.analyzer.section_pids.get(&Pid::CAT).unwrap();
+        lengths.push(cat.reassembler.buffer_len());
     }
     let first = lengths.first().copied().unwrap();
     assert_eq!(lengths, [first; 4]);
@@ -64,7 +64,7 @@ fn a_pat_across_packets_names_its_program_maps() {
     demuxer.handle_input(&stream);
     while demuxer.poll_event().is_some() {}
     let analyzer = &demuxer.analyzer;
-    let followed: Vec<u16> = analyzer.reassemblers.keys().map(|pid| pid.get()).collect();
+    let followed: Vec<u16> = analyzer.section_pids.keys().map(|pid| pid.get()).collect();
     assert_eq!(followed, [&[0x0000][..], &pids].concat());
 }
 
