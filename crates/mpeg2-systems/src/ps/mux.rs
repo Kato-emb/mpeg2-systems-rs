@@ -393,7 +393,9 @@ impl Muxer {
             &self.streams,
             &self.program_stream_info,
             self.map_version,
-            &self.config,
+            self.config.program_mux_rate,
+            self.config.fixed_rate,
+            largest_pack(&self.config),
         )
         .inspect_err(|_| {
             self.streams.pop();
@@ -566,16 +568,28 @@ impl Muxer {
             ..
         } = self;
         let pack_header_length = pack_header::FIXED_LENGTH;
-        let gap = last_pack
-            .zip(time)
-            .and_then(|(last, time)| Gap::before(last, time, config));
+        let program_mux_rate = config.program_mux_rate;
+        let largest_pack = largest_pack(config);
+        let gap = last_pack.zip(time).and_then(|(last, time)| {
+            if config.fixed_rate {
+                let longest =
+                    largest_pack.min(pack_header_length.saturating_add(pes::LONGEST_PES_PACKET));
+                Gap::padding(last, time, program_mux_rate, longest)
+            } else {
+                Gap::filling(last, time, program_mux_rate)
+            }
+        });
+        let fixed_rate = config.fixed_rate;
+        let following = move |pack: Pack| {
+            if fixed_rate {
+                pack.on_line(pack.next_offset(), program_mux_rate)
+            } else {
+                pack.arrived(program_mux_rate)
+            }
+        };
         // Why not `None` as the earliest: before the first pack there is no
         // pack to follow, and the first PES packet has a time.
-        let first_at = gap
-            .map(Gap::last)
-            .or(*last_pack)
-            .map(|pack| pack.following(config))
-            .max(time);
+        let first_at = gap.map(Gap::last).or(*last_pack).map(following).max(time);
         let headers_due = headers_sent_at.zip(first_at).is_none_or(|(sent_at, at)| {
             at.ticks_since(sent_at) >= SystemTimeClock::ticks_in(config.header_interval)
         });
@@ -585,12 +599,12 @@ impl Muxer {
                 streams,
                 program_stream_info,
                 *map_version,
-                config,
+                config.program_mux_rate,
+                config.fixed_rate,
                 header_loops,
                 headers,
             )?;
         }
-        let largest_pack = largest_pack(config);
         let room = largest_pack.saturating_sub(pack_header_length);
         let longest_continued = room.min(pes::LONGEST_PES_PACKET);
         let longest = room
@@ -622,7 +636,6 @@ impl Muxer {
         }
 
         let writer = PackWriter::new();
-        let program_mux_rate = config.program_mux_rate;
         let mux_delay = config.mux_delay;
         let mut written = *last_pack;
         write_or_truncate(pending, |out| {
@@ -645,7 +658,7 @@ impl Muxer {
                 let at = if index == 0 {
                     first_at
                 } else {
-                    written.map(|pack| pack.following(config))
+                    written.map(following)
                 };
                 let Some(at) = at else {
                     return Err(missing_pts);

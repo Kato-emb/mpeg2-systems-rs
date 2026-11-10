@@ -113,7 +113,7 @@ fn the_padding_is_cut_into_packs_of_at_most_the_longest_the_last_no_shorter_than
     };
     let lengths = |bytes: u64| {
         let time = last.on_line(100 + bytes, RATE);
-        Gap::before(last, time, &fixed_rate()).map(|padding| {
+        Gap::padding(last, time, RATE, 2_048).map(|padding| {
             (
                 padding.iter().map(|pack| pack.length).collect::<Vec<_>>(),
                 padding.bytes(),

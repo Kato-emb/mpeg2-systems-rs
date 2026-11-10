@@ -4,7 +4,6 @@
 
 use core::time::Duration;
 
-use super::{MuxerConfig, largest_pack};
 use crate::pes;
 use crate::ps::pack_header;
 use crate::time::{SYSTEM_CLOCK_FREQUENCY, SystemTimeClock};
@@ -63,7 +62,8 @@ pub(super) fn line_bytes(ticks: u64, program_mux_rate: u32) -> u64 {
 }
 
 /// A pack written: the time of the STC its SCR samples, before
-/// [`MuxerConfig::mux_delay`] is taken off, its bytes, and where its SCR is
+/// [`MuxerConfig::mux_delay`](super::MuxerConfig::mux_delay) is taken off,
+/// its bytes, and where its SCR is
 /// in the stream
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Pack {
@@ -110,16 +110,6 @@ impl Pack {
                 .saturating_sub(line_ticks(self.offset, program_mux_rate)),
         )
     }
-
-    /// Returns the earliest SCR of the pack after it under `config`: once
-    /// its bytes have arrived, or at a fixed rate on the line through it
-    pub(super) fn following(self, config: &MuxerConfig) -> SystemTimeClock {
-        if config.fixed_rate {
-            self.on_line(self.next_offset(), config.program_mux_rate)
-        } else {
-            self.arrived(config.program_mux_rate)
-        }
-    }
 }
 
 /// The packs that fill the time from the pack after `last` to a PES packet
@@ -144,42 +134,18 @@ pub(super) enum Gap {
 }
 
 impl Gap {
-    /// Returns the packs under `config` after `last`, the last pack written,
-    /// before a PES packet due at `time`, or `None` where none is needed
-    ///
-    /// - At a variable rate, packs of a pack header alone fill a leap: each
-    ///   [`LONGEST_SCR_INTERVAL`] after the SCR before it, or once the bytes
-    ///   before it have arrived if that is later, while the pack at `time`
-    ///   would be more than [`LONGEST_SCR_INTERVAL`] after the SCR before it.
-    /// - At a fixed rate, packs of padding, each at most the largest pack and
-    ///   the longest PES packet after a pack header, the last at least a pack
-    ///   header, bring the line through `last` to `time`.
-    pub(super) fn before(last: Pack, time: SystemTimeClock, config: &MuxerConfig) -> Option<Self> {
-        let program_mux_rate = config.program_mux_rate;
-        if config.fixed_rate {
-            let reached = line_bytes(
-                line_ticks(last.offset, program_mux_rate).saturating_add(time.ticks_since(last.at)),
-                program_mux_rate,
-            );
-            let bytes = reached
-                .checked_sub(last.next_offset())
-                .filter(|&bytes| bytes > 0)?;
-            let longest = largest_pack(config)
-                .min(pack_header::FIXED_LENGTH.saturating_add(pes::LONGEST_PES_PACKET));
-            let longest_bytes = u64::try_from(longest).unwrap_or(u64::MAX);
-            let count = bytes.div_ceil(longest_bytes);
-            let last_length =
-                bytes.saturating_sub(count.saturating_sub(1).saturating_mul(longest_bytes));
-            return Some(Self::Padding {
-                last,
-                program_mux_rate,
-                count,
-                length: longest,
-                last_length: usize::try_from(last_length)
-                    .unwrap_or(usize::MAX)
-                    .max(pack_header::FIXED_LENGTH),
-            });
-        }
+    /// Returns the packs of a pack header alone that fill a leap from
+    /// `last`, the last pack written, to a PES packet due at `time`, at the
+    /// variable rate `program_mux_rate`: each [`LONGEST_SCR_INTERVAL`] after
+    /// the SCR before it, or once the bytes before it have arrived if that is
+    /// later, while the pack at `time` would be more than
+    /// [`LONGEST_SCR_INTERVAL`] after the SCR before it; `None` where there
+    /// is no leap to fill
+    pub(super) fn filling(
+        last: Pack,
+        time: SystemTimeClock,
+        program_mux_rate: u32,
+    ) -> Option<Self> {
         let longest = longest_scr_interval();
         // Why compare with `time` alone, not with when `last` has arrived:
         // `largest_pack` keeps every pack arriving within the longest
@@ -199,6 +165,38 @@ impl Gap {
             .div_ceil(longest)
             .saturating_add(1);
         Some(Self::Filling { last, first, count })
+    }
+
+    /// Returns the packs of padding, each at most `longest` bytes and the
+    /// last at least a pack header, that bring the line of the fixed rate
+    /// `program_mux_rate` through `last`, the last pack written, to a PES
+    /// packet due at `time`; `None` where the line reaches it already
+    pub(super) fn padding(
+        last: Pack,
+        time: SystemTimeClock,
+        program_mux_rate: u32,
+        longest: usize,
+    ) -> Option<Self> {
+        let reached = line_bytes(
+            line_ticks(last.offset, program_mux_rate).saturating_add(time.ticks_since(last.at)),
+            program_mux_rate,
+        );
+        let bytes = reached
+            .checked_sub(last.next_offset())
+            .filter(|&bytes| bytes > 0)?;
+        let longest_bytes = u64::try_from(longest).unwrap_or(u64::MAX);
+        let count = bytes.div_ceil(longest_bytes);
+        let last_length =
+            bytes.saturating_sub(count.saturating_sub(1).saturating_mul(longest_bytes));
+        Some(Self::Padding {
+            last,
+            program_mux_rate,
+            count,
+            length: longest,
+            last_length: usize::try_from(last_length)
+                .unwrap_or(usize::MAX)
+                .max(pack_header::FIXED_LENGTH),
+        })
     }
 
     /// Returns the bytes of all the packs
@@ -289,8 +287,8 @@ pub(super) fn pack_fill(length: usize) -> PackFill {
         Ok(stuffing) if stuffing <= pack_header::MAX_PACK_STUFFING_LENGTH => {
             PackFill::Stuffing(stuffing)
         }
-        // Why not an error past 16 bits: `Gap::before` takes no pack longer
-        // than a pack header and the longest PES packet.
+        // Why not an error past 16 bits: the muxer asks `Gap::padding` for
+        // no pack longer than a pack header and the longest PES packet.
         _ => PackFill::PaddingPacket(
             u16::try_from(rest.saturating_sub(pes::PREFIX_LENGTH)).unwrap_or(u16::MAX),
         ),
