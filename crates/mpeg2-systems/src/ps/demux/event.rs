@@ -64,9 +64,13 @@ pub enum Event<'a> {
     /// Reported up to the next start code for a start code the demuxer does
     /// not cut, bytes that are no start code, a pack header of a kind this
     /// crate does not read, and a PES packet whose `PES_packet_length` is 0,
-    /// which a Program Stream does not allow. An element that does not read
-    /// is reported as cut, by its declared length. An [`Event::Error`] before
-    /// this event says why, where an element did not read.
+    /// which a Program Stream does not allow. Those bytes are reported once
+    /// the next start code or the end of the input comes, so where the input
+    /// is cut does not change the events; a long run arrives as several
+    /// events, so the bytes the demuxer holds stay bounded. An element that
+    /// does not read is reported as cut, by its declared length. An
+    /// [`Event::Error`] before this event says why, where an element did not
+    /// read.
     Unframable {
         /// The bytes, in input order
         bytes: &'a [u8],

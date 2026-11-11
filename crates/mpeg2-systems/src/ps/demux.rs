@@ -781,8 +781,11 @@ mod tests {
         demuxer.handle_input(&concat(&[&pack_bytes, first]));
         demuxer.finish();
         let before = drained(&mut demuxer);
+        let mut after = events_of(&mut demuxer, rest);
+        demuxer.finish();
+        after.extend(drained(&mut demuxer));
         assert_eq!(
-            (before, events_of(&mut demuxer, rest)),
+            (before, after),
             (
                 vec![acquired(), pack(&pack_bytes), truncated(first)],
                 vec![unframable(rest)]
@@ -846,6 +849,63 @@ mod tests {
                 unframable(&after),
                 pack(&pack_bytes),
             ]
+        );
+    }
+
+    /// Every event for `stream` handed over in pieces of `chunk` bytes, the
+    /// input then ended
+    fn demux_in_chunks(stream: &[u8], chunk: usize) -> Vec<String> {
+        let mut demuxer = Demuxer::new();
+        let mut events = Vec::new();
+        for piece in stream.chunks(chunk) {
+            events.extend(events_of(&mut demuxer, piece));
+        }
+        demuxer.finish();
+        events.extend(drained(&mut demuxer));
+        events
+    }
+
+    #[test]
+    fn where_the_input_is_cut_does_not_change_the_events_of_a_broken_stream() {
+        let pack_bytes = pack_header_bytes(&[]);
+        let mut broken = pes_packet_bytes(0xE0, &[0xAA, 0xBB, 0xCC]);
+        broken[6] = 0x40;
+        let stream = concat(&[
+            &pack_bytes,
+            &[0x12, 0x34, 0x56, 0x00, 0x00],
+            &pes_packet_bytes(0xC0, &[0x01, 0x02]),
+            &broken,
+            &[0xAA; 40],
+            &iso_11172_pack_bytes(),
+            &[0x00, 0x00, 0x02, 0x99],
+            &pack_bytes,
+            &[0x77; 9],
+        ]);
+        let whole = demux_in_chunks(&stream, stream.len());
+        for chunk in [1, 2, 5, 13] {
+            assert_eq!(demux_in_chunks(&stream, chunk), whole, "chunks of {chunk}");
+        }
+    }
+
+    #[test]
+    fn bytes_passed_over_while_synced_come_back_in_bounded_pieces() {
+        let pack_bytes = pack_header_bytes(&[]);
+        let run = vec![0xFF; 150_000];
+        let stream = concat(&[&pack_bytes, &run, &pack_bytes]);
+        let mut demuxer = Demuxer::new();
+        demuxer.handle_input(&stream);
+        let mut pieces = Vec::new();
+        while let Some(event) = demuxer.poll_event() {
+            if let Event::Unframable { bytes } = event {
+                pieces.push(bytes.len());
+            }
+        }
+        assert_eq!(
+            (
+                pieces.iter().all(|&length| length <= 64 * 1024),
+                pieces.iter().sum::<usize>()
+            ),
+            (true, run.len())
         );
     }
 
