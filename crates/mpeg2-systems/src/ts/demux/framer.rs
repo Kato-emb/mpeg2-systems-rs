@@ -6,7 +6,7 @@
 
 use core::ops::Range;
 
-use crate::input_buffer::InputBuffer;
+use crate::input_buffer::{End, Input, InputBuffer};
 use crate::ts::packet::{PACKET_LENGTH, SYNC_BYTE};
 
 pub(super) mod sync;
@@ -36,13 +36,6 @@ enum State {
         packet_size: PacketSize,
         consecutive_misses: u8,
     },
-}
-
-/// Whether more input may follow the bytes a classifier is given
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Input {
-    Continues,
-    Ends,
 }
 
 /// What the framer saw in the unit at the front of the buffer on the locked
@@ -126,7 +119,7 @@ impl PacketFramer {
     ///
     /// # Panics
     /// Panics if called after [`PacketFramer::finish`] before
-    /// [`PacketFramer::step`] has returned [`Output::NeedMoreData`].
+    /// [`PacketFramer::step`] has returned [`Output::EndOfInput`].
     pub(super) fn extend(&mut self, bytes: &[u8]) {
         self.input.extend(bytes);
     }
@@ -175,8 +168,7 @@ impl PacketFramer {
     /// Steps the state machine until it has something to report
     pub(super) fn step(&mut self) -> Output {
         loop {
-            if self.input.is_ended() && self.input.consumed() == self.input.len() {
-                self.input.resume();
+            if self.input.reach_end() == End::Reached {
                 return Output::EndOfInput;
             }
             let transition = self.transition();
@@ -190,11 +182,7 @@ impl PacketFramer {
 
     fn transition(&self) -> Transition {
         let consumed = self.input.consumed();
-        let input = if self.input.is_ended() {
-            Input::Ends
-        } else {
-            Input::Continues
-        };
+        let input = self.input.input();
         match self.state {
             // Why report before observing again: the report is capped, so a
             // stream that never synchronizes hands its bytes back in bounded

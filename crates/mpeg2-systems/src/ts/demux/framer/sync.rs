@@ -1,7 +1,7 @@
 //! Search for the packet grid: the `sync_byte` cadence and the packet size it
 //! implies
 
-use super::Input;
+use crate::input_buffer::Input;
 use crate::ts::packet::{PACKET_LENGTH, SYNC_BYTE};
 
 // ETSI TR 101 290: lock onto the grid after five consecutive sync bytes at a

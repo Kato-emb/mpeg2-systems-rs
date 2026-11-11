@@ -21,6 +21,52 @@ pub(super) const FIXED_LENGTH: usize = 14;
 #[cfg(feature = "alloc")]
 pub(super) const MAX_PACK_STUFFING_LENGTH: u8 = 7;
 
+/// What the bytes a pack header starts with say of its length
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EncodedLen {
+    /// The bytes end before they tell
+    NeedMoreData,
+    /// The pack header is this many bytes, from its `pack_stuffing_length`
+    Bounded(usize),
+    /// The bits after `pack_start_code` are not `'01'`: a pack header this
+    /// crate does not read, such as one of ISO/IEC 11172-1
+    Refused(Error),
+}
+
+/// Returns the length of the pack header `prefix` starts with
+#[cfg(feature = "alloc")]
+pub(super) fn encoded_len(prefix: &[u8]) -> EncodedLen {
+    // Why not wait for the length of an ISO/IEC 13818-1 pack header first:
+    // the bits after pack_start_code tell another kind of pack, such as an
+    // ISO/IEC 11172-1 one, whose header is shorter, so it would be held
+    // back, and cut short at the end of input, for bytes it does not have.
+    let Some(&byte) = prefix.get(PACK_START_CODE.len()) else {
+        return EncodedLen::NeedMoreData;
+    };
+    if byte >> 6 != 0b01 {
+        return EncodedLen::Refused(start_error(byte));
+    }
+    prefix
+        .get(FIXED_LENGTH.saturating_sub(1))
+        .map_or(EncodedLen::NeedMoreData, |byte| {
+            EncodedLen::Bounded(FIXED_LENGTH.saturating_add(usize::from(byte & 0x07)))
+        })
+}
+
+/// Returns the error of a pack header whose byte after `pack_start_code` is
+/// `byte`, its first bits other than `'01'`: a pack of ISO/IEC 11172-1, or
+/// a start this crate does not read
+fn start_error(byte: u8) -> Error {
+    if byte.wrapping_shr(4) == 0b0010 {
+        Error::Iso11172Pack
+    } else {
+        Error::PackHeaderStart {
+            bits: byte.wrapping_shr(6),
+        }
+    }
+}
+
 /// Returns whether `program_mux_rate` may be `program_mux_rate`: not 0, and
 /// within its 22 bits (§2.5.3.4)
 #[cfg(feature = "alloc")]
@@ -218,14 +264,9 @@ impl PackHeader {
         }
         let bits = reader.read_u8::<2>().map_err(field_error("'01'"))?;
         if bits != 0b01 {
-            let is_iso_11172 = bytes
+            return Err(bytes
                 .get(PACK_START_CODE.len())
-                .is_some_and(|byte| byte.wrapping_shr(4) == 0b0010);
-            return Err(if is_iso_11172 {
-                Error::Iso11172Pack
-            } else {
-                Error::PackHeaderStart { bits }
-            });
+                .map_or(Error::PackHeaderStart { bits }, |&byte| start_error(byte)));
         }
         let system_clock_reference = read_marked_clock_reference(&mut reader)
             .map_err(field_error("system_clock_reference"))?;

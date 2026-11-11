@@ -21,6 +21,14 @@ pub use elementary_stream::{ElementaryStream, ElementaryStreamIter, ElementarySt
 /// Bytes from `packet_start_code_prefix` to `program_stream_map_length`
 const PREFIX_LENGTH: usize = 6;
 
+/// Returns the bytes of the program stream map `prefix` starts with, from its
+/// `program_stream_map_length`, `None` where `prefix` ends before it
+#[cfg(feature = "alloc")]
+pub(super) fn encoded_len(prefix: &[u8]) -> Option<usize> {
+    let [.., high, low] = *prefix.first_chunk::<PREFIX_LENGTH>()?;
+    Some(PREFIX_LENGTH.saturating_add(usize::from(u16::from_be_bytes([high, low]))))
+}
+
 /// Bytes of a map besides its descriptors and its elementary stream loop
 const OVERHEAD: usize = 16;
 
