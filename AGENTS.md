@@ -34,10 +34,16 @@ or hands in values and gets bytes back into a buffer it owns.
 * Do not add a dependency to a library crate without stating in the PR why; take it with `default-features = false`, and only if it builds without std.
 * Do not abbreviate variable names. Do not write `count` as `cnt`. Naming lists the exceptions.
 * Relax a lint at the narrowest site that needs it, and call it out in the pull request. Never copy the workspace lint table into a crate to change one lint.
-* Do not create a new file to add functionality; add it to an existing one. A new logical component, or a file past the size cap below, may take a new module.
-* Do not grow a module past 500 LoC, excluding tests. Do not extend a file past roughly 800 LoC; add the functionality in a new module instead, unless the PR description states a strong reason.
+* Do not create a new file to add functionality; add it to an existing one. A new logical component may take a new module.
+* A module past 500 LoC, excluding tests, likely holds more than one component: consider splitting the components into child modules.
 * When extracting or rewriting code, do not leave its tests, its module and type docs, or its Why-not comments behind: move them with it, so the invariants stay next to the code that owns them.
 * Do not create small helper methods that are referenced only once. Split code along logical component boundaries, not to shrink line counts.
+* Keep the code of one responsibility in one module: a reader finds a responsibility by its module, and other modules see only the items they are meant to use.
+* Widen the visibility of an item or a field only for a module that depends on it for what that module is responsible for. Do not widen it to keep a change small, since private is the module's boundary; move the item, or the code that uses it, into the module whose responsibility it is.
+* A function takes only the values it uses, as general values. Take integers, the specification's values or the function's own module's types; not a value it reads part of, and not a type of the caller's responsibility.
+* Put code in the module whose responsibility it is. Code that is a module's responsibility is a function there that the caller only calls; code that is the caller's responsibility stays in the caller, which reads or changes the module's values as it needs.
+* When a module is split into child modules, the children are its components and the parent is the layer above them: the parent implements what the children's code, put together, does, and keeps no component of its own beside them. A child may depend on the types the parent holds for all its children, such as the module's `Error`, but not on the parent's implementation.
+* Put the unit tests of a module in the same file as the code they test, in `#[cfg(test)] mod tests`; do not split the tests off into a file of their own.
 
 # Untrusted input
 
