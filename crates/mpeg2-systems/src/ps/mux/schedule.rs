@@ -5,35 +5,19 @@
 //! rate of a CSPS asks for
 
 use core::ops::Range;
-use core::time::Duration;
 
 use super::csps::Constraints;
-use super::pack_writer::Fill;
 use crate::ps::pack_header;
-use crate::time::{SYSTEM_CLOCK_FREQUENCY, SystemTimeClock};
-use gap::{Line, padding_layout};
+use crate::time::SystemTimeClock;
+use fixed_rate::{FixedRate, Line, Padding};
+use pack::{PES_PACKETS, arrival_ticks, as_u64, as_usize, pes_pack_packets};
+use variable_rate::{Filling, VariableRate};
 
-mod gap;
+mod fixed_rate;
+mod pack;
+mod variable_rate;
 
-pub(super) use gap::Gap;
-
-/// Bytes per second in a unit of `program_mux_rate`, ISO/IEC 13818-1 §2.5.3.4
-const PROGRAM_MUX_RATE_UNIT: u64 = 50;
-
-/// The longest time from one SCR to the next, in milliseconds, ISO/IEC
-/// 13818-1 §2.7.1
-const LONGEST_SCR_INTERVAL_MILLIS: u64 = 700;
-
-/// The longest time from one SCR to the next, ISO/IEC 13818-1 §2.7.1
-const LONGEST_SCR_INTERVAL: Duration = Duration::from_millis(LONGEST_SCR_INTERVAL_MILLIS);
-
-/// The packets of a PES packet in a pack (§2.7.9: its
-/// `packet_start_code_prefix`)
-const PES_PACKETS: usize = 1;
-
-/// The packets of a system header and a program stream map in a pack (§2.7.9:
-/// a `system_header_start_code` and a `packet_start_code_prefix`)
-const HEADER_PACKETS: usize = 2;
+pub(super) use pack::{Pack, PlannedPack, largest_pack, shortest_pack};
 
 /// The bytes from the one that carries the last bit of the SCR of a pack to
 /// the first of the pack after it: the pack header up to that byte
@@ -42,144 +26,6 @@ const SCR_BYTE: usize = 8;
 
 /// The bytes of `MPEG_program_end_code`
 const PROGRAM_END_CODE_LENGTH: usize = 4;
-
-/// Returns [`LONGEST_SCR_INTERVAL`] in ticks of the STC
-fn longest_scr_interval() -> u64 {
-    SystemTimeClock::ticks_in(LONGEST_SCR_INTERVAL)
-}
-
-/// Returns the bytes a second `program_mux_rate` gives (§2.5.3.4)
-fn bytes_per_second(program_mux_rate: u32) -> u64 {
-    u64::from(program_mux_rate).saturating_mul(PROGRAM_MUX_RATE_UNIT)
-}
-
-/// Returns `bytes` as a `u64`
-fn as_u64(bytes: usize) -> u64 {
-    u64::try_from(bytes).unwrap_or(u64::MAX)
-}
-
-/// Returns `bytes` as a `usize`
-fn as_usize(bytes: u64) -> usize {
-    usize::try_from(bytes).unwrap_or(usize::MAX)
-}
-
-/// Returns the most bytes that arrive within [`LONGEST_SCR_INTERVAL`] at
-/// `program_mux_rate` (§2.5.2.2 equation 2-21), the longest pack after which
-/// the next SCR can follow within it (§2.7.1)
-fn bytes_within_longest_scr_interval(program_mux_rate: u32) -> usize {
-    // Why not the ticks the bytes take, rounded up as `VariableRate` does:
-    // in whole units of program_mux_rate and of a millisecond the count is
-    // exact, and that many bytes, rounded up to a tick, still arrive within
-    // the interval.
-    let bytes =
-        bytes_per_second(program_mux_rate).saturating_mul(LONGEST_SCR_INTERVAL_MILLIS) / 1_000;
-    as_usize(bytes)
-}
-
-/// Returns the most bytes of a pack: `pack_size`, or fewer where fewer
-/// arrive within [`LONGEST_SCR_INTERVAL`] at `program_mux_rate`
-pub(super) fn largest_pack(pack_size: usize, program_mux_rate: u32) -> usize {
-    pack_size.min(bytes_within_longest_scr_interval(program_mux_rate))
-}
-
-/// A pack written: the time of the STC its SCR samples, before
-/// [`MuxerConfig::mux_delay`](super::MuxerConfig::mux_delay) is taken off,
-/// its bytes, where its SCR is in the stream, and the packets it carries
-#[derive(Debug, Clone, Copy)]
-pub(super) struct Pack {
-    at: SystemTimeClock,
-    // Why not the time its last byte arrives: the SCR of the next pack
-    // depends on this time, and the leap that needs filling on `at`.
-    length: usize,
-    /// The bytes from the one that carries the last bit of the first SCR to
-    /// the one that carries the last bit of the SCR of this pack
-    // Why not a count of the bytes the muxer has written: it would have to
-    // move with `last_pack` on every pack written.
-    // Why not only at a fixed rate, as `Option`: whether it is there would
-    // say what the rate of the muxer says.
-    offset: u64,
-    /// NP of §2.7.9: the `packet_start_code_prefix`es and the
-    /// `system_header_start_code`s of the pack
-    // Why not tell from `headers_sent_at` whether the pack carried the
-    // system header and the map, and count its packets from that: the muxer
-    // clears it when the map changes, and the next SCR would follow the map.
-    packets: usize,
-}
-
-impl Pack {
-    /// Returns the time of the STC the SCR of the pack samples, before
-    /// `mux_delay` is taken off
-    pub(super) const fn at(self) -> SystemTimeClock {
-        self.at
-    }
-
-    /// Returns the bytes of the pack
-    pub(super) const fn length(self) -> usize {
-        self.length
-    }
-
-    /// Returns the `offset` of the pack after it
-    fn next_offset(self) -> u64 {
-        self.offset.saturating_add(as_u64(self.length))
-    }
-}
-
-/// A pack to write: the pack, the bytes of the system header and the
-/// program stream map it carries, and the fill past what it carries
-#[derive(Debug, Clone)]
-pub(super) struct PlannedPack {
-    pub(super) pack: Pack,
-    pub(super) headers: Range<usize>,
-    pub(super) fill: Fill,
-}
-
-impl PlannedPack {
-    /// Returns the pack of `length` bytes, its SCR at `at` and `offset`
-    /// bytes from the first SCR, that carries `contents` bytes in `packets`
-    /// packets, the `headers` bytes of the system header and the program
-    /// stream map among them, and is filled past them, the packets of the
-    /// fill counted with them (§2.7.9)
-    fn filled(
-        at: SystemTimeClock,
-        offset: u64,
-        length: usize,
-        contents: usize,
-        packets: usize,
-        headers: Range<usize>,
-    ) -> Self {
-        let fill = Fill::of(length.saturating_sub(contents));
-        Self {
-            pack: Pack {
-                at,
-                length,
-                offset,
-                packets: packets.saturating_add(fill.packets()),
-            },
-            headers,
-            fill,
-        }
-    }
-
-    /// Returns [`filled`](Self::filled) as the pack after `before`, or the
-    /// first
-    fn after(
-        before: Option<Pack>,
-        at: SystemTimeClock,
-        length: usize,
-        contents: usize,
-        packets: usize,
-        headers: Range<usize>,
-    ) -> Self {
-        Self::filled(
-            at,
-            before.map_or(0, Pack::next_offset),
-            length,
-            contents,
-            packets,
-            headers,
-        )
-    }
-}
 
 /// The rate of a Program Stream, variable or fixed, which decides the SCR
 /// of each pack, the packs that fill the time before a PES packet, and the
@@ -222,22 +68,6 @@ impl Rate {
         matches!(self.0, RateKind::Fixed(_))
     }
 
-    /// Returns the bytes a second of the rate
-    const fn program_mux_rate(self) -> u32 {
-        match self.0 {
-            RateKind::Variable(rate) => rate.program_mux_rate,
-            RateKind::Fixed(rate) => rate.line.program_mux_rate(),
-        }
-    }
-
-    /// Returns the bounds the rate is held to
-    const fn constraints(self) -> Constraints {
-        match self.0 {
-            RateKind::Variable(rate) => rate.constraints,
-            RateKind::Fixed(rate) => rate.constraints,
-        }
-    }
-
     /// Returns the packs that carry a PES packet due at `time` after
     /// `before`, the last pack written, with a system header of
     /// `system_header` bytes and a program stream map of
@@ -261,13 +91,13 @@ impl Rate {
     /// Returns the bytes of the longest pack the first PES packet takes at
     /// the least, sent with a system header of `system_header` bytes and a
     /// program stream map of `program_stream_map` bytes, its shortest pack
-    /// `shortest_pes` bytes without them
+    /// [`shortest_pack`] without them
     pub(super) fn longest_first_pack(
         self,
         system_header: usize,
         program_stream_map: usize,
-        shortest_pes: usize,
     ) -> usize {
+        let shortest_pes = shortest_pack();
         match self.header_packs(system_header, program_stream_map) {
             Some(lengths) => lengths
                 .into_iter()
@@ -288,14 +118,19 @@ impl Rate {
     pub(super) fn closing(self, last: Pack) -> Option<Pack> {
         // Why not the time to the next SCR, as for any other pack: the end
         // code ends before the byte the next SCR would be carried in.
-        let arrival = u128::from(SYSTEM_CLOCK_FREQUENCY)
-            .saturating_mul(u128::from(as_u64(
-                last.length
+        let (program_mux_rate, constraints) = match self.0 {
+            RateKind::Variable(rate) => (rate.program_mux_rate, rate.constraints),
+            RateKind::Fixed(rate) => (rate.line.program_mux_rate(), rate.constraints),
+        };
+        let arrival = arrival_ticks(
+            as_u64(
+                last.length()
                     .saturating_add(PROGRAM_END_CODE_LENGTH)
                     .saturating_sub(SCR_BYTE.saturating_add(1)),
-            )))
-            .div_euclid(u128::from(bytes_per_second(self.program_mux_rate())));
-        (arrival < u128::from(self.constraints().packet_ticks(last.packets))).then(|| {
+            ),
+            program_mux_rate,
+        );
+        (arrival < constraints.packet_ticks(last.packets())).then(|| {
             PlannedPack::after(
                 Some(last),
                 self.following(last),
@@ -352,8 +187,12 @@ impl Rate {
     /// due at `time`, `reserved` bytes of other packs left before it
     fn gap(self, before: Pack, time: SystemTimeClock, reserved: usize) -> Option<Gap> {
         match self.0 {
-            RateKind::Variable(rate) => rate.gap(before, time),
-            RateKind::Fixed(rate) => rate.gap(before, time, reserved),
+            RateKind::Variable(rate) => rate
+                .gap(before, time)
+                .map(|filling| Gap(GapKind::Filling(filling))),
+            RateKind::Fixed(rate) => rate
+                .gap(before, time, reserved)
+                .map(|padding| Gap(GapKind::Padding(padding))),
         }
     }
 }
@@ -440,7 +279,7 @@ impl Plan {
         let layout = self.layout();
         layout
             .headers
-            .map(|[system_header, _]| system_header.pack.at)
+            .map(|[system_header, _]| system_header.pack.at())
             .or(layout.first_scr)
     }
 
@@ -451,7 +290,7 @@ impl Plan {
 
     /// Returns the bytes of the system header and the program stream map the
     /// first pack of the PES packet carries
-    pub(super) fn first_headers(self) -> Range<usize> {
+    fn first_headers(self) -> Range<usize> {
         if self
             .rate
             .header_packs(self.system_header, self.program_stream_map)
@@ -461,6 +300,19 @@ impl Plan {
         } else {
             0..self.system_header.saturating_add(self.program_stream_map)
         }
+    }
+
+    /// Returns the most bytes the first piece of the PES packet, and each
+    /// piece after it, may take in a pack of at most `largest_pack` bytes
+    pub(super) fn longest_pieces(self, largest_pack: usize) -> (usize, usize) {
+        let room = largest_pack.saturating_sub(pack_header::FIXED_LENGTH);
+        (room.saturating_sub(self.first_headers().len()), room)
+    }
+
+    /// Returns the bytes the first pack of the PES packet carries before its
+    /// fill, `piece` bytes of the PES packet among them
+    pub(super) fn first_pes_pack_contents(self, piece: usize) -> usize {
+        self.pes_pack_contents(0, piece).0
     }
 
     /// Returns the bytes of the pack of the piece at `index` of the PES
@@ -517,165 +369,49 @@ impl Plan {
     }
 }
 
-/// Returns the packets of a pack of a PES packet that carries `headers` bytes
-/// of the system header and the program stream map
-const fn pes_pack_packets(headers: usize) -> usize {
-    if headers > 0 {
-        PES_PACKETS.saturating_add(HEADER_PACKETS)
-    } else {
-        PES_PACKETS
-    }
-}
-
-/// The SCRs of a variable rate: each pack once the bytes of the one before
-/// have arrived at `program_mux_rate` (§2.5.2.2 equation 2-21), and the
-/// packet rate of `constraints` allows it (§2.7.9), or later
+/// The packs that fill the time from the pack after the one before them to
+/// a PES packet: of a pack header alone over a leap of the time stamps, or
+/// of padding at a fixed rate
 #[derive(Debug, Clone, Copy)]
-struct VariableRate {
-    program_mux_rate: u32,
-    constraints: Constraints,
-}
+pub(super) struct Gap(GapKind);
 
-impl VariableRate {
-    /// Returns the SCR of the first pack of a PES packet of `time` after
-    /// `before`, the last pack written: the later of `time` and the SCR the
-    /// pack after `before` takes at the earliest
-    fn first_scr(
-        self,
-        before: Option<Pack>,
-        time: Option<SystemTimeClock>,
-    ) -> Option<SystemTimeClock> {
-        // Why not `None` as the earliest: before the first pack there is no
-        // pack to follow, and the first PES packet has a time.
-        before.map(|pack| self.following(pack)).max(time)
-    }
-
-    /// Returns the earliest SCR of the pack after `pack`: once the bytes of
-    /// `pack` have arrived, rounded up to a tick, and its packets allow
-    fn following(self, pack: Pack) -> SystemTimeClock {
-        // Why round up: an SCR before the last byte of the pack before has
-        // arrived would have the next byte arrive before it.
-        let ticks = SYSTEM_CLOCK_FREQUENCY
-            .saturating_mul(as_u64(pack.length))
-            .div_ceil(bytes_per_second(self.program_mux_rate));
-        pack.at
-            .add_ticks(ticks.max(self.constraints.packet_ticks(pack.packets)))
-    }
-
-    /// Returns the packs of a pack header alone that fill a leap from
-    /// `before`, the last pack written, to a PES packet due at `time`: each
-    /// [`LONGEST_SCR_INTERVAL`] after the SCR before it, or once the bytes
-    /// before it have arrived if that is later, while the pack at `time`
-    /// would be more than [`LONGEST_SCR_INTERVAL`] after the SCR before it;
-    /// `None` where there is no leap to fill
-    fn gap(self, before: Pack, time: SystemTimeClock) -> Option<Gap> {
-        let longest = longest_scr_interval();
-        // Why compare with `time` alone, not with when `before` has arrived:
-        // `largest_pack` keeps every pack arriving within the longest
-        // interval, and the packet rate asks less of the packets of a pack,
-        // so only the time stamp can carry the next SCR past it.
-        if time.ticks_since(before.at) <= longest {
-            return None;
-        }
-        let first = self.following(before).max(before.at.add_ticks(longest));
-        // Why each one the longest interval after the one before, not after
-        // its bytes have arrived: a pack header alone arrives within the
-        // longest interval at any program_mux_rate of 1 or more, and carries
-        // no packet.
-        let count = time
-            .ticks_since(first)
-            .saturating_sub(longest)
-            .div_ceil(longest)
-            .saturating_add(1);
-        Some(Gap::filling(before, first, count))
-    }
-}
-
-/// The SCRs of a fixed rate: each on [`Line`], one pack after another, with
-/// packs of padding at most `largest_pack` bytes before a PES packet, and
-/// each pack as long as the packet rate of `constraints` asks (§2.7.9)
+/// What the packs of a [`Gap`] are
 #[derive(Debug, Clone, Copy)]
-struct FixedRate {
-    line: Line,
-    largest_pack: usize,
-    constraints: Constraints,
+enum GapKind {
+    Filling(Filling),
+    Padding(Padding),
 }
 
-impl FixedRate {
-    /// Returns the SCR of the first pack of a PES packet of `time` after
-    /// `before`, the last pack written: on the line after `before`, or
-    /// `time` for the first pack
-    fn first_scr(
-        self,
-        before: Option<Pack>,
-        time: Option<SystemTimeClock>,
-    ) -> Option<SystemTimeClock> {
-        match before {
-            Some(pack) => Some(self.following(pack)),
-            None => time,
+impl Gap {
+    /// Returns the bytes of all the packs
+    pub(super) fn bytes(self) -> usize {
+        as_usize(match self.0 {
+            GapKind::Filling(filling) => filling.bytes(),
+            GapKind::Padding(padding) => padding.bytes(),
+        })
+    }
+
+    /// Returns the last of the packs
+    fn last(self) -> Pack {
+        self.pack(self.count().saturating_sub(1)).pack
+    }
+
+    pub(super) fn iter(self) -> impl Iterator<Item = PlannedPack> {
+        (0..self.count()).map(move |index| self.pack(index))
+    }
+
+    fn count(self) -> u64 {
+        match self.0 {
+            GapKind::Filling(filling) => filling.count(),
+            GapKind::Padding(padding) => padding.count(),
         }
     }
 
-    /// Returns the SCR of the pack after `pack`, on the line through it
-    fn following(self, pack: Pack) -> SystemTimeClock {
-        self.line.at(pack, pack.next_offset())
-    }
-
-    /// Returns the fewest bytes of a pack of `packets` packets on the line:
-    /// those whose ticks the packet rate asks for (§2.7.9)
-    fn shortest(self, packets: usize) -> usize {
-        // Why not the ticks from the offset of the pack: ⌊c1 × (i + n)⌋ −
-        // ⌊c1 × i⌋ ≥ ⌊c1 × n⌋, so the bytes do for a pack at any offset.
-        as_usize(self.line.bytes(self.constraints.packet_ticks(packets)))
-    }
-
-    /// Returns the bytes of a pack of `contents` bytes and `packets`
-    /// packets, filled to those the packet rate asks for, counting the
-    /// packets of the fill
-    fn pack_length(self, contents: usize, packets: usize) -> usize {
-        let length = contents.max(self.shortest(packets));
-        // Why not loop until the length holds: the fill grows to the bytes of
-        // one more packet, fewer than the longest PES packet, so its packets
-        // do not grow again.
-        match Fill::of(length.saturating_sub(contents)).packets() {
-            0 => length,
-            fill => length.max(self.shortest(packets.saturating_add(fill))),
+    /// Returns the pack at `index`
+    fn pack(self, index: u64) -> PlannedPack {
+        match self.0 {
+            GapKind::Filling(filling) => filling.pack(index),
+            GapKind::Padding(padding) => padding.pack(index),
         }
     }
-
-    /// Returns the bytes of the packs of the system header and of the
-    /// program stream map, each of its own, in a CSPS: `None` where they are
-    /// not sent, or the stream is not a CSPS
-    fn header_packs(self, system_header: usize, program_stream_map: usize) -> Option<[usize; 2]> {
-        // Why not the two in one pack, or with the PES packet: each packet a
-        // pack carries asks for more bytes of it, past what a pack of
-        // `pack_size` holds where one packet does not.
-        (self.constraints.csps_flag() && system_header.saturating_add(program_stream_map) > 0).then(
-            || {
-                [system_header, program_stream_map].map(|carried| {
-                    self.pack_length(
-                        pack_header::FIXED_LENGTH.saturating_add(carried),
-                        PES_PACKETS,
-                    )
-                })
-            },
-        )
-    }
-
-    /// Returns the packs of padding after `before`, the last pack written,
-    /// that bring the line to `reserved` bytes before a PES packet due at
-    /// `time`, as [`padding_layout`] cuts the bytes missing; `None` where
-    /// none are
-    fn gap(self, before: Pack, time: SystemTimeClock, reserved: usize) -> Option<Gap> {
-        let missing = self
-            .line
-            .reached(before, time)
-            .checked_sub(before.next_offset())?
-            .checked_sub(as_u64(reserved))?;
-        let layout = padding_layout(missing, as_u64(self.largest_pack), as_u64(self.shortest(1)))?;
-        Some(Gap::padding(before, self.line, layout))
-    }
 }
-
-#[cfg(test)]
-mod tests;

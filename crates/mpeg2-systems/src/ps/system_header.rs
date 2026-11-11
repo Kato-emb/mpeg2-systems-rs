@@ -25,11 +25,23 @@ const FIXED_LENGTH: usize = 6;
 
 /// Largest `audio_bound`
 #[cfg(feature = "alloc")]
-pub(crate) const MAX_AUDIO_BOUND: u8 = 32;
+const MAX_AUDIO_BOUND: u8 = 32;
 
 /// Largest `video_bound`
 #[cfg(feature = "alloc")]
-pub(crate) const MAX_VIDEO_BOUND: u8 = 16;
+const MAX_VIDEO_BOUND: u8 = 16;
+
+/// Returns whether `audio_bound` may be `audio_bound` (§2.5.3.6)
+#[cfg(feature = "alloc")]
+pub(super) fn is_audio_bound_allowed(audio_bound: usize) -> bool {
+    audio_bound <= usize::from(MAX_AUDIO_BOUND)
+}
+
+/// Returns whether `video_bound` may be `video_bound` (§2.5.3.6)
+#[cfg(feature = "alloc")]
+pub(super) fn is_video_bound_allowed(video_bound: usize) -> bool {
+    video_bound <= usize::from(MAX_VIDEO_BOUND)
+}
 
 /// Failure to read or write a system header, or an entry of its stream
 /// bound loop
@@ -428,13 +440,13 @@ impl<'input> SystemHeader<'input> {
                 value: 0,
             });
         }
-        if self.audio_bound > MAX_AUDIO_BOUND {
+        if !is_audio_bound_allowed(usize::from(self.audio_bound)) {
             return Err(Error::Forbidden {
                 field: "audio_bound",
                 value: u32::from(self.audio_bound),
             });
         }
-        if self.video_bound > MAX_VIDEO_BOUND {
+        if !is_video_bound_allowed(usize::from(self.video_bound)) {
             return Err(Error::Forbidden {
                 field: "video_bound",
                 value: u32::from(self.video_bound),

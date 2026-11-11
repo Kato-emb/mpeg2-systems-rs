@@ -260,6 +260,58 @@ impl SystemTimeClock {
     }
 }
 
+/// What the time stamps of a PES packet give the time of its stream
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamTime {
+    /// The time of the STC the DTS, or the PTS without one, samples
+    At(SystemTimeClock),
+    /// The PES packet has no time stamp, and the time of its stream does
+    /// not move
+    Unchanged,
+    /// The PES packet has no PTS, and is the first of a stream that carries
+    /// the optional header (§2.7.5), or has no time stamp and is the first
+    /// of all the streams
+    MissingPts,
+    /// `time` is before `previous`, the time of the stream
+    Decreasing {
+        time: SystemTimeClock,
+        previous: SystemTimeClock,
+    },
+}
+
+/// Returns the time of a PES packet of `pts` and `dts` on a stream last at
+/// `previous`, `None` before its first PES packet, which `carries_optional_header`
+/// where its `stream_id` does, the clock at `clock`, the latest time of all
+/// the streams
+#[cfg(feature = "alloc")]
+pub(crate) fn stream_time(
+    clock: Option<SystemTimeClock>,
+    previous: Option<SystemTimeClock>,
+    carries_optional_header: bool,
+    pts: Option<Timestamp>,
+    dts: Option<Timestamp>,
+) -> StreamTime {
+    // Why not ask a PTS of the first PES packet of every stream: the PTS of
+    // the first access unit §2.7.5 asks for sits in the optional header,
+    // which the PES packets of some streams do not carry.
+    if previous.is_none() && carries_optional_header && pts.is_none() {
+        return StreamTime::MissingPts;
+    }
+    let time = match (clock, dts.or(pts)) {
+        // Why not a time of its own: the first time is that of the first
+        // PES packet, and this one has none.
+        (None, None) => return StreamTime::MissingPts,
+        (Some(_), None) => return StreamTime::Unchanged,
+        (None, Some(timestamp)) => SystemTimeClock::first(timestamp),
+        (Some(clock), Some(timestamp)) => clock.expand(timestamp),
+    };
+    match previous {
+        Some(previous) if time < previous => StreamTime::Decreasing { time, previous },
+        Some(_) | None => StreamTime::At(time),
+    }
+}
+
 impl TryFrom<u64> for Timestamp {
     type Error = TimestampOutOfRange;
 

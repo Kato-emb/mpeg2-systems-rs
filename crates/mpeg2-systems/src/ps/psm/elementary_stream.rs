@@ -86,7 +86,7 @@ impl<'input> ElementaryStream<'input> {
 
     /// Returns the bytes the entry takes in the elementary stream loop
     #[cfg(feature = "alloc")]
-    pub(crate) fn encoded_len(&self) -> usize {
+    pub(super) fn encoded_len(&self) -> usize {
         ENTRY_PREFIX_LENGTH.saturating_add(self.elementary_stream_info_length())
     }
 }

@@ -527,7 +527,7 @@ impl<'input> ProgramStreamMap<'input> {
 /// and whose elementary stream loop would hold `elementary_streams`, its
 /// `program_stream_map_length` larger than 1018, from the lengths alone
 #[cfg(feature = "alloc")]
-pub(crate) fn check_lengths<'stream>(
+pub(super) fn check_lengths<'stream>(
     program_stream_info: DescriptorLoop<'_>,
     elementary_streams: impl IntoIterator<Item = ElementaryStream<'stream>>,
 ) -> Result<(), Error> {

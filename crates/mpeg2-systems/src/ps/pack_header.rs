@@ -14,12 +14,19 @@ use crate::time::write_marked_clock_reference;
 use crate::time::{ClockReference, read_marked_clock_reference};
 
 /// Bytes from `pack_start_code` to `pack_stuffing_length`
-pub(crate) const FIXED_LENGTH: usize = 14;
+pub(super) const FIXED_LENGTH: usize = 14;
 
 /// The most `stuffing_byte`s a pack header may have, ISO/IEC 13818-1
 /// §2.5.3.4
 #[cfg(feature = "alloc")]
 pub(super) const MAX_PACK_STUFFING_LENGTH: u8 = 7;
+
+/// Returns whether `program_mux_rate` may be `program_mux_rate`: not 0, and
+/// within its 22 bits (§2.5.3.4)
+#[cfg(feature = "alloc")]
+pub(super) const fn is_program_mux_rate_allowed(program_mux_rate: u32) -> bool {
+    program_mux_rate != 0 && program_mux_rate < 1 << 22
+}
 
 /// Failure to read or write a pack header
 #[non_exhaustive]

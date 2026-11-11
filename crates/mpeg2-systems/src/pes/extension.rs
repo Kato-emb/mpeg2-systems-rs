@@ -144,6 +144,19 @@ impl<'input> PesExtension<'input> {
         self
     }
 
+    /// Returns `stream_id_extension`, read from the first byte of
+    /// `pes_extension_field`, `None` where there is none (§2.4.3.7)
+    #[cfg(feature = "alloc")]
+    pub(crate) fn stream_id_extension(&self) -> Option<u8> {
+        // Why not the whole first byte: its first bit is
+        // stream_id_extension_flag, whose '1' is reserved and carries no
+        // stream_id_extension.
+        self.pes_extension_field
+            .and_then(<[u8]>::first)
+            .filter(|&&first| first & 0x80 == 0)
+            .map(|first| first & 0x7f)
+    }
+
     /// Returns the number of bytes the extension occupies
     pub(super) fn encoded_len(&self) -> usize {
         let runs = [self.pack_header_field, self.pes_extension_field]

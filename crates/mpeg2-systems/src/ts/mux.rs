@@ -82,7 +82,7 @@ use core::time::Duration;
 use crate::descriptor::DescriptorLoop;
 use crate::pes::{PesPacket, StreamId};
 use crate::psi::pmt;
-use crate::time::SystemTimeClock;
+use crate::time::{StreamTime, SystemTimeClock, stream_time};
 use crate::ts::Pid;
 use crate::ts::adaptation_field::AdaptationField;
 use crate::ts::packet::PACKET_LENGTH;
@@ -571,50 +571,38 @@ impl Muxer {
         let pes_length = packet.encoded_len();
 
         let header = packet.optional_header.as_ref();
-        // Why not ask a PTS of the first PES packet of every stream: the PTS
-        // of the first access unit §2.7.5 asks for sits in the optional
-        // header, which the PES packets of some streams do not carry.
-        if last_timestamp.is_none()
-            && stream_id.carries_optional_header()
-            && header.and_then(|header| header.pts).is_none()
-        {
-            return Err(Error::MissingPts { pid });
-        }
-        let timestamp = header.and_then(|header| header.dts.or(header.pts));
         let reached = program.latest_timestamp();
-        let (clock, time, psi_times, pcr_times, mut next) = match (schedule.zip(reached), timestamp)
-        {
-            (None, Some(timestamp)) => {
-                let clock = SystemTimeClock::first(timestamp);
+        let time = match stream_time(
+            schedule.and(reached),
+            last_timestamp,
+            stream_id.carries_optional_header(),
+            header.and_then(|header| header.pts),
+            header.and_then(|header| header.dts),
+        ) {
+            StreamTime::At(time) => Some(time),
+            StreamTime::Unchanged => None,
+            StreamTime::MissingPts => return Err(Error::MissingPts { pid }),
+            StreamTime::Decreasing { time, previous } => {
+                return Err(Error::DecreasingTimestamp {
+                    pid,
+                    timestamp: time.to_timestamp(),
+                    previous: previous.to_timestamp(),
+                });
+            }
+        };
+        let (clock, psi_times, pcr_times, mut next) = match (schedule.zip(reached), time) {
+            (None, Some(clock)) => {
                 let next = Schedule {
                     psi_sent_at: clock,
                     pcr_sent_at: clock,
                     several_pcrs: false,
                 };
-                (
-                    clock,
-                    Some(clock),
-                    Times::once(clock),
-                    Times::once(clock),
-                    next,
-                )
+                (clock, Times::once(clock), Times::once(clock), next)
             }
-            // Why not a time of its own: the PCR and the PAT and the PMT
-            // start at the time of the first PES packet, and this one has
-            // none.
+            // Why not unreachable!: `stream_time` gives the first PES packet a
+            // time, so the arm is never taken, and an Err keeps it panic free.
             (None, None) => return Err(Error::MissingPts { pid }),
-            (Some((schedule, reached)), timestamp) => {
-                let time = timestamp.map(|timestamp| reached.expand(timestamp));
-                if let (Some(time), Some(timestamp), Some(previous)) =
-                    (time, timestamp, last_timestamp)
-                    && time < previous
-                {
-                    return Err(Error::DecreasingTimestamp {
-                        pid,
-                        timestamp,
-                        previous: previous.to_timestamp(),
-                    });
-                }
+            (Some((schedule, reached)), time) => {
                 let clock = time.map_or(reached, |time| reached.max(time));
                 let interval = |duration| SystemTimeClock::ticks_in(duration);
                 let psi_times =
@@ -626,7 +614,7 @@ impl Muxer {
                     pcr_sent_at: pcr_times.last().unwrap_or(schedule.pcr_sent_at),
                     several_pcrs: schedule.several_pcrs || pcr_times.count > 0,
                 };
-                (clock, time, psi_times, pcr_times, next)
+                (clock, psi_times, pcr_times, next)
             }
         };
         // Why not refuse a program without a PCR PID: a stream is registered
