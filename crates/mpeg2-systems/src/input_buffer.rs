@@ -7,6 +7,23 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
+/// Whether more input may follow the bytes handed over
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Input {
+    Continues,
+    Ends,
+}
+
+/// Whether the demuxer has reported every byte before the end of the input
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum End {
+    /// The input has not ended, or bytes before its end are not reported yet
+    NotReached,
+    /// Every byte before the end is reported, and the buffer takes input
+    /// again
+    Reached,
+}
+
 /// The input handed to a demuxer and not yet dropped
 #[derive(Debug, Clone)]
 pub(crate) struct InputBuffer {
@@ -33,7 +50,7 @@ impl InputBuffer {
     ///
     /// # Panics
     /// Panics if called after [`InputBuffer::finish`] before
-    /// [`InputBuffer::resume`].
+    /// [`InputBuffer::reach_end`] reports the end reached.
     pub(crate) fn extend(&mut self, bytes: &[u8]) {
         assert!(
             !self.ended,
@@ -50,13 +67,24 @@ impl InputBuffer {
         self.ended = true;
     }
 
-    pub(crate) const fn is_ended(&self) -> bool {
-        self.ended
+    /// Returns whether more input may follow the bytes handed over
+    pub(crate) const fn input(&self) -> Input {
+        if self.ended {
+            Input::Ends
+        } else {
+            Input::Continues
+        }
     }
 
-    /// Takes input again, once every byte before the end is reported
-    pub(crate) fn resume(&mut self) {
-        self.ended = false;
+    /// Returns whether the end of the input is reached, and takes input
+    /// again once it is
+    pub(crate) fn reach_end(&mut self) -> End {
+        if self.ended && self.consumed == self.bytes.len() {
+            self.ended = false;
+            End::Reached
+        } else {
+            End::NotReached
+        }
     }
 
     /// Drops the bytes reported or cut, once no queued event lends them, if

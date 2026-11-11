@@ -20,6 +20,14 @@ pub use stream_bound::{StreamBound, StreamBoundIter, StreamBoundLoop};
 /// Bytes from `system_header_start_code` to `header_length`
 const PREFIX_LENGTH: usize = 6;
 
+/// Returns the bytes of the system header `prefix` starts with, from its
+/// `header_length`, `None` where `prefix` ends before it
+#[cfg(feature = "alloc")]
+pub(super) fn encoded_len(prefix: &[u8]) -> Option<usize> {
+    let [.., high, low] = *prefix.first_chunk::<PREFIX_LENGTH>()?;
+    Some(PREFIX_LENGTH.saturating_add(usize::from(u16::from_be_bytes([high, low]))))
+}
+
 /// Bytes from the `marker_bit` after `header_length` to `reserved_bits`
 const FIXED_LENGTH: usize = 6;
 
@@ -311,9 +319,7 @@ impl<'input> SystemHeader<'input> {
     pub const fn encoded_len(&self) -> usize {
         PREFIX_LENGTH.saturating_add(self.header_length())
     }
-}
 
-impl<'input> SystemHeader<'input> {
     /// Reads a system header from `bytes`, which hold it and nothing else
     ///
     /// The stream bound loop is read entry by entry as it is iterated.

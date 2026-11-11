@@ -9,28 +9,16 @@
 use core::ops::Range;
 
 use super::Error;
-use crate::input_buffer::InputBuffer;
+use crate::input_buffer::{End, Input, InputBuffer};
 use crate::pes::{self, EncodedLen, PesPacket, StreamId};
-use crate::ps::{
-    MPEG_PROGRAM_END_CODE, PACK_START_CODE, PROGRAM_STREAM_MAP_START_CODE, PackHeader,
-    ProgramStreamMap, SYSTEM_HEADER_START_CODE, SystemHeader,
+use crate::ps::start_code::{
+    PACK_STREAM_ID, PROGRAM_END_STREAM_ID, PROGRAM_STREAM_MAP_STREAM_ID, START_CODE_PREFIX,
+    SYSTEM_HEADER_STREAM_ID,
 };
-
-/// `packet_start_code_prefix`, the 24 bits every start code starts with
-const START_CODE_PREFIX: [u8; 3] = [0x00, 0x00, 0x01];
-
-/// Bytes of a pack header up to `pack_stuffing_length`, §2.5.3.3
-const PACK_HEADER_LENGTH: usize = 14;
-
-/// Bytes of a system header or program stream map up to its length field
-const LENGTH_FIELD_END: usize = 6;
-
-/// The byte after `packet_start_code_prefix` in each start code the framer
-/// cuts
-const PACK_STREAM_ID: u8 = PACK_START_CODE[3];
-const SYSTEM_HEADER_STREAM_ID: u8 = SYSTEM_HEADER_START_CODE[3];
-const PROGRAM_STREAM_MAP_STREAM_ID: u8 = PROGRAM_STREAM_MAP_START_CODE[3];
-const PROGRAM_END_STREAM_ID: u8 = MPEG_PROGRAM_END_CODE[3];
+use crate::ps::{
+    MPEG_PROGRAM_END_CODE, PACK_START_CODE, PackHeader, ProgramStreamMap, SystemHeader,
+    pack_header, psm, system_header,
+};
 
 /// Bytes walked past that force an [`Output::Unsynchronized`] out
 ///
@@ -46,13 +34,6 @@ enum State {
         skipped: usize,
     },
     Synced,
-}
-
-/// Whether more input can come
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Input {
-    Continues,
-    Ends,
 }
 
 /// What the search saw where it stands
@@ -177,8 +158,7 @@ impl PackFramer {
     /// Steps the state machine until it has something to report
     pub(super) fn step(&mut self) -> Output {
         loop {
-            if self.input.is_ended() && self.input.consumed() == self.input.len() {
-                self.input.resume();
+            if self.input.reach_end() == End::Reached {
                 return Output::EndOfInput;
             }
             let transition = self.transition();
@@ -193,11 +173,7 @@ impl PackFramer {
     fn transition(&self) -> Transition {
         let consumed = self.input.consumed();
         let rest = self.input.from(consumed);
-        let input = if self.input.is_ended() {
-            Input::Ends
-        } else {
-            Input::Continues
-        };
+        let input = self.input.input();
         match self.state {
             // Why report before observing again: the report is capped, so a
             // stream that never synchronizes hands its bytes back in bounded
@@ -356,17 +332,11 @@ fn observe_search(bytes: &[u8]) -> Search {
 
 /// Reads the pack header `bytes` start with, if they hold enough to tell
 fn observe_pack(bytes: &[u8]) -> Option<Result<(PackHeader, usize), Error>> {
-    // Why not wait for the length of an ISO/IEC 13818-1 pack header first:
-    // the bits after pack_start_code tell another kind of pack, such as an
-    // ISO/IEC 11172-1 one, whose header is shorter, so it would be held
-    // back, and cut short at the end of input, for bytes it does not have.
-    let marker = *bytes.get(PACK_START_CODE.len())?;
-    if marker >> 6 != 0b01 {
-        let error = PackHeader::read(bytes.get(..=PACK_START_CODE.len())?).err()?;
-        return Some(Err(Error::PackHeader { error }));
-    }
-    let stuffing = bytes.get(PACK_HEADER_LENGTH.saturating_sub(1))? & 0x07;
-    let length = PACK_HEADER_LENGTH.saturating_add(usize::from(stuffing));
+    let length = match pack_header::encoded_len(bytes) {
+        pack_header::EncodedLen::NeedMoreData => return None,
+        pack_header::EncodedLen::Refused(error) => return Some(Err(Error::PackHeader { error })),
+        pack_header::EncodedLen::Bounded(length) => length,
+    };
     let header = bytes.get(..length)?;
     Some(
         PackHeader::read(header)
@@ -397,11 +367,13 @@ fn observe_synced(bytes: &[u8]) -> Synced {
             None => Synced::NeedMoreData,
         },
         PROGRAM_END_STREAM_ID => Synced::ProgramEnd,
-        SYSTEM_HEADER_STREAM_ID => {
-            observe_element(bytes, Element::SystemHeader, length_field(bytes))
-        }
+        SYSTEM_HEADER_STREAM_ID => observe_element(
+            bytes,
+            Element::SystemHeader,
+            system_header::encoded_len(bytes),
+        ),
         PROGRAM_STREAM_MAP_STREAM_ID => {
-            observe_element(bytes, Element::ProgramStreamMap, length_field(bytes))
+            observe_element(bytes, Element::ProgramStreamMap, psm::encoded_len(bytes))
         }
         _ if StreamId::from(stream_id).is_pes_packet() => match pes::encoded_len(bytes) {
             EncodedLen::NeedMoreData => Synced::NeedMoreData,
@@ -410,13 +382,6 @@ fn observe_synced(bytes: &[u8]) -> Synced {
         },
         _ => Synced::Unknown,
     }
-}
-
-/// Returns the length of the system header or program stream map `bytes`
-/// start with, from the 16 bits after its start code
-fn length_field(bytes: &[u8]) -> Option<usize> {
-    let [.., high, low] = *bytes.first_chunk::<LENGTH_FIELD_END>()?;
-    Some(LENGTH_FIELD_END.saturating_add(usize::from(u16::from_be_bytes([high, low]))))
 }
 
 /// Reads the `element` of `length` bytes that `bytes` start with
@@ -463,15 +428,59 @@ fn scan_start_code(bytes: &[u8], from: usize) -> Scan {
     {
         return Scan::Found(from.saturating_add(offset));
     }
-    let partial = if region.ends_with(&[0x00, 0x00]) {
-        2
-    } else if region.ends_with(&[0x00]) {
-        1
-    } else {
+    let Some(partial) = (1..START_CODE_PREFIX.len()).rev().find(|&length| {
+        START_CODE_PREFIX
+            .get(..length)
+            .is_some_and(|prefix| region.ends_with(prefix))
+    }) else {
         return Scan::NotFound;
     };
     Scan::Partial(from.saturating_add(region.len().saturating_sub(partial)))
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use super::*;
+
+    /// A chunk short enough that many come before the report limit
+    const CHUNK_LENGTH: usize = 1024;
+
+    #[test]
+    fn a_search_that_never_synchronizes_hands_every_byte_back_in_bounded_pieces() {
+        let chunks = UNSYNCHRONIZED_REPORT_LIMIT / CHUNK_LENGTH * 3;
+        let mut framer = PackFramer::new();
+        let (mut pieces, mut others) = (Vec::new(), Vec::new());
+        let mut take = |framer: &mut PackFramer| loop {
+            match framer.step() {
+                Output::NeedMoreData | Output::EndOfInput => break,
+                Output::Unsynchronized(range) => pieces.push(range.len()),
+                other @ (Output::SyncAcquired(_)
+                | Output::PackHeader(_)
+                | Output::Element(..)
+                | Output::ProgramEnd
+                | Output::Unframable(..)
+                | Output::Truncated(_)) => others.push(other),
+            }
+        };
+        for _ in 0..chunks {
+            framer.extend(&vec![0xFF; CHUNK_LENGTH]);
+            take(&mut framer);
+        }
+        framer.finish();
+        take(&mut framer);
+        assert_eq!(
+            (
+                others,
+                pieces.len() > 1,
+                pieces
+                    .iter()
+                    .all(|&length| length <= UNSYNCHRONIZED_REPORT_LIMIT),
+                pieces.iter().sum::<usize>(),
+            ),
+            (vec![], true, true, chunks * CHUNK_LENGTH)
+        );
+    }
+}
