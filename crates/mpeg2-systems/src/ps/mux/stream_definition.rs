@@ -3,6 +3,7 @@
 
 use alloc::vec::Vec;
 
+use super::csps::{self, DecoderBufferBound};
 use super::{Error, Muxer, PackWriter, shortest_pack};
 use crate::descriptor::DescriptorLoop;
 use crate::pes::StreamId;
@@ -29,6 +30,11 @@ pub(super) struct Stream {
     // Why not the clock of the muxer: the clock follows every stream, and a
     // stream may run behind another.
     pub(super) last_timestamp: Option<SystemTimeClock>,
+    /// The bound of §2.7.9 the caller has declared for the stream, `None`
+    /// before it does
+    // Why not a table of bounds in `MuxerConfig`: it would hold the streams
+    // by their ids a second time, apart from their registration.
+    pub(super) decoder_buffer_bound: Option<DecoderBufferBound>,
 }
 
 impl Stream {
@@ -95,19 +101,21 @@ pub(super) fn check_map_length<'stream>(
     .map_err(|error| Error::ProgramStreamMap { error })
 }
 
-/// Appends the system header of `streams`, `rate_bound` and `fixed_flag`
-/// as given, and the program stream map of `program_stream_info` and
-/// `streams`, `program_stream_map_version` `version`, to `out`, writing their
-/// loops in `entries`
+/// Appends `system_header`, its bounds those of `streams`, and the program
+/// stream map of `program_stream_info` and `streams`,
+/// `program_stream_map_version` `version`, to `out`, writing their loops in
+/// `entries`, and returns the bytes of the system header
+///
+/// `system_header` gives `rate_bound` and the flags; its `audio_bound`,
+/// `video_bound` and stream bounds are replaced.
 pub(super) fn write_headers(
     streams: &[Stream],
     program_stream_info: &[u8],
     version: VersionNumber,
-    rate_bound: u32,
-    fixed_flag: bool,
+    system_header: SystemHeader<'_>,
     entries: &mut Vec<u8>,
     out: &mut Vec<u8>,
-) -> Result<(), Error> {
+) -> Result<usize, Error> {
     let writer = PackWriter::new();
     let (audio_bound, video_bound) = bounds(streams);
     // Why not an error: registration refuses a stream past either bound,
@@ -117,17 +125,21 @@ pub(super) fn write_headers(
     entries.clear();
     StreamBoundLoop::write_from(streams.iter().map(Stream::stream_bound), entries)
         .map_err(|error| Error::SystemHeader { error })?;
-    let mut system_header =
-        SystemHeader::new(rate_bound, audio_bound, video_bound).with_fixed_flag(fixed_flag);
+    let mut system_header = system_header;
+    system_header.audio_bound = audio_bound;
+    system_header.video_bound = video_bound;
     system_header.stream_bounds = StreamBoundLoop::from(entries.as_slice());
+    let start = out.len();
     writer.write_system_header(&system_header, out)?;
+    let system_header_length = out.len().saturating_sub(start);
     entries.clear();
     ElementaryStreamLoop::write_from(streams.iter().map(Stream::elementary_stream), entries)
         .map_err(|error| Error::ProgramStreamMap { error })?;
     let mut map = ProgramStreamMap::new(version);
     map.program_stream_info = DescriptorLoop::from(program_stream_info);
     map.elementary_streams = ElementaryStreamLoop::from(entries.as_slice());
-    writer.write_program_stream_map(&map, out)
+    writer.write_program_stream_map(&map, out)?;
+    Ok(system_header_length)
 }
 
 impl Muxer {
@@ -169,7 +181,9 @@ impl Muxer {
     /// * [`PackLength`](Error::PackLength): the first pack, with the system
     ///   header and the program stream map, could not carry a PES packet in
     ///   [`MuxerConfig::pack_size`], or in the bytes that arrive within 0.7 s
-    ///   at [`MuxerConfig::program_mux_rate`] (§2.7.1).
+    ///   at [`MuxerConfig::program_mux_rate`] (§2.7.1), or in a CSPS at a
+    ///   fixed rate the packs of the system header and of the program stream
+    ///   map could not be as long as the packet rate asks (§2.7.9).
     ///
     /// # Panics
     ///
@@ -220,6 +234,7 @@ impl Muxer {
             p_std_buffer,
             es_info: stream.elementary_stream_info.as_bytes().to_vec(),
             last_timestamp: None,
+            decoder_buffer_bound: None,
         };
         let (audio_bound, video_bound) = bounds(&self.streams);
         if is_audio(stream.stream_type) && audio_bound >= system_header::MAX_AUDIO_BOUND.into() {
@@ -248,14 +263,19 @@ impl Muxer {
         streams: &[Stream],
         program_stream_info: &[u8],
     ) -> Result<(), Error> {
-        check_headers(
+        let (system_header, map) = check_headers(
             streams,
             program_stream_info,
             self.map_version,
-            self.config.program_mux_rate,
-            self.rate().fixed_flag(),
-            self.largest_pack(),
-        )
+            self.system_header(),
+        )?;
+        let length = self
+            .rate()
+            .longest_first_pack(system_header, map, shortest_pack());
+        if length > self.largest_pack() {
+            return Err(Error::PackLength { length });
+        }
+        Ok(())
     }
 
     /// Replaces the `stream_type` and the `elementary_stream_info` of the
@@ -289,10 +309,17 @@ impl Muxer {
     ///   `stream_type` carried in sections, or a map past the 1018 bytes of
     ///   `program_stream_map_length`, which is refused before
     ///   `elementary_stream_info` is copied.
+    /// * [`DecoderBufferBound`](Error::DecoderBufferBound): the bound
+    ///   declared for the stream with
+    ///   [`set_decoder_buffer_bound`](Self::set_decoder_buffer_bound) is not
+    ///   one the `stream_type` given may take.
     /// * [`PackLength`](Error::PackLength): the first pack of a PES packet,
     ///   with the system header and the program stream map, could not carry a
     ///   PES packet in [`MuxerConfig::pack_size`], or in the bytes that
-    ///   arrive within 0.7 s at [`MuxerConfig::program_mux_rate`] (§2.7.1).
+    ///   arrive within 0.7 s at [`MuxerConfig::program_mux_rate`] (§2.7.1),
+    ///   or in a CSPS at a fixed rate the packs of the system header and of
+    ///   the program stream map could not be as long as the packet rate asks
+    ///   (§2.7.9).
     ///
     /// [`MuxerConfig::pack_size`]: super::MuxerConfig::pack_size
     /// [`MuxerConfig::program_mux_rate`]: super::MuxerConfig::program_mux_rate
@@ -368,6 +395,15 @@ impl Muxer {
                 stream_id_extension,
             });
         }
+        if let Some(declared) = registered.decoder_buffer_bound
+            && !csps::is_declarable(stream_id, stream.stream_type, declared)
+        {
+            return Err(Error::DecoderBufferBound {
+                stream_id,
+                stream_id_extension,
+                decoder_buffer_bound: declared,
+            });
+        }
         check_map_length(
             &self.program_stream_info,
             self.streams.iter().enumerate().map(|(at, registered)| {
@@ -424,6 +460,107 @@ impl Muxer {
         Ok(())
     }
 
+    /// Declares `decoder_buffer_bound` the bound of the stream registered of
+    /// `stream_id` and, when it is 0xFD, of `stream_id_extension`, which
+    /// holds its P-STD buffer in a CSPS ([`MuxerConfig::csps`])
+    ///
+    /// ISO/IEC 13818-1 §2.7.9 bounds the buffer by what the stream is. The
+    /// muxer tells it from the `stream_id` (Table 2-22) and the
+    /// `stream_type` (Table 2-34) where they say it: an audio stream, an
+    /// ISO/IEC 13818-7 ADTS audio stream, or a stream the clause does not
+    /// bound. The caller declares the size of the VBV of an H.262 or ISO/IEC
+    /// 11172-2 video stream (`stream_type` 0x01, 0x02 and 0x22) and of the CPB
+    /// of an H.264 video stream (0x1B and 0x23), whether a video
+    /// sub-bitstream of an AVC video stream (0x1F, 0x20 and 0x26) has the
+    /// bound of its CPB or none, and the bound of a stream whose
+    /// `stream_type` does not say what it carries (0x06, the user private
+    /// 0x80 to 0xFF, and the reserved values). The muxer does not read the
+    /// elementary stream for any of them. A declaration replaces the one
+    /// before it, and is kept outside a CSPS.
+    ///
+    /// # Errors
+    ///
+    /// * [`StreamIdExtension`](Error::StreamIdExtension): `stream_id_extension`
+    ///   is present where `stream_id` is not 0xFD, or absent where it is.
+    /// * [`UnregisteredStream`](Error::UnregisteredStream): no stream of
+    ///   `stream_id` and `stream_id_extension` is registered.
+    /// * [`DecoderBufferBound`](Error::DecoderBufferBound):
+    ///   `decoder_buffer_bound` is not one the `stream_id` and the
+    ///   `stream_type` of the stream may take, such as [`Audio`] for a stream
+    ///   of `stream_type` 0x02.
+    ///
+    /// [`MuxerConfig::csps`]: super::MuxerConfig::csps
+    /// [`Audio`]: DecoderBufferBound::Audio
+    ///
+    /// ```
+    /// use mpeg2_systems::pes::extension::PStdBuffer;
+    /// use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
+    /// use mpeg2_systems::ps::mux::{DecoderBufferBound, Error, Muxer, MuxerConfig};
+    /// use mpeg2_systems::ps::psm::ElementaryStream;
+    /// use mpeg2_systems::stream_type::StreamType;
+    /// use mpeg2_systems::time::Timestamp;
+    ///
+    /// let video = StreamId::from(0xe0);
+    /// let mut muxer = Muxer::new(MuxerConfig::new(3_528).with_csps(true))?;
+    /// // A VBV of 40 KiB, at 1.15 Mbit/s
+    /// muxer.add_stream(
+    ///     ElementaryStream::new(StreamType::ISO_IEC_11172_2_VIDEO, video),
+    ///     PStdBuffer::new(true, 46),
+    /// )?;
+    /// muxer.set_decoder_buffer_bound(
+    ///     video,
+    ///     None,
+    ///     DecoderBufferBound::Vbv { size: 40_960, rv_max: 1_150_000 },
+    /// )?;
+    /// let access_unit = PesPacket::new(video, &[0xaa; 100])
+    ///     .with_optional_header(OptionalHeader::new().with_pts(Timestamp::try_from(90_000)?));
+    /// muxer.handle_pes_packet(&access_unit)?;
+    ///
+    /// // A P-STD buffer past the VBV and 6 KiB is refused
+    /// let mut muxer = Muxer::new(MuxerConfig::new(3_528).with_csps(true))?;
+    /// muxer.add_stream(
+    ///     ElementaryStream::new(StreamType::ISO_IEC_11172_2_VIDEO, video),
+    ///     PStdBuffer::new(true, 47),
+    /// )?;
+    /// muxer.set_decoder_buffer_bound(
+    ///     video,
+    ///     None,
+    ///     DecoderBufferBound::Vbv { size: 40_960, rv_max: 1_150_000 },
+    /// )?;
+    /// assert!(matches!(
+    ///     muxer.handle_pes_packet(&access_unit),
+    ///     Err(Error::CspsBufferSize { .. })
+    /// ));
+    /// # Ok::<(), Box<dyn core::error::Error>>(())
+    /// ```
+    pub fn set_decoder_buffer_bound(
+        &mut self,
+        stream_id: StreamId,
+        stream_id_extension: Option<u8>,
+        decoder_buffer_bound: DecoderBufferBound,
+    ) -> Result<(), Error> {
+        if stream_id_extension.is_some() != (stream_id == StreamId::EXTENDED_STREAM_ID) {
+            return Err(Error::StreamIdExtension { stream_id });
+        }
+        let Some((index, registered)) = self.stream(stream_id, stream_id_extension) else {
+            return Err(Error::UnregisteredStream {
+                stream_id,
+                stream_id_extension,
+            });
+        };
+        if !csps::is_declarable(stream_id, registered.stream_type, decoder_buffer_bound) {
+            return Err(Error::DecoderBufferBound {
+                stream_id,
+                stream_id_extension,
+                decoder_buffer_bound,
+            });
+        }
+        if let Some(registered) = self.streams.get_mut(index) {
+            registered.decoder_buffer_bound = Some(decoder_buffer_bound);
+        }
+        Ok(())
+    }
+
     /// Makes the program stream map as it now stands due in the next pack,
     /// its version incremented when one has been sent since the last change
     pub(super) fn change_map(&mut self) {
@@ -433,32 +570,28 @@ impl Muxer {
     }
 }
 
-/// Refuses the system header of `streams`, `rate_bound` and `fixed_flag` as
-/// given, and the program stream map of `program_stream_info` and `streams`,
-/// `program_stream_map_version` `version`, where [`SystemHeader::write`] or
-/// [`ProgramStreamMap::write`] does, or where the first pack of a PES packet,
-/// with them, could not carry a PES packet in `largest_pack` bytes
+/// Returns the bytes of `system_header`, its bounds those of `streams`, and
+/// of the program stream map of `program_stream_info` and `streams`,
+/// `program_stream_map_version` `version`, as [`write_headers`] writes them,
+/// or refuses them where [`SystemHeader::write`] or
+/// [`ProgramStreamMap::write`] does
 pub(super) fn check_headers(
     streams: &[Stream],
     program_stream_info: &[u8],
     version: VersionNumber,
-    rate_bound: u32,
-    fixed_flag: bool,
-    largest_pack: usize,
-) -> Result<(), Error> {
+    system_header: SystemHeader<'_>,
+) -> Result<(usize, usize), Error> {
     let mut headers = Vec::new();
-    write_headers(
+    let system_header_length = write_headers(
         streams,
         program_stream_info,
         version,
-        rate_bound,
-        fixed_flag,
+        system_header,
         &mut Vec::new(),
         &mut headers,
     )?;
-    let length = shortest_pack(headers.len());
-    if length > largest_pack {
-        return Err(Error::PackLength { length });
-    }
-    Ok(())
+    Ok((
+        system_header_length,
+        headers.len().saturating_sub(system_header_length),
+    ))
 }

@@ -1,9 +1,17 @@
 //! The packs that fill the time before a PES packet: of a pack header alone
 //! over a leap of the time stamps, or of padding on the line of a fixed rate
 
-use super::{Pack, as_u64, bytes_per_second, longest_scr_interval};
+use super::{Pack, as_u64, as_usize, bytes_per_second, longest_scr_interval};
+use crate::ps::mux::pack_writer::Fill;
 use crate::ps::pack_header;
 use crate::time::{SYSTEM_CLOCK_FREQUENCY, SystemTimeClock};
+
+/// Returns the bytes of a pack header with all its `stuffing_byte`s
+/// (§2.5.3.4)
+fn stuffed_pack_header() -> u64 {
+    as_u64(pack_header::FIXED_LENGTH)
+        .saturating_add(u64::from(pack_header::MAX_PACK_STUFFING_LENGTH))
+}
 
 /// The line of a fixed rate, ISO/IEC 13818-1 §2.5.3.6 equations 2-22 and
 /// 2-23: SCR(i) = c1 × i + c2, c1 the ticks of the STC a byte takes to arrive
@@ -16,6 +24,11 @@ pub(super) struct Line {
 impl Line {
     pub(super) const fn new(program_mux_rate: u32) -> Self {
         Self { program_mux_rate }
+    }
+
+    /// Returns the `program_mux_rate` of the line
+    pub(super) const fn program_mux_rate(self) -> u32 {
+        self.program_mux_rate
     }
 
     /// Returns ⌊c1 × `bytes`⌋, or [`u64::MAX`] past it
@@ -60,41 +73,86 @@ impl Line {
 }
 
 /// How the bytes missing before a PES packet are cut into packs of padding:
-/// `total` bytes in packs of `longest` bytes but the last two, the last no
-/// shorter than a pack header
+/// `total` bytes in packs of `longest` bytes but the last two, each of a
+/// length a pack of padding may take
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PaddingLayout {
     longest: u64,
     total: u64,
+    /// The fewest bytes of a pack that carries a PES packet of padding
+    shortest_padded: u64,
 }
 
 /// Returns how `missing` bytes are cut into packs of padding of at most
-/// `longest` bytes, each no shorter than a pack header, or `None` where none
-/// are
+/// `longest` bytes, each a pack header with stuffing alone or a pack of at
+/// least `shortest_padded` bytes and of more than the stuffing, or `None`
+/// where none are
 ///
 /// The packs take exactly the bytes missing: `longest` each, and the one
-/// before the last gives up what the last needs to be a pack header. Where
-/// fewer bytes than a pack header are missing, or are left for the last and
-/// the one before it cannot give them up without falling below a pack
-/// header itself, those bytes are left out, and the PES packet comes that
-/// much early.
-pub(super) fn padding_layout(missing: u64, longest: u64) -> Option<PaddingLayout> {
-    let header = as_u64(pack_header::FIXED_LENGTH);
+/// before the last gives up what the last needs to be a pack it may be.
+/// Where fewer bytes than a pack header are missing, or are left for the
+/// last and the one before it cannot give them up, those bytes are left out,
+/// and the PES packet comes that much early; where the last would carry
+/// padding in fewer than `shortest_padded` bytes, it takes the pack header
+/// and its stuffing alone, and the rest is left out.
+pub(super) fn padding_layout(
+    missing: u64,
+    longest: u64,
+    shortest_padded: u64,
+) -> Option<PaddingLayout> {
+    let shortest_padded = shortest_padded.max(stuffed_pack_header().saturating_add(1));
+    let layout = |total| PaddingLayout {
+        longest,
+        total,
+        shortest_padded,
+    };
     let count = missing.div_ceil(longest);
     let rest = missing.saturating_sub(count.saturating_sub(1).saturating_mul(longest));
-    let total = if rest >= header
-        || (count >= 2 && longest.saturating_add(rest) >= header.saturating_mul(2))
-    {
+    let probe = layout(missing);
+    let stuffed = stuffed_pack_header();
+    let total = if probe.is_pack(rest)
+        || (count >= 2
+            && probe.is_pack(
+                longest
+                    .saturating_add(rest)
+                    .saturating_sub(probe.lift(rest)),
+            )) {
         missing
+    } else if rest > stuffed {
+        // Why not a pack of `shortest_padded` for the bytes left: the PES
+        // packet would come after its time, where leaving them has it come
+        // early.
+        missing.saturating_sub(rest).saturating_add(stuffed)
     } else {
-        // Why not a pack header for the bytes left: the PES packet would
-        // come after its time, where leaving them has it come early.
+        // Why not a pack header for the bytes left: as above.
         missing.saturating_sub(rest)
     };
-    (total > 0).then_some(PaddingLayout { longest, total })
+    (total > 0).then_some(layout(total))
 }
 
 impl PaddingLayout {
+    /// Returns whether a pack of padding may be `length` bytes: a pack
+    /// header with stuffing alone, or a pack of `shortest_padded` to
+    /// `longest` bytes
+    fn is_pack(self, length: u64) -> bool {
+        (as_u64(pack_header::FIXED_LENGTH)..=stuffed_pack_header()).contains(&length)
+            || (self.shortest_padded..=self.longest).contains(&length)
+    }
+
+    /// Returns the bytes the last pack takes of `rest`, the bytes left for
+    /// it: a pack header where fewer, `shortest_padded` where it would carry
+    /// padding in fewer, or `rest`
+    fn lift(self, rest: u64) -> u64 {
+        let header = as_u64(pack_header::FIXED_LENGTH);
+        if rest < header {
+            header
+        } else if rest > stuffed_pack_header() && rest < self.shortest_padded {
+            self.shortest_padded
+        } else {
+            rest
+        }
+    }
+
     /// Returns how many packs there are
     fn count(self) -> u64 {
         self.total.div_ceil(self.longest)
@@ -102,10 +160,9 @@ impl PaddingLayout {
 
     /// Returns the bytes of the pack at `index`, and of the packs before it
     fn pack(self, index: u64) -> (u64, u64) {
-        let header = as_u64(pack_header::FIXED_LENGTH);
         let count = self.count();
         let others = self.longest.saturating_mul(count.saturating_sub(1));
-        let last = self.total.saturating_sub(others).max(header);
+        let last = self.lift(self.total.saturating_sub(others));
         let before = self.longest.saturating_mul(index);
         if index.saturating_add(1) == count {
             (last, self.total.saturating_sub(last))
@@ -176,7 +233,7 @@ impl Gap {
     }
 
     /// Returns the last of the packs
-    pub(in crate::ps::mux) fn last(self) -> Pack {
+    pub(super) fn last(self) -> Pack {
         self.pack(self.count().saturating_sub(1))
     }
 
@@ -200,6 +257,7 @@ impl Gap {
                 offset: before
                     .next_offset()
                     .saturating_add(index.saturating_mul(as_u64(pack_header::FIXED_LENGTH))),
+                packets: 0,
             },
             GapKind::Padding {
                 before,
@@ -208,10 +266,12 @@ impl Gap {
             } => {
                 let (length, packs_before) = layout.pack(index);
                 let offset = before.next_offset().saturating_add(packs_before);
+                let length = as_usize(length);
                 Pack {
                     at: line.at(before, offset),
-                    length: usize::try_from(length).unwrap_or(usize::MAX),
+                    length,
                     offset,
+                    packets: Fill::of(length.saturating_sub(pack_header::FIXED_LENGTH)).packets(),
                 }
             }
         }

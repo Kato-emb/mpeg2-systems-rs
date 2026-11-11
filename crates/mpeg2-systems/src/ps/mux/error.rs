@@ -3,6 +3,7 @@
 
 use core::fmt;
 
+use super::csps::DecoderBufferBound;
 use crate::pes::extension::PStdBuffer;
 use crate::pes::{self, StreamId};
 use crate::ps::{pack_header, psm, system_header};
@@ -54,7 +55,9 @@ pub enum Error {
         program_mux_rate: u32,
     },
     /// The `pack_size` set cannot hold a pack header, the shortest PES packet
-    /// header and a byte of payload
+    /// header and a byte of payload, or in a CSPS at a fixed rate the
+    /// shortest pack of one packet the packet rate asks for (ISO/IEC 13818-1
+    /// §2.7.9)
     PackSize {
         /// The `pack_size` set
         pack_size: usize,
@@ -130,6 +133,31 @@ pub enum Error {
         p_std_buffer: PStdBuffer,
         /// The bound registered for the stream
         bound: PStdBuffer,
+    },
+    /// The P-STD buffer size a PES packet carries, or the bound registered
+    /// that the first PES packet of its stream is given, is outside the
+    /// bytes a CSPS allows its stream (ISO/IEC 13818-1 §2.7.9)
+    CspsBufferSize {
+        /// The `stream_id` of the stream
+        stream_id: StreamId,
+        /// The `stream_id_extension` of the stream, if it has one
+        stream_id_extension: Option<u8>,
+        /// The P-STD buffer size written
+        p_std_buffer: PStdBuffer,
+        /// The fewest bytes the buffer may be
+        smallest: u32,
+        /// The most bytes the buffer may be
+        largest: u32,
+    },
+    /// The bound of ISO/IEC 13818-1 §2.7.9 declared for a stream is not one
+    /// its `stream_id` and `stream_type` may take
+    DecoderBufferBound {
+        /// The `stream_id` of the stream
+        stream_id: StreamId,
+        /// The `stream_id_extension` of the stream, if it has one
+        stream_id_extension: Option<u8>,
+        /// The bound declared
+        decoder_buffer_bound: DecoderBufferBound,
     },
     /// The DTS of a PES packet, or its PTS when it has none, is before that
     /// of the PES packet given before it on the same stream
@@ -255,6 +283,31 @@ impl fmt::Display for Error {
                 ExtensionOf(*stream_id_extension),
                 bound.size_in_bytes()
             ),
+            Self::CspsBufferSize {
+                stream_id,
+                stream_id_extension,
+                p_std_buffer,
+                smallest,
+                largest,
+            } => write!(
+                formatter,
+                "a P-STD buffer of {} bytes on stream_id {:#04x}{} is outside the {smallest} to \
+                 {largest} bytes a CSPS allows",
+                p_std_buffer.size_in_bytes(),
+                stream_id.get(),
+                ExtensionOf(*stream_id_extension)
+            ),
+            Self::DecoderBufferBound {
+                stream_id,
+                stream_id_extension,
+                decoder_buffer_bound,
+            } => write!(
+                formatter,
+                "the decoder buffer bound {decoder_buffer_bound:?} declared for stream_id \
+                 {:#04x}{} is not one of its stream_type",
+                stream_id.get(),
+                ExtensionOf(*stream_id_extension)
+            ),
             Self::DecreasingTimestamp {
                 stream_id,
                 stream_id_extension,
@@ -313,6 +366,8 @@ impl core::error::Error for Error {
             | Self::SystemHeaderChange { .. }
             | Self::MissingPts { .. }
             | Self::PStdBufferSize { .. }
+            | Self::CspsBufferSize { .. }
+            | Self::DecoderBufferBound { .. }
             | Self::DecreasingTimestamp { .. }
             | Self::TimestampGap { .. }
             | Self::BufferFull { .. } => None,

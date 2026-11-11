@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 
 use super::gap::Line;
 use super::{Pack, Rate};
+use crate::ps::mux::csps::Constraints;
 use crate::time::{SystemTimeClock, Timestamp};
 
 /// A `program_mux_rate` of 1 260 000 bytes a second
@@ -18,18 +19,20 @@ fn timestamp(value: u64) -> Timestamp {
 #[test]
 fn the_padding_fills_the_bytes_missing_exactly_in_packs_of_at_most_the_longest_from_a_pack_header_on()
  {
-    let before = Pack::after(None, SystemTimeClock::first(timestamp(90_000)), 100);
+    let before = Pack::after(None, SystemTimeClock::first(timestamp(90_000)), 100, 1);
     let lengths = |bytes: u64| {
         let time = before
             .at
             .add_ticks((100 + bytes) * TICKS_OF_SEVEN_BYTES / 7);
-        Rate::fixed(RATE, 2_048).gap(before, time).map(|padding| {
-            (
-                padding.iter().map(|pack| pack.length).collect::<Vec<_>>(),
-                padding.bytes(),
-                padding.last().next_offset() - 100,
-            )
-        })
+        Rate::fixed(RATE, 2_048, Constraints::none())
+            .gap(before, time, 0)
+            .map(|padding| {
+                (
+                    padding.iter().map(|pack| pack.length).collect::<Vec<_>>(),
+                    padding.bytes(),
+                    padding.last().next_offset() - 100,
+                )
+            })
     };
 
     // Below a pack header, none; from it on, the bytes missing
