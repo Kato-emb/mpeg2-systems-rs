@@ -2,7 +2,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::gap::Line;
-use super::{Pack, Rate};
+use super::{PlannedPack, Rate};
 use crate::ps::mux::csps::Constraints;
 use crate::time::{SystemTimeClock, Timestamp};
 
@@ -19,7 +19,15 @@ fn timestamp(value: u64) -> Timestamp {
 #[test]
 fn the_padding_fills_the_bytes_missing_exactly_in_packs_of_at_most_the_longest_from_a_pack_header_on()
  {
-    let before = Pack::after(None, SystemTimeClock::first(timestamp(90_000)), 100, 1);
+    let before = PlannedPack::after(
+        None,
+        SystemTimeClock::first(timestamp(90_000)),
+        100,
+        100,
+        1,
+        0..0,
+    )
+    .pack;
     let lengths = |bytes: u64| {
         let time = before
             .at
@@ -28,7 +36,10 @@ fn the_padding_fills_the_bytes_missing_exactly_in_packs_of_at_most_the_longest_f
             .gap(before, time, 0)
             .map(|padding| {
                 (
-                    padding.iter().map(|pack| pack.length).collect::<Vec<_>>(),
+                    padding
+                        .iter()
+                        .map(|planned| planned.pack.length)
+                        .collect::<Vec<_>>(),
                     padding.bytes(),
                     padding.last().next_offset() - 100,
                 )

@@ -440,3 +440,32 @@ fn a_stream_type_the_bound_declared_for_the_stream_does_not_fit_is_refused() {
         )
     );
 }
+
+#[test]
+fn at_a_fixed_rate_a_pack_header_alone_goes_before_the_end_code_where_it_would_come_sooner_than_the_packet_rate()
+ {
+    // The last pack is filled to the 588 bytes a packet takes to the next
+    // SCR, and the end code ends 5 bytes before the byte that SCR is in
+    let ends: Vec<(bool, bool)> = (540..=600)
+        .map(|length| {
+            let stream = multiplexed_by(
+                csps_muxer(vcd()),
+                &[
+                    pes_packet(VIDEO, &[0xaa; 3_000], Some(90_000)),
+                    pes_packet(AUDIO, &vec![0xbb; length], Some(91_000)),
+                ],
+            );
+            let last = carried(&stream).pop().unwrap();
+            (
+                meets_the_packet_rate(&stream, VCD_RATE)
+                    .iter()
+                    .all(|&met| met),
+                last.stream_ids.is_empty(),
+            )
+        })
+        .collect();
+
+    assert!(ends.iter().all(|&(met, _)| met), "{ends:?}");
+    assert!(ends.iter().any(|&(_, closing)| closing), "{ends:?}");
+    assert!(ends.iter().any(|&(_, closing)| !closing), "{ends:?}");
+}

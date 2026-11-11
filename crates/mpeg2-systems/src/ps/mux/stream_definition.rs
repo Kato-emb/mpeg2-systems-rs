@@ -101,18 +101,25 @@ pub(super) fn check_map_length<'stream>(
     .map_err(|error| Error::ProgramStreamMap { error })
 }
 
-/// Appends `system_header`, its bounds those of `streams`, and the program
+/// The fields of the system header that the whole Program Stream sets, not
+/// its streams
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SystemHeaderFields {
+    pub(super) rate_bound: u32,
+    pub(super) fixed_flag: bool,
+    pub(super) csps_flag: bool,
+    pub(super) packet_rate_restriction_flag: bool,
+}
+
+/// Appends the system header of `fields` and of `streams`, and the program
 /// stream map of `program_stream_info` and `streams`,
 /// `program_stream_map_version` `version`, to `out`, writing their loops in
 /// `entries`, and returns the bytes of the system header
-///
-/// `system_header` gives `rate_bound` and the flags; its `audio_bound`,
-/// `video_bound` and stream bounds are replaced.
 pub(super) fn write_headers(
     streams: &[Stream],
     program_stream_info: &[u8],
     version: VersionNumber,
-    system_header: SystemHeader<'_>,
+    fields: SystemHeaderFields,
     entries: &mut Vec<u8>,
     out: &mut Vec<u8>,
 ) -> Result<usize, Error> {
@@ -125,9 +132,10 @@ pub(super) fn write_headers(
     entries.clear();
     StreamBoundLoop::write_from(streams.iter().map(Stream::stream_bound), entries)
         .map_err(|error| Error::SystemHeader { error })?;
-    let mut system_header = system_header;
-    system_header.audio_bound = audio_bound;
-    system_header.video_bound = video_bound;
+    let mut system_header = SystemHeader::new(fields.rate_bound, audio_bound, video_bound)
+        .with_fixed_flag(fields.fixed_flag)
+        .with_csps_flag(fields.csps_flag)
+        .with_packet_rate_restriction_flag(fields.packet_rate_restriction_flag);
     system_header.stream_bounds = StreamBoundLoop::from(entries.as_slice());
     let start = out.len();
     writer.write_system_header(&system_header, out)?;
@@ -267,7 +275,7 @@ impl Muxer {
             streams,
             program_stream_info,
             self.map_version,
-            self.system_header(),
+            self.system_header_fields(),
         )?;
         let length = self
             .rate()
@@ -579,14 +587,14 @@ pub(super) fn check_headers(
     streams: &[Stream],
     program_stream_info: &[u8],
     version: VersionNumber,
-    system_header: SystemHeader<'_>,
+    fields: SystemHeaderFields,
 ) -> Result<(usize, usize), Error> {
     let mut headers = Vec::new();
     let system_header_length = write_headers(
         streams,
         program_stream_info,
         version,
-        system_header,
+        fields,
         &mut Vec::new(),
         &mut headers,
     )?;

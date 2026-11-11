@@ -430,7 +430,7 @@ fn a_pack_of_padding_takes_stuffing_up_to_7_bytes_and_padding_packets_past_them(
     let written = |length: usize| {
         let mut out = Vec::new();
         PackWriter::new()
-            .write_padding_pack(&header, length, &mut out)
+            .write_pack(&header, &[], None, Fill::of(length - 14), &mut out)
             .unwrap();
         let stuffing = out.get(13).unwrap() & 0x07;
         let (pack_header, rest) = out.split_at(14 + usize::from(stuffing));

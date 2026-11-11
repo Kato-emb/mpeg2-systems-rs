@@ -168,27 +168,32 @@ impl PackWriter {
         Ok(written)
     }
 
-    /// Appends a pack of `length` bytes that carries nothing but padding:
-    /// `header` with `stuffing_byte`s where 7 or fewer fill the pack
-    /// (§2.5.3.4), or past that `header` without them and PES packets of
-    /// `padding_stream` (§2.4.3.6, §2.4.3.7), of as near the same length as
-    /// they can be
+    /// Appends a pack to `out`: `header` with the `stuffing_byte`s of
+    /// `fill`, `headers`, the bytes of a system header and a program stream
+    /// map as written, `piece` where it carries a PES packet, then the PES
+    /// packets of padding of `fill`
     ///
     /// # Errors
     ///
     /// * [`PackHeader`](Error::PackHeader): [`PackHeader::write`] refuses
     ///   `header`.
-    pub(super) fn write_padding_pack(
+    /// * Those of [`write_pes_packets`](Self::write_pes_packets) for `piece`.
+    pub(super) fn write_pack(
         &self,
         header: &PackHeader,
-        length: usize,
+        headers: &[u8],
+        piece: Option<&PesPacket<'_>>,
+        fill: Fill,
         out: &mut Vec<u8>,
     ) -> Result<(), Error> {
-        let fill = Fill::of(length.saturating_sub(pack_header::FIXED_LENGTH));
         self.write_pack_header(
             &header.with_pack_stuffing_length(fill.pack_stuffing_length()),
             out,
         )?;
+        out.extend_from_slice(headers);
+        if let Some(piece) = piece {
+            self.write_pes_packets(piece, out)?;
+        }
         fill.write_padding(out);
         Ok(())
     }

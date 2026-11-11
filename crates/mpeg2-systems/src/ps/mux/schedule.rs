@@ -100,23 +100,13 @@ pub(super) struct Pack {
     offset: u64,
     /// NP of §2.7.9: the `packet_start_code_prefix`es and the
     /// `system_header_start_code`s of the pack
-    // Why not whether the SCR is the muxer's `headers_sent_at`: that is
-    // cleared when the map changes, and the next SCR would follow the map.
+    // Why not tell from `headers_sent_at` whether the pack carried the
+    // system header and the map, and count its packets from that: the muxer
+    // clears it when the map changes, and the next SCR would follow the map.
     packets: usize,
 }
 
 impl Pack {
-    /// Returns the pack of `length` bytes and `packets` packets, its SCR at
-    /// `at`, written after `before`, or first
-    fn after(before: Option<Self>, at: SystemTimeClock, length: usize, packets: usize) -> Self {
-        Self {
-            at,
-            length,
-            offset: before.map_or(0, Self::next_offset),
-            packets,
-        }
-    }
-
     /// Returns the time of the STC the SCR of the pack samples, before
     /// `mux_delay` is taken off
     pub(super) const fn at(self) -> SystemTimeClock {
@@ -131,6 +121,63 @@ impl Pack {
     /// Returns the `offset` of the pack after it
     fn next_offset(self) -> u64 {
         self.offset.saturating_add(as_u64(self.length))
+    }
+}
+
+/// A pack to write: the pack, the bytes of the system header and the
+/// program stream map it carries, and the fill past what it carries
+#[derive(Debug, Clone)]
+pub(super) struct PlannedPack {
+    pub(super) pack: Pack,
+    pub(super) headers: Range<usize>,
+    pub(super) fill: Fill,
+}
+
+impl PlannedPack {
+    /// Returns the pack of `length` bytes, its SCR at `at` and `offset`
+    /// bytes from the first SCR, that carries `contents` bytes in `packets`
+    /// packets, the `headers` bytes of the system header and the program
+    /// stream map among them, and is filled past them, the packets of the
+    /// fill counted with them (§2.7.9)
+    fn filled(
+        at: SystemTimeClock,
+        offset: u64,
+        length: usize,
+        contents: usize,
+        packets: usize,
+        headers: Range<usize>,
+    ) -> Self {
+        let fill = Fill::of(length.saturating_sub(contents));
+        Self {
+            pack: Pack {
+                at,
+                length,
+                offset,
+                packets: packets.saturating_add(fill.packets()),
+            },
+            headers,
+            fill,
+        }
+    }
+
+    /// Returns [`filled`](Self::filled) as the pack after `before`, or the
+    /// first
+    fn after(
+        before: Option<Pack>,
+        at: SystemTimeClock,
+        length: usize,
+        contents: usize,
+        packets: usize,
+        headers: Range<usize>,
+    ) -> Self {
+        Self::filled(
+            at,
+            before.map_or(0, Pack::next_offset),
+            length,
+            contents,
+            packets,
+            headers,
+        )
     }
 }
 
@@ -249,12 +296,15 @@ impl Rate {
             )))
             .div_euclid(u128::from(bytes_per_second(self.program_mux_rate())));
         (arrival < u128::from(self.constraints().packet_ticks(last.packets))).then(|| {
-            Pack::after(
+            PlannedPack::after(
                 Some(last),
                 self.following(last),
                 pack_header::FIXED_LENGTH,
+                pack_header::FIXED_LENGTH,
                 0,
+                0..0,
             )
+            .pack
         })
     }
 
@@ -321,12 +371,11 @@ pub(super) struct Plan {
 }
 
 /// Where the packs of a [`Plan`] go before the PES packet
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Layout {
     gap: Option<Gap>,
-    /// The packs of the system header and of the program stream map, and the
-    /// fill of each
-    headers: Option<[(Pack, Fill); 2]>,
+    /// The packs of the system header and of the program stream map
+    headers: Option<[PlannedPack; 2]>,
     first_scr: Option<SystemTimeClock>,
 }
 
@@ -344,38 +393,28 @@ impl Plan {
         let before = gap.map(Gap::last).or(self.before);
         let headers = lengths.zip(self.rate.first_scr(before, self.time)).map(
             |([system_header, map], at)| {
-                let header_pack =
-                    |before: Option<Pack>, at: SystemTimeClock, length: usize, contents: usize| {
-                        let fill = Fill::of(length.saturating_sub(contents));
-                        (
-                            Pack::after(
-                                before,
-                                at,
-                                length,
-                                PES_PACKETS.saturating_add(fill.packets()),
-                            ),
-                            fill,
-                        )
-                    };
-                let first = header_pack(
+                let carried = self.system_header;
+                let first = PlannedPack::after(
                     before,
                     at,
                     system_header,
-                    pack_header::FIXED_LENGTH.saturating_add(self.system_header),
+                    pack_header::FIXED_LENGTH.saturating_add(carried),
+                    PES_PACKETS,
+                    0..carried,
                 );
-                [
-                    first,
-                    header_pack(
-                        Some(first.0),
-                        self.rate.following(first.0),
-                        map,
-                        pack_header::FIXED_LENGTH.saturating_add(self.program_stream_map),
-                    ),
-                ]
+                let second = PlannedPack::after(
+                    Some(first.pack),
+                    self.rate.following(first.pack),
+                    map,
+                    pack_header::FIXED_LENGTH.saturating_add(self.program_stream_map),
+                    PES_PACKETS,
+                    carried..carried.saturating_add(self.program_stream_map),
+                );
+                [first, second]
             },
         );
-        let first_scr = match headers {
-            Some([_, (map, _)]) => Some(self.rate.following(map)),
+        let first_scr = match &headers {
+            Some([_, map]) => Some(self.rate.following(map.pack)),
             None => self.rate.first_scr(before, self.time),
         };
         Layout {
@@ -391,18 +430,9 @@ impl Plan {
     }
 
     /// Returns the packs of the system header and of the program stream map
-    /// where they go on their own, each with the bytes of the two it
-    /// carries, and the fill past them
-    pub(super) fn header_packs(self) -> impl Iterator<Item = (Pack, Range<usize>, Fill)> {
-        let carried = [
-            0..self.system_header,
-            self.system_header..self.system_header.saturating_add(self.program_stream_map),
-        ];
-        self.layout()
-            .headers
-            .into_iter()
-            .flat_map(move |packs| packs.into_iter().zip(carried.clone()))
-            .map(|((pack, fill), carried)| (pack, carried, fill))
+    /// where they go on their own
+    pub(super) fn header_packs(self) -> impl Iterator<Item = PlannedPack> {
+        self.layout().headers.into_iter().flatten()
     }
 
     /// Returns the SCR of the pack that carries the system header
@@ -410,7 +440,7 @@ impl Plan {
         let layout = self.layout();
         layout
             .headers
-            .map(|[(system_header, _), _]| system_header.at)
+            .map(|[system_header, _]| system_header.pack.at)
             .or(layout.first_scr)
     }
 
@@ -441,32 +471,32 @@ impl Plan {
     }
 
     /// Returns the pack of the piece at `index` of the PES packet, `piece`
-    /// bytes, after `before`, the bytes of the system header and the program
-    /// stream map it carries, and the fill past the piece; `None` where the
-    /// pack has no SCR, the first pack of the stream without a time stamp
+    /// bytes, after `before`; `None` where the pack has no SCR, the first
+    /// pack of the stream without a time stamp
     pub(super) fn pes_pack(
         self,
         index: usize,
         piece: usize,
         before: Option<Pack>,
-    ) -> Option<(Pack, Range<usize>, Fill)> {
+    ) -> Option<PlannedPack> {
         let at = if index == 0 {
             self.first_scr()
         } else {
             before.map(|pack| self.rate.following(pack))
         }?;
         let (contents, packets) = self.pes_pack_contents(index, piece);
-        let length = self.rate.pack_length(contents, packets);
-        let fill = Fill::of(length.saturating_sub(contents));
         let carried = if index == 0 {
             self.first_headers()
         } else {
             0..0
         };
-        Some((
-            Pack::after(before, at, length, packets.saturating_add(fill.packets())),
+        Some(PlannedPack::after(
+            before,
+            at,
+            self.rate.pack_length(contents, packets),
+            contents,
+            packets,
             carried,
-            fill,
         ))
     }
 

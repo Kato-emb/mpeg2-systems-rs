@@ -61,13 +61,15 @@ use core::time::Duration;
 use crate::field::write_or_truncate;
 use crate::pes::extension::PesExtension;
 use crate::pes::{self, PesPacket, StreamId};
-use crate::ps::{PackHeader, SystemHeader, pack_header};
+use crate::ps::{PackHeader, pack_header};
 use crate::psi::VersionNumber;
 use crate::time::SystemTimeClock;
+use csps::BufferSizes;
 use csps::Constraints;
 use pack_writer::PesPacketPieces;
-use schedule::{Gap, Pack, Rate};
+use schedule::{Gap, Pack, PlannedPack, Rate};
 use stream_definition::Stream;
+use stream_definition::SystemHeaderFields;
 
 mod config;
 mod csps;
@@ -301,15 +303,17 @@ impl Muxer {
         Ok(muxer)
     }
 
-    /// Returns the system header of the settings, its bounds and its
-    /// streams none: `rate_bound` [`MuxerConfig::program_mux_rate`] and its
-    /// flags
-    fn system_header(&self) -> SystemHeader<'static> {
+    /// Returns the fields of the system header the settings give:
+    /// `rate_bound` [`MuxerConfig::program_mux_rate`], and the flags of the
+    /// rate and of a CSPS
+    fn system_header_fields(&self) -> SystemHeaderFields {
         let constraints = self.constraints();
-        SystemHeader::new(self.config.program_mux_rate, 0, 0)
-            .with_fixed_flag(self.rate().fixed_flag())
-            .with_csps_flag(constraints.csps_flag())
-            .with_packet_rate_restriction_flag(constraints.packet_rate_restriction_flag())
+        SystemHeaderFields {
+            rate_bound: self.config.program_mux_rate,
+            fixed_flag: self.rate().fixed_flag(),
+            csps_flag: constraints.csps_flag(),
+            packet_rate_restriction_flag: constraints.packet_rate_restriction_flag(),
+        }
     }
 
     /// Returns the most bytes of a pack: [`MuxerConfig::pack_size`], or
@@ -487,32 +491,45 @@ impl Muxer {
                 bound: stream.p_std_buffer,
             });
         }
-        let written_p_std_buffer = given_p_std_buffer
-            .or((first_of_stream && header.is_some()).then_some(stream.p_std_buffer));
-        if let Some(p_std_buffer) = written_p_std_buffer
-            && let Some(sizes) = self.constraints().buffer_sizes(
+        let registered_p_std_buffer =
+            (first_of_stream && header.is_some() && given_p_std_buffer.is_none())
+                .then_some(stream.p_std_buffer);
+        if let Some(p_std_buffer) = given_p_std_buffer.or(registered_p_std_buffer) {
+            match self.constraints().buffer_sizes(
                 stream_id,
                 stream.stream_type,
                 stream.decoder_buffer_bound,
-            )
-            && !sizes.contains(&p_std_buffer.size_in_bytes())
-        {
-            return Err(Error::CspsBufferSize {
-                stream_id,
-                stream_id_extension,
-                p_std_buffer,
-                smallest: *sizes.start(),
-                largest: *sizes.end(),
-            });
+            ) {
+                BufferSizes::Within(sizes) if !sizes.contains(&p_std_buffer.size_in_bytes()) => {
+                    return Err(Error::CspsBufferSize {
+                        stream_id,
+                        stream_id_extension,
+                        p_std_buffer,
+                        smallest: *sizes.start(),
+                        largest: *sizes.end(),
+                    });
+                }
+                #[expect(
+                    clippy::panic,
+                    reason = "a P-STD buffer size written before its bound is declared is the \
+                              caller's mistake, which panics as documented"
+                )]
+                BufferSizes::Undeclared => panic!(
+                    "a P-STD buffer size of stream_id {:#04x} is written in a CSPS before \
+                     set_decoder_buffer_bound",
+                    stream_id.get()
+                ),
+                BufferSizes::Within(_) | BufferSizes::Unbounded => {}
+            }
         }
         let with_p_std_buffer;
-        let packet = match header {
-            Some(header) if first_of_stream && given_p_std_buffer.is_none() => {
+        let packet = match (header, registered_p_std_buffer) {
+            (Some(header), Some(p_std_buffer)) => {
                 let mut header = header.clone();
                 header
                     .pes_extension
                     .get_or_insert_with(PesExtension::new)
-                    .p_std_buffer = Some(stream.p_std_buffer);
+                    .p_std_buffer = Some(p_std_buffer);
                 let mut packet = packet.clone();
                 packet.optional_header = Some(header);
                 with_p_std_buffer = packet;
@@ -523,7 +540,7 @@ impl Muxer {
 
         let rate = self.rate();
         let largest_pack = self.largest_pack();
-        let system_header = self.system_header();
+        let system_header_fields = self.system_header_fields();
         let Self {
             config,
             streams,
@@ -548,7 +565,7 @@ impl Muxer {
                 streams,
                 program_stream_info,
                 *map_version,
-                system_header,
+                system_header_fields,
                 header_loops,
                 headers,
             )?
@@ -586,7 +603,7 @@ impl Muxer {
         }
         let length = plan
             .header_packs()
-            .map(|(pack, _, _)| pack.length())
+            .map(|planned| planned.pack.length())
             .chain(
                 pieces
                     .clone()
@@ -605,34 +622,29 @@ impl Muxer {
         let mux_delay = config.mux_delay;
         let mut written = *last_pack;
         write_or_truncate(pending, |out| {
-            let pack_header = |at| pack_header_at(at, mux_delay, program_mux_rate);
-            for pack in gap.into_iter().flat_map(Gap::iter) {
-                writer.write_padding_pack(&pack_header(pack.at()), pack.length(), out)?;
-                written = Some(pack);
-            }
-            for (pack, carried, fill) in plan.header_packs() {
-                writer.write_pack_header(
-                    &pack_header(pack.at()).with_pack_stuffing_length(fill.pack_stuffing_length()),
-                    out,
-                )?;
-                out.extend_from_slice(headers.get(carried).unwrap_or_default());
-                fill.write_padding(out);
-                written = Some(pack);
+            let write = |planned: PlannedPack, piece: Option<&PesPacket<'_>>, out: &mut Vec<u8>| {
+                writer
+                    .write_pack(
+                        &pack_header_at(planned.pack.at(), mux_delay, program_mux_rate),
+                        headers.get(planned.headers).unwrap_or_default(),
+                        piece,
+                        planned.fill,
+                        out,
+                    )
+                    .map(|()| planned.pack)
+            };
+            for planned in gap
+                .into_iter()
+                .flat_map(Gap::iter)
+                .chain(plan.header_packs())
+            {
+                written = Some(write(planned, None, out)?);
             }
             for (index, piece) in pieces.enumerate() {
-                let Some((pack, carried, fill)) =
-                    plan.pes_pack(index, piece.encoded_len(), written)
-                else {
+                let Some(planned) = plan.pes_pack(index, piece.encoded_len(), written) else {
                     return Err(missing_pts);
                 };
-                writer.write_pack_header(
-                    &pack_header(pack.at()).with_pack_stuffing_length(fill.pack_stuffing_length()),
-                    out,
-                )?;
-                out.extend_from_slice(headers.get(carried).unwrap_or_default());
-                writer.write_pes_packets(&piece, out)?;
-                fill.write_padding(out);
-                written = Some(pack);
+                written = Some(write(planned, Some(&piece), out)?);
             }
             Ok(())
         })?;

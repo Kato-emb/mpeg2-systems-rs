@@ -44,8 +44,9 @@ pub enum DecoderBufferBound {
     Unbounded,
 }
 
-/// The most bytes `BSadd` may be at the least, 6 × 1024 (§2.7.9)
-const SHORTEST_LONGEST_BS_ADD: u32 = 6 * 1024;
+/// The upper bound of `BSadd` where `Rvmax` × 0.001 / 8 is below it, 6 × 1024
+/// bytes (§2.7.9)
+const LEAST_BS_ADD_BOUND: u32 = 6 * 1024;
 
 /// The bits a second of `Rvmax` for each byte of `BSadd`: `Rvmax` × 0.001 / 8
 /// (§2.7.9)
@@ -115,7 +116,8 @@ impl Constraints {
         let Some(rate_bound) = self.csps else {
             return 0;
         };
-        // NP × 27 MHz / (300 × max[1, R_max / X]), as one fraction
+        // Why not 300 × max[1, R_max / X] first, then the ticks: the quotient
+        // R_max / X rounds where the one fraction does not.
         let rate = u128::from(RATE_BOUND_UNIT_BITS.saturating_mul(u64::from(rate_bound)));
         let ticks = u128::try_from(packets)
             .unwrap_or(u128::MAX)
@@ -128,33 +130,21 @@ impl Constraints {
     }
 
     /// Returns the bytes `BSn` of the stream of `stream_id` and `stream_type`
-    /// may be in, `declared` its bound where the caller has given it, or
-    /// `None` where nothing bounds it
-    ///
-    /// # Panics
-    ///
-    /// Panics if the stream is a CSPS and `declared` is `None` where
-    /// [`class`] cannot tell the bound alone.
+    /// may be in, `declared` its bound where the caller has given it
     pub(super) fn buffer_sizes(
         self,
         stream_id: StreamId,
         stream_type: StreamType,
         declared: Option<DecoderBufferBound>,
-    ) -> Option<RangeInclusive<u32>> {
-        self.csps?;
+    ) -> BufferSizes {
+        if self.csps.is_none() {
+            return BufferSizes::Unbounded;
+        }
         let bound = match class(stream_id, stream_type) {
             Class::Known(bound) => bound,
             Class::Vbv | Class::Cpb | Class::SubBitstream | Class::Undecided => {
-                #[expect(
-                    clippy::panic,
-                    reason = "a BSn written before its bound is declared is the caller's mistake"
-                )]
                 let Some(bound) = declared else {
-                    panic!(
-                        "a P-STD buffer size of stream_id {:#04x} is written in a CSPS before \
-                         set_decoder_buffer_bound",
-                        stream_id.get()
-                    );
+                    return BufferSizes::Undeclared;
                 };
                 bound
             }
@@ -165,14 +155,26 @@ impl Constraints {
                 cpb_size: vbv,
                 rv_max,
             } => {
-                let bs_add = SHORTEST_LONGEST_BS_ADD.max(rv_max / RV_MAX_PER_BS_ADD_BYTE);
-                Some(vbv..=vbv.saturating_add(bs_add))
+                let bs_add = LEAST_BS_ADD_BOUND.max(rv_max / RV_MAX_PER_BS_ADD_BYTE);
+                BufferSizes::Within(vbv..=vbv.saturating_add(bs_add))
             }
-            DecoderBufferBound::Audio => Some(0..=LONGEST_AUDIO_BUFFER),
-            DecoderBufferBound::AdtsAudio => Some(0..=LONGEST_ADTS_AUDIO_BUFFER),
-            DecoderBufferBound::Unbounded => None,
+            DecoderBufferBound::Audio => BufferSizes::Within(0..=LONGEST_AUDIO_BUFFER),
+            DecoderBufferBound::AdtsAudio => BufferSizes::Within(0..=LONGEST_ADTS_AUDIO_BUFFER),
+            DecoderBufferBound::Unbounded => BufferSizes::Unbounded,
         }
     }
+}
+
+/// The bytes the `BSn` of a stream may be in
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum BufferSizes {
+    /// Nothing bounds it: the stream is not a CSPS, or §2.7.9 does not bound
+    /// a stream of its kind
+    Unbounded,
+    /// The bytes it may be in
+    Within(RangeInclusive<u32>),
+    /// Its bound is the caller's to declare, and is not declared
+    Undeclared,
 }
 
 /// What the `stream_id` and the `stream_type` of a stream tell of its bound
@@ -257,7 +259,7 @@ pub(super) fn is_declarable(
 
 #[cfg(test)]
 mod tests {
-    use super::{Class, Constraints, DecoderBufferBound, class, is_declarable};
+    use super::{BufferSizes, Class, Constraints, DecoderBufferBound, class, is_declarable};
     use crate::pes::StreamId;
     use crate::stream_type::StreamType;
 
@@ -377,11 +379,11 @@ mod tests {
         assert_eq!(
             [1_000_000, 49_151_999, 49_152_000, 49_160_000, 80_000_000].map(video),
             [
-                Some(100_000..=106_144),
-                Some(100_000..=106_144),
-                Some(100_000..=106_144),
-                Some(100_000..=106_145),
-                Some(100_000..=110_000),
+                BufferSizes::Within(100_000..=106_144),
+                BufferSizes::Within(100_000..=106_144),
+                BufferSizes::Within(100_000..=106_144),
+                BufferSizes::Within(100_000..=106_145),
+                BufferSizes::Within(100_000..=110_000),
             ]
         );
     }
@@ -415,23 +417,25 @@ mod tests {
                 sizes(Constraints::none(), 0xe0, StreamType::ISO_IEC_13818_2_VIDEO),
             ],
             [
-                Some(0..=4_096),
-                Some(0..=4_096),
-                Some(0..=8_976),
-                None,
-                None,
-                None,
+                BufferSizes::Within(0..=4_096),
+                BufferSizes::Within(0..=4_096),
+                BufferSizes::Within(0..=8_976),
+                BufferSizes::Unbounded,
+                BufferSizes::Unbounded,
+                BufferSizes::Unbounded,
             ]
         );
     }
 
     #[test]
-    #[should_panic(expected = "before set_decoder_buffer_bound")]
-    fn a_buffer_of_a_video_stream_whose_vbv_is_not_declared_is_the_callers_mistake_in_a_csps() {
-        let _ = Constraints::csps(3_528).buffer_sizes(
-            StreamId::from(0xe0),
-            StreamType::ISO_IEC_13818_2_VIDEO,
-            None,
+    fn the_bound_of_a_video_stream_whose_vbv_is_not_declared_is_undeclared_in_a_csps() {
+        assert_eq!(
+            Constraints::csps(3_528).buffer_sizes(
+                StreamId::from(0xe0),
+                StreamType::ISO_IEC_13818_2_VIDEO,
+                None,
+            ),
+            BufferSizes::Undeclared
         );
     }
 

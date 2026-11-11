@@ -1,8 +1,7 @@
 //! The packs that fill the time before a PES packet: of a pack header alone
 //! over a leap of the time stamps, or of padding on the line of a fixed rate
 
-use super::{Pack, as_u64, as_usize, bytes_per_second, longest_scr_interval};
-use crate::ps::mux::pack_writer::Fill;
+use super::{Pack, PlannedPack, as_u64, as_usize, bytes_per_second, longest_scr_interval};
 use crate::ps::pack_header;
 use crate::time::{SYSTEM_CLOCK_FREQUENCY, SystemTimeClock};
 
@@ -234,10 +233,10 @@ impl Gap {
 
     /// Returns the last of the packs
     pub(super) fn last(self) -> Pack {
-        self.pack(self.count().saturating_sub(1))
+        self.pack(self.count().saturating_sub(1)).pack
     }
 
-    pub(in crate::ps::mux) fn iter(self) -> impl Iterator<Item = Pack> {
+    pub(in crate::ps::mux) fn iter(self) -> impl Iterator<Item = PlannedPack> {
         (0..self.count()).map(move |index| self.pack(index))
     }
 
@@ -249,16 +248,19 @@ impl Gap {
     }
 
     /// Returns the pack at `index`
-    fn pack(self, index: u64) -> Pack {
+    fn pack(self, index: u64) -> PlannedPack {
+        let header = pack_header::FIXED_LENGTH;
         match self.0 {
-            GapKind::Filling { before, first, .. } => Pack {
-                at: first.add_ticks(index.saturating_mul(longest_scr_interval())),
-                length: pack_header::FIXED_LENGTH,
-                offset: before
+            GapKind::Filling { before, first, .. } => PlannedPack::filled(
+                first.add_ticks(index.saturating_mul(longest_scr_interval())),
+                before
                     .next_offset()
-                    .saturating_add(index.saturating_mul(as_u64(pack_header::FIXED_LENGTH))),
-                packets: 0,
-            },
+                    .saturating_add(index.saturating_mul(as_u64(header))),
+                header,
+                header,
+                0,
+                0..0,
+            ),
             GapKind::Padding {
                 before,
                 line,
@@ -266,13 +268,14 @@ impl Gap {
             } => {
                 let (length, packs_before) = layout.pack(index);
                 let offset = before.next_offset().saturating_add(packs_before);
-                let length = as_usize(length);
-                Pack {
-                    at: line.at(before, offset),
-                    length,
+                PlannedPack::filled(
+                    line.at(before, offset),
                     offset,
-                    packets: Fill::of(length.saturating_sub(pack_header::FIXED_LENGTH)).packets(),
-                }
+                    as_usize(length),
+                    header,
+                    0,
+                    0..0,
+                )
             }
         }
     }
