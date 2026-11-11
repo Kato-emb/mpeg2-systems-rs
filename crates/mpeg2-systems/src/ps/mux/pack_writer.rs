@@ -168,46 +168,34 @@ impl PackWriter {
         Ok(written)
     }
 
-    /// Appends a pack of `length` bytes that carries nothing but padding:
-    /// `header` with `stuffing_byte`s where 7 or fewer fill the pack
-    /// (§2.5.3.4), or past that `header` without them and PES packets of
-    /// `padding_stream` (§2.4.3.6, §2.4.3.7), of as near the same length as
-    /// they can be
+    /// Appends a pack to `out`: `header` with the `stuffing_byte`s of
+    /// `fill`, `headers`, the bytes of a system header and a program stream
+    /// map as written, `piece` where it carries a PES packet, then the PES
+    /// packets of padding of `fill`
     ///
     /// # Errors
     ///
     /// * [`PackHeader`](Error::PackHeader): [`PackHeader::write`] refuses
     ///   `header`.
-    pub(super) fn write_padding_pack(
+    /// * Those of [`write_pes_packets`](Self::write_pes_packets) for `piece`.
+    pub(super) fn write_pack(
         &self,
         header: &PackHeader,
-        length: usize,
+        headers: &[u8],
+        piece: Option<&PesPacket<'_>>,
+        fill: Fill,
         out: &mut Vec<u8>,
     ) -> Result<(), Error> {
-        let rest = length.saturating_sub(pack_header::FIXED_LENGTH);
-        match u8::try_from(rest) {
-            Ok(stuffing) if stuffing <= pack_header::MAX_PACK_STUFFING_LENGTH => {
-                self.write_pack_header(&header.with_pack_stuffing_length(stuffing), out)
-            }
-            _ => {
-                self.write_pack_header(&header.with_pack_stuffing_length(0), out)?;
-                // Why as many as the longest PES packet needs, split evenly:
-                // past 7 bytes of padding each packet gets at least 7, the
-                // shortest a padding packet of a Program Stream can be.
-                let count = rest.div_ceil(pes::LONGEST_PES_PACKET);
-                let share = rest.checked_div(count).unwrap_or(rest);
-                let longer = rest.checked_rem(count).unwrap_or(0);
-                for index in 0..count {
-                    let share = share.saturating_add(usize::from(index < longer));
-                    let pes_packet_length = share.saturating_sub(pes::PREFIX_LENGTH);
-                    pes::write_padding_packet(
-                        u16::try_from(pes_packet_length).unwrap_or(u16::MAX),
-                        out,
-                    );
-                }
-                Ok(())
-            }
+        self.write_pack_header(
+            &header.with_pack_stuffing_length(fill.pack_stuffing_length()),
+            out,
+        )?;
+        out.extend_from_slice(headers);
+        if let Some(piece) = piece {
+            self.write_pes_packets(piece, out)?;
         }
+        fill.write_padding(out);
+        Ok(())
     }
 
     /// Appends `MPEG_program_end_code`, which ends the Program Stream, to
@@ -217,13 +205,73 @@ impl PackWriter {
     }
 }
 
+/// The bytes a pack takes past what it carries: `stuffing_byte`s after its
+/// pack header where they are 7 or fewer (§2.5.3.4), or past that PES packets
+/// of `padding_stream` (§2.4.3.6, §2.4.3.7), of as near the same length as
+/// they can be
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Fill(FillKind);
+
+/// How a [`Fill`] takes its bytes
+#[derive(Debug, Clone, Copy)]
+enum FillKind {
+    Stuffing(u8),
+    Padding(usize),
+}
+
+impl Fill {
+    /// Returns the fill of `bytes`
+    pub(super) fn of(bytes: usize) -> Self {
+        Self(match u8::try_from(bytes) {
+            Ok(stuffing) if stuffing <= pack_header::MAX_PACK_STUFFING_LENGTH => {
+                FillKind::Stuffing(stuffing)
+            }
+            _ => FillKind::Padding(bytes),
+        })
+    }
+
+    /// Returns the `pack_stuffing_length` of the pack header
+    pub(super) const fn pack_stuffing_length(self) -> u8 {
+        match self.0 {
+            FillKind::Stuffing(stuffing) => stuffing,
+            FillKind::Padding(_) => 0,
+        }
+    }
+
+    /// Returns how many PES packets of padding there are
+    pub(super) fn packets(self) -> usize {
+        match self.0 {
+            FillKind::Stuffing(_) => 0,
+            FillKind::Padding(bytes) => bytes.div_ceil(pes::LONGEST_PES_PACKET),
+        }
+    }
+
+    /// Appends the PES packets of padding to `out`
+    pub(super) fn write_padding(self, out: &mut Vec<u8>) {
+        let FillKind::Padding(bytes) = self.0 else {
+            return;
+        };
+        // Why as many as the longest PES packet needs, split evenly: past 7
+        // bytes of padding each packet gets at least 7, the shortest a
+        // padding packet of a Program Stream can be.
+        let count = self.packets();
+        let share = bytes.checked_div(count).unwrap_or(bytes);
+        let longer = bytes.checked_rem(count).unwrap_or(0);
+        for index in 0..count {
+            let share = share.saturating_add(usize::from(index < longer));
+            let pes_packet_length = share.saturating_sub(pes::PREFIX_LENGTH);
+            pes::write_padding_packet(u16::try_from(pes_packet_length).unwrap_or(u16::MAX), out);
+        }
+    }
+}
+
 /// The PES packets a payload is split into, each no longer than a length
 /// given: the first with the optional header of the packet, the ones after
 /// it with the same header without its PTS, DTS and ESCR
 ///
 /// An empty payload still gives one packet, and the payloads of the packets
-/// join back into the payload in order. How many packets, and how many
-/// bytes, are known before they are cut.
+/// join back into the payload in order. How many packets is known before
+/// they are cut.
 #[derive(Debug, Clone)]
 pub(crate) struct PesPacketPieces<'packet> {
     /// The header of the next packet and the payload left, `None` once the
@@ -250,35 +298,28 @@ impl<'packet> PesPacketPieces<'packet> {
         }
     }
 
-    /// Returns the bytes of all the packets left
-    pub(crate) fn encoded_len(&self) -> usize {
-        self.shape().1
-    }
-
-    /// Returns how many packets are left, and their bytes, from the lengths
-    /// of the headers and the payload alone
-    fn shape(&self) -> (usize, usize) {
+    /// Returns how many packets are left, from the lengths of the headers
+    /// and the payload alone
+    fn count(&self) -> usize {
         let Some(rest) = &self.rest else {
-            return (0, 0);
+            return 0;
         };
         let first_header = header_length(rest);
-        let payload = rest.payload.len();
-        let after = payload.saturating_sub(capacity(self.longest, first_header));
+        let after = rest
+            .payload
+            .len()
+            .saturating_sub(capacity(self.longest, first_header));
         if after == 0 {
-            return (1, first_header.saturating_add(payload));
+            return 1;
         }
         let mut continued = rest.clone();
         if let Some(header) = continued.optional_header.as_mut() {
             clear_pts_dts_and_escr(header);
         }
         let continued_header = header_length(&continued);
-        let count = after.div_ceil(capacity(self.longest_continued, continued_header));
-        (
-            count.saturating_add(1),
-            first_header
-                .saturating_add(payload)
-                .saturating_add(count.saturating_mul(continued_header)),
-        )
+        after
+            .div_ceil(capacity(self.longest_continued, continued_header))
+            .saturating_add(1)
     }
 }
 
@@ -330,7 +371,7 @@ impl<'packet> Iterator for PesPacketPieces<'packet> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let count = self.shape().0;
+        let count = self.count();
         (count, Some(count))
     }
 }

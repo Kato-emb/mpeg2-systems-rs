@@ -79,6 +79,29 @@ pub struct MuxerConfig {
     /// (§2.4.3.6), as many as the 65 535 bytes of `PES_packet_length` need.
     /// The system header names no bound for `padding_stream`.
     pub fixed_rate: bool,
+    /// Whether the stream is a constrained system parameter stream (CSPS),
+    /// `CSPS_flag` `'1'` (`false` by default)
+    ///
+    /// The stream then keeps to the bounds of ISO/IEC 13818-1 §2.7.9, and
+    /// the system header has `packet_rate_restriction_flag` `'0'`:
+    ///
+    /// - The packets of each pack, its PES packets, system header, program
+    ///   stream map and PES packets of `padding_stream`, arrive no faster
+    ///   than equation 2-28 allows, `rate_bound` the `program_mux_rate`. At a
+    ///   variable rate the SCR of the pack after it is that much later, and
+    ///   a pack header alone goes before `MPEG_program_end_code` where the
+    ///   end code would come sooner. At a [`fixed_rate`](Self::fixed_rate)
+    ///   each pack is filled to the bytes that take that long, the system
+    ///   header and the program stream map go in packs of their own before
+    ///   the PES packet they are sent with, and a pack of padding is no
+    ///   shorter than one PES packet of `padding_stream` asks for, or carries
+    ///   stuffing alone, the bytes it cannot take left out as above.
+    /// - The P-STD buffer size written for each stream is within the bound
+    ///   of §2.7.9, which
+    ///   [`Muxer::set_decoder_buffer_bound`](super::Muxer::set_decoder_buffer_bound)
+    ///   declares where the `stream_id` and the `stream_type` of the stream
+    ///   do not say it.
+    pub csps: bool,
 }
 
 impl MuxerConfig {
@@ -92,6 +115,7 @@ impl MuxerConfig {
             buffer_limit: 4 * 1024 * 1024,
             header_interval: Duration::MAX,
             fixed_rate: false,
+            csps: false,
         }
     }
 
@@ -127,6 +151,13 @@ impl MuxerConfig {
     #[must_use]
     pub const fn with_fixed_rate(mut self, fixed_rate: bool) -> Self {
         self.fixed_rate = fixed_rate;
+        self
+    }
+
+    /// Returns the value with the given `csps`
+    #[must_use]
+    pub const fn with_csps(mut self, csps: bool) -> Self {
+        self.csps = csps;
         self
     }
 }

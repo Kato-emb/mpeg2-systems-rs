@@ -10,8 +10,10 @@
 //! continuity counters of the PIDs written before, and multiplexing PES
 //! packets with either muxer reuses its output held and its scratch buffer,
 //! the Program Stream one also when it sends the system header and the
-//! program stream map with every PES packet, and when it writes padding at a
-//! fixed rate.
+//! program stream map with every PES packet, when it writes padding at a
+//! fixed rate, and in a constrained system parameter stream (CSPS), at a
+//! variable rate and at a fixed one, where the system header and the map go
+//! in packs of their own and a pack header alone goes before the end code.
 //! A stream whose descriptors could not fit the program stream map, or a
 //! program or a stream whose descriptors could not fit the PMT, is refused
 //! before they are copied.
@@ -19,12 +21,12 @@
 use core::time::Duration;
 
 use mpeg2_systems::descriptor::DescriptorLoop;
-use mpeg2_systems::pes::StreamId;
 use mpeg2_systems::pes::extension::PStdBuffer;
+use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
 use mpeg2_systems::ps;
 use mpeg2_systems::psi::pmt;
 use mpeg2_systems::stream_type::StreamType;
-use mpeg2_systems::time::ClockReference;
+use mpeg2_systems::time::{ClockReference, Timestamp};
 use mpeg2_systems::ts::Pid;
 use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig};
 use mpeg2_systems::ts::mux::{Muxer, MuxerConfig, PacketWriter};
@@ -191,5 +193,97 @@ fn a_pass_over_an_input_allocates_nothing_once_the_buffers_have_grown() {
         counted,
     ));
     none.push(("program_info past the pmt", es_info.len(), "ts muxer", 0));
+    for (name, config) in [
+        (
+            "ps muxer, csps",
+            ps::mux::MuxerConfig::new(3_528).with_pack_size(2_324),
+        ),
+        (
+            "ps muxer, csps, fixed rate, headers each",
+            ps::mux::MuxerConfig::new(3_528)
+                .with_pack_size(2_324)
+                .with_fixed_rate(true)
+                .with_header_interval(Duration::ZERO),
+        ),
+        (
+            "ps muxer, csps, fixed rate",
+            ps::mux::MuxerConfig::new(3_528)
+                .with_pack_size(2_324)
+                .with_fixed_rate(true),
+        ),
+    ] {
+        let mut muxer = csps_muxer_of(config);
+        let mut first_dts = 90_000;
+        let counted = allocations_once_grown(&ALLOCATOR, || {
+            multiplex_program_stream_pes_packets(&mut muxer, &access_unit, first_dts, &mut out);
+            first_dts += 3_600 * u64::try_from(PES_PACKETS).unwrap();
+        });
+        allocations.push(("pes packets", ACCESS_UNIT_LENGTH, name, counted));
+        none.push(("pes packets", ACCESS_UNIT_LENGTH, name, 0));
+    }
+    let config = ps::mux::MuxerConfig::new(3_528)
+        .with_pack_size(2_324)
+        .with_fixed_rate(true);
+    let mut muxer = csps_muxer_of(config);
+    let mut first_dts = 90_000;
+    for _ in 0..2 {
+        multiplex_program_stream_pes_packets(&mut muxer, &access_unit, first_dts, &mut out);
+        first_dts += 3_600 * u64::try_from(PES_PACKETS).unwrap();
+    }
+    let short = |length: usize| {
+        let mut header = OptionalHeader::new();
+        header.pts = Some(Timestamp::try_from(first_dts).unwrap());
+        let mut packet = PesPacket::new(StreamId::from(0xE0), &access_unit[..length]);
+        packet.optional_header = Some(header);
+        packet
+    };
+    let ends_in_a_pack_header = |muxer: &ps::mux::Muxer, length: usize| {
+        let mut muxer = muxer.clone();
+        let mut tail = Vec::new();
+        muxer.handle_pes_packet(&short(length)).unwrap();
+        muxer.finish();
+        muxer.poll_output(&mut tail);
+        tail.len() >= 18 && tail[tail.len() - 18..tail.len() - 14] == [0x00, 0x00, 0x01, 0xBA]
+    };
+    // A short last PES packet, past which the end code would come sooner than
+    // the packet rate allows
+    let length = (540..=600)
+        .find(|&length| ends_in_a_pack_header(&muxer, length))
+        .unwrap();
+    out.clear();
+    ALLOCATOR.reset();
+    muxer.handle_pes_packet(&short(length)).unwrap();
+    muxer.poll_output(&mut out);
+    muxer.finish();
+    muxer.poll_output(&mut out);
+    allocations.push((
+        "a pack header before the end code",
+        length,
+        "ps muxer, csps, fixed rate",
+        ALLOCATOR.allocations(),
+    ));
+    none.push((
+        "a pack header before the end code",
+        length,
+        "ps muxer, csps, fixed rate",
+        0,
+    ));
     assert_eq!(allocations, none);
+}
+
+/// The Program Stream muxer of `config`, a CSPS, with its video stream
+/// registered and the CPB of its video declared
+fn csps_muxer_of(config: ps::mux::MuxerConfig) -> ps::mux::Muxer {
+    let mut muxer = registered_program_stream_muxer_of(config.with_csps(true));
+    muxer
+        .set_decoder_buffer_bound(
+            StreamId::from(0xE0),
+            None,
+            ps::mux::DecoderBufferBound::Cpb {
+                cpb_size: 220 * 1024,
+                rv_max: 1_150_000,
+            },
+        )
+        .unwrap();
+    muxer
 }

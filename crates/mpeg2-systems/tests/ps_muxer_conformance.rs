@@ -35,7 +35,7 @@ mod tests {
     use mpeg2_systems::pes::StreamId;
     use mpeg2_systems::pes::extension::PStdBuffer;
     use mpeg2_systems::ps::demux::{Demuxer, Event};
-    use mpeg2_systems::ps::mux::{Muxer, MuxerConfig};
+    use mpeg2_systems::ps::mux::{DecoderBufferBound, Muxer, MuxerConfig};
     use mpeg2_systems::ps::psm::ElementaryStream;
     use mpeg2_systems::stream_type::StreamType;
     use mpeg2_systems::time::Timestamp;
@@ -270,5 +270,51 @@ mod tests {
             .filter(|code| code == &[0, 0, 1, 0xbe])
             .count();
         assert!(padding > 0, "{padding} padding packets");
+    }
+
+    /// Declares the VBV of the video, under the 224 KiB registered for it by
+    /// at most the 6 KiB `BSadd` of a CSPS allows, before the first input
+    fn declare_vbv(muxer: &mut Muxer, index: usize) {
+        if index == 0 {
+            muxer
+                .set_decoder_buffer_bound(
+                    StreamId::from(VIDEO),
+                    None,
+                    DecoderBufferBound::Vbv {
+                        size: 220 * 1024,
+                        rv_max: 1_150_000,
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "runs ffprobe from FFmpeg"]
+    fn the_pes_packets_read_in_ffprobe_as_given_in_a_csps() {
+        multiplex_read_as_given(
+            "ps_muxer_csps.mpg",
+            MuxerConfig::new(3_528)
+                .with_pack_size(2_324)
+                .with_csps(true),
+            &inputs_at(|index| 90_000 + index * STEP),
+            declare_vbv,
+        );
+    }
+
+    #[test]
+    #[ignore = "runs ffprobe from FFmpeg"]
+    fn the_pes_packets_read_in_ffprobe_as_given_in_a_csps_at_a_fixed_rate() {
+        let stream = multiplex_read_as_given(
+            "ps_muxer_csps_fixed_rate.mpg",
+            MuxerConfig::new(3_528)
+                .with_pack_size(2_324)
+                .with_fixed_rate(true)
+                .with_csps(true),
+            &inputs_at(|index| 90_000 + index * STEP),
+            declare_vbv,
+        );
+
+        assert_eq!(headers_reported(&stream), (1, vec![0]));
     }
 }

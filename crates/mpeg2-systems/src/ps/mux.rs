@@ -56,25 +56,30 @@
 //! ```
 
 use alloc::vec::Vec;
+use core::time::Duration;
 
 use crate::field::write_or_truncate;
-use crate::pes::extension::{PStdBuffer, PesExtension};
+use crate::pes::extension::PesExtension;
 use crate::pes::{self, PesPacket, StreamId};
-use crate::ps::psm::ElementaryStream;
-use crate::ps::{PackHeader, pack_header, system_header};
+use crate::ps::{PackHeader, pack_header};
 use crate::psi::VersionNumber;
 use crate::time::SystemTimeClock;
+use csps::BufferSizes;
+use csps::Constraints;
 use pack_writer::PesPacketPieces;
-use schedule::{Gap, Pack, Rate};
+use schedule::{Gap, Pack, PlannedPack, Rate};
 use stream_definition::Stream;
+use stream_definition::SystemHeaderFields;
 
 mod config;
+mod csps;
 mod error;
 mod pack_writer;
 mod schedule;
 mod stream_definition;
 
 pub use config::MuxerConfig;
+pub use csps::DecoderBufferBound;
 pub use error::Error;
 pub use pack_writer::PackWriter;
 
@@ -103,11 +108,14 @@ const PROGRAM_MUX_RATE_LIMIT: u32 = 1 << 22;
 ///   header (ISO/IEC 13818-1 §2.7.8), then the program stream map. Both go
 ///   again in the first pack of a PES packet [`MuxerConfig::header_interval`]
 ///   or more after the last pack that carried them, and in the first pack of
-///   the next PES packet after the map changes
+///   the next PES packet after the map changes; in a CSPS at a fixed rate,
+///   each in a pack of its own before that pack instead
 ///   ([`update_stream`](Self::update_stream),
 ///   [`set_program_stream_info`](Self::set_program_stream_info)). Every
 ///   system header is the same: `rate_bound`
-///   [`MuxerConfig::program_mux_rate`], no flag set, an `audio_bound` of the
+///   [`MuxerConfig::program_mux_rate`], `fixed_flag` and `CSPS_flag` as
+///   [`MuxerConfig::fixed_rate`] and [`MuxerConfig::csps`] set them, no other
+///   flag set, an `audio_bound` of the
 ///   streams of `stream_type` 0x03 and 0x04, a `video_bound` of the video
 ///   streams, and the bound of each stream registered. The program stream
 ///   map has the `program_stream_info` set and names each stream with its
@@ -134,10 +142,15 @@ const PROGRAM_MUX_RATE_LIMIT: u32 = 1 << 22;
 ///   of §2.5.3.6 equations 2-22 and 2-23 through the first, the bytes of one
 ///   pack after another arriving at `program_mux_rate`, and the time before
 ///   a PES packet is filled with packs of padding in place of a leap.
+/// - In a CSPS ([`MuxerConfig::csps`]), the packets of each pack arrive no
+///   faster than §2.7.9 allows, and the P-STD buffer size of each stream is
+///   within its bound ([`set_decoder_buffer_bound`](Self::set_decoder_buffer_bound)).
 ///
 /// The muxer does not guarantee that the stream fits the buffers of the
 /// P-STD.
 /// It writes padding and pack stuffing only at a fixed rate.
+/// It does not read the elementary streams for the bounds of a CSPS; the
+/// caller declares those their `stream_id` and `stream_type` do not say.
 /// It does not pace the output in real time; the caller sends it at the pace
 /// its SCRs give.
 /// It does not check the order of the PES packets across the streams; the
@@ -234,14 +247,18 @@ enum End {
     Ended,
 }
 
-/// Returns the bytes of the shortest pack: a pack header, `headers` bytes of
-/// the system header and the program stream map, the shortest PES packet
-/// header and a byte of payload
-fn shortest_pack(headers: usize) -> usize {
+/// Returns the bytes of the shortest pack: a pack header, the shortest PES
+/// packet header and a byte of payload
+fn shortest_pack() -> usize {
     pack_header::FIXED_LENGTH
-        .saturating_add(headers)
         .saturating_add(pes::PREFIX_LENGTH)
         .saturating_add(1)
+}
+
+/// Returns the pack header whose SCR samples `at` less `mux_delay`, at
+/// `program_mux_rate`
+fn pack_header_at(at: SystemTimeClock, mux_delay: Duration, program_mux_rate: u32) -> PackHeader {
+    PackHeader::new(at.to_clock_reference(mux_delay), program_mux_rate)
 }
 
 impl Muxer {
@@ -254,7 +271,9 @@ impl Muxer {
     ///   (§2.5.3.4).
     /// * [`PackSize`](Error::PackSize): [`MuxerConfig::pack_size`] cannot
     ///   hold a pack header, the shortest PES packet header and a byte of
-    ///   payload.
+    ///   payload, or in a CSPS at a fixed rate the shortest pack of one
+    ///   packet that the packet rate asks for (§2.7.9), in which no system
+    ///   header could go.
     pub fn new(config: MuxerConfig) -> Result<Self, Error> {
         let program_mux_rate = config.program_mux_rate;
         if program_mux_rate == 0 || program_mux_rate >= PROGRAM_MUX_RATE_LIMIT {
@@ -263,10 +282,10 @@ impl Muxer {
         let pack_size = config.pack_size;
         // Why not refuse a program_mux_rate the shortest pack does not arrive
         // at within 0.7 s: it is shorter than what arrives at a rate of 1.
-        if pack_size < shortest_pack(0) {
+        if pack_size < shortest_pack() {
             return Err(Error::PackSize { pack_size });
         }
-        Ok(Self {
+        let muxer = Self {
             config,
             streams: Vec::new(),
             program_stream_info: Vec::new(),
@@ -277,133 +296,24 @@ impl Muxer {
             last_pack: None,
             pending: Vec::new(),
             end: End::Open,
-        })
-    }
-
-    /// Registers `stream`, its PES packets of its `elementary_stream_id`
-    /// and, when it is 0xFD, of its `elementary_stream_id_extension`
-    ///
-    /// `p_std_buffer` is both the bound of the stream in the system header
-    /// and the P-STD buffer size of its first PES packet, and no PES packet
-    /// of the stream may carry a larger one. The muxer copies the
-    /// `elementary_stream_info` of `stream`, the descriptors of the stream as
-    /// written.
-    ///
-    /// # Errors
-    ///
-    /// * [`StreamId`](Error::StreamId): `elementary_stream_id` is below 0xBD,
-    ///   which this entry point does not take: 0xBC, the
-    ///   `program_stream_map`, is written with
-    ///   [`ProgramStreamMap`](crate::ps::ProgramStreamMap), and those below it
-    ///   start the other elements of a Program Stream.
-    /// * [`StreamIdExtension`](Error::StreamIdExtension):
-    ///   `elementary_stream_id_extension` is present where
-    ///   `elementary_stream_id` is not 0xFD, or absent where it is.
-    /// * [`StreamInUse`](Error::StreamInUse): the stream is registered
-    ///   already.
-    /// * [`AudioBound`](Error::AudioBound), [`VideoBound`](Error::VideoBound):
-    ///   the stream would be the 33rd audio stream or the 17th video stream
-    ///   (§2.5.3.6).
-    /// * [`SystemHeader`](Error::SystemHeader):
-    ///   [`SystemHeader::write`](crate::ps::SystemHeader::write) refuses the
-    ///   bound of the stream, as it does a `p_std_buffer_scale` of `'1'` for
-    ///   audio or of `'0'` for video.
-    /// * [`ProgramStreamMap`](Error::ProgramStreamMap):
-    ///   [`ProgramStreamMap::write`](crate::ps::ProgramStreamMap::write)
-    ///   refuses the map with the stream, as it does
-    ///   `elementary_stream_info` that is not whole descriptors, a
-    ///   `stream_type` carried in sections, or a map past the 1018 bytes of
-    ///   `program_stream_map_length`, which is refused before
-    ///   `elementary_stream_info` is copied.
-    /// * [`PackLength`](Error::PackLength): the first pack, with the system
-    ///   header and the program stream map, could not carry a PES packet in
-    ///   [`MuxerConfig::pack_size`], or in the bytes that arrive within 0.7 s
-    ///   at [`MuxerConfig::program_mux_rate`] (§2.7.1).
-    ///
-    /// # Panics
-    ///
-    /// Panics if a PES packet has been taken already: every system header,
-    /// the first included, names every stream of the Program Stream
-    /// (§2.5.3.6, §2.7.8), and the muxer makes it of the streams registered.
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "a call out of order is the caller's mistake, which panics as documented"
-    )]
-    pub fn add_stream(
-        &mut self,
-        stream: ElementaryStream<'_>,
-        p_std_buffer: PStdBuffer,
-    ) -> Result<(), Error> {
-        assert!(
-            self.last_pack.is_none(),
-            "a stream is registered after the first PES packet"
-        );
-        let stream_id = stream.elementary_stream_id;
-        let stream_id_extension = stream.elementary_stream_id_extension;
-        if !stream_id.is_pes_packet() || stream_id == StreamId::PROGRAM_STREAM_MAP {
-            return Err(Error::StreamId { stream_id });
-        }
-        if stream_id_extension.is_some() != (stream_id == StreamId::EXTENDED_STREAM_ID) {
-            return Err(Error::StreamIdExtension { stream_id });
-        }
-        if self.stream(stream_id, stream_id_extension).is_some() {
-            return Err(Error::StreamInUse {
-                stream_id,
-                stream_id_extension,
-            });
-        }
-        stream_definition::check_map_length(
-            &self.program_stream_info,
-            self.streams
-                .iter()
-                .map(Stream::elementary_stream)
-                .chain(core::iter::once(stream)),
-        )?;
-        let stream = Stream {
-            stream_id,
-            stream_id_extension,
-            stream_type: stream.stream_type,
-            p_std_buffer,
-            es_info: stream.elementary_stream_info.as_bytes().to_vec(),
-            last_timestamp: None,
         };
-        let (audio_bound, video_bound) = stream_definition::bounds(&self.streams);
-        if stream_definition::is_audio(stream.stream_type)
-            && audio_bound >= system_header::MAX_AUDIO_BOUND.into()
-        {
-            return Err(Error::AudioBound {
-                audio_bound: audio_bound.saturating_add(1),
-            });
+        if muxer.rate().longest_first_pack(0, 0, shortest_pack()) > muxer.largest_pack() {
+            return Err(Error::PackSize { pack_size });
         }
-        if stream.stream_type.is_video() && video_bound >= system_header::MAX_VIDEO_BOUND.into() {
-            return Err(Error::VideoBound {
-                video_bound: video_bound.saturating_add(1),
-            });
-        }
-        self.streams.push(stream);
-        self.check_headers_of(&self.streams, &self.program_stream_info)
-            .inspect_err(|_| {
-                self.streams.pop();
-            })
+        Ok(muxer)
     }
 
-    /// Refuses the system header of `streams` and the program stream map of
-    /// `program_stream_info` and `streams` where
-    /// [`check_headers`](stream_definition::check_headers) does at the
-    /// settings and the map version of the muxer
-    fn check_headers_of(
-        &self,
-        streams: &[Stream],
-        program_stream_info: &[u8],
-    ) -> Result<(), Error> {
-        stream_definition::check_headers(
-            streams,
-            program_stream_info,
-            self.map_version,
-            self.config.program_mux_rate,
-            self.rate().fixed_flag(),
-            self.largest_pack(),
-        )
+    /// Returns the fields of the system header the settings give:
+    /// `rate_bound` [`MuxerConfig::program_mux_rate`], and the flags of the
+    /// rate and of a CSPS
+    fn system_header_fields(&self) -> SystemHeaderFields {
+        let constraints = self.constraints();
+        SystemHeaderFields {
+            rate_bound: self.config.program_mux_rate,
+            fixed_flag: self.rate().fixed_flag(),
+            csps_flag: constraints.csps_flag(),
+            packet_rate_restriction_flag: constraints.packet_rate_restriction_flag(),
+        }
     }
 
     /// Returns the most bytes of a pack: [`MuxerConfig::pack_size`], or
@@ -416,10 +326,24 @@ impl Muxer {
     /// Returns the rate the settings ask for, fixed or variable
     // Why not a field: it follows from the settings, each time.
     fn rate(&self) -> Rate {
+        let constraints = self.constraints();
         if self.config.fixed_rate {
-            Rate::fixed(self.config.program_mux_rate, self.largest_pack())
+            Rate::fixed(
+                self.config.program_mux_rate,
+                self.largest_pack(),
+                constraints,
+            )
         } else {
-            Rate::variable(self.config.program_mux_rate)
+            Rate::variable(self.config.program_mux_rate, constraints)
+        }
+    }
+
+    /// Returns the bounds of §2.7.9 the settings hold the stream to
+    fn constraints(&self) -> Constraints {
+        if self.config.csps {
+            Constraints::csps(self.config.program_mux_rate)
+        } else {
+            Constraints::none()
         }
     }
 
@@ -455,6 +379,10 @@ impl Muxer {
     ///   stream needs neither.
     /// * [`PStdBufferSize`](Error::PStdBufferSize): it carries a P-STD buffer
     ///   size larger in bytes than the bound registered for its stream.
+    /// * [`CspsBufferSize`](Error::CspsBufferSize): in a CSPS, the P-STD
+    ///   buffer size it carries, or the bound registered that its stream's
+    ///   first PES packet is given, is outside the bound of §2.7.9 for the
+    ///   stream.
     /// * [`DecreasingTimestamp`](Error::DecreasingTimestamp): its DTS, or its
     ///   PTS when it has none, is before that of the PES packet given before
     ///   it on its stream.
@@ -476,7 +404,10 @@ impl Muxer {
     ///
     /// # Panics
     ///
-    /// Panics if [`finish`](Self::finish) has been called.
+    /// Panics if [`finish`](Self::finish) has been called, or in a CSPS if
+    /// the packet would carry a P-STD buffer size of a stream whose bound
+    /// [`set_decoder_buffer_bound`](Self::set_decoder_buffer_bound) has not
+    /// declared where the muxer needs it.
     #[expect(
         clippy::panic_in_result_fn,
         reason = "a call out of order is the caller's mistake, which panics as documented"
@@ -560,14 +491,45 @@ impl Muxer {
                 bound: stream.p_std_buffer,
             });
         }
+        let registered_p_std_buffer =
+            (first_of_stream && header.is_some() && given_p_std_buffer.is_none())
+                .then_some(stream.p_std_buffer);
+        if let Some(p_std_buffer) = given_p_std_buffer.or(registered_p_std_buffer) {
+            match self.constraints().buffer_sizes(
+                stream_id,
+                stream.stream_type,
+                stream.decoder_buffer_bound,
+            ) {
+                BufferSizes::Within(sizes) if !sizes.contains(&p_std_buffer.size_in_bytes()) => {
+                    return Err(Error::CspsBufferSize {
+                        stream_id,
+                        stream_id_extension,
+                        p_std_buffer,
+                        smallest: *sizes.start(),
+                        largest: *sizes.end(),
+                    });
+                }
+                #[expect(
+                    clippy::panic,
+                    reason = "a P-STD buffer size written before its bound is declared is the \
+                              caller's mistake, which panics as documented"
+                )]
+                BufferSizes::Undeclared => panic!(
+                    "a P-STD buffer size of stream_id {:#04x} is written in a CSPS before \
+                     set_decoder_buffer_bound",
+                    stream_id.get()
+                ),
+                BufferSizes::Within(_) | BufferSizes::Unbounded => {}
+            }
+        }
         let with_p_std_buffer;
-        let packet = match header {
-            Some(header) if first_of_stream && given_p_std_buffer.is_none() => {
+        let packet = match (header, registered_p_std_buffer) {
+            (Some(header), Some(p_std_buffer)) => {
                 let mut header = header.clone();
                 header
                     .pes_extension
                     .get_or_insert_with(PesExtension::new)
-                    .p_std_buffer = Some(stream.p_std_buffer);
+                    .p_std_buffer = Some(p_std_buffer);
                 let mut packet = packet.clone();
                 packet.optional_header = Some(header);
                 with_p_std_buffer = packet;
@@ -578,6 +540,7 @@ impl Muxer {
 
         let rate = self.rate();
         let largest_pack = self.largest_pack();
+        let system_header_fields = self.system_header_fields();
         let Self {
             config,
             streams,
@@ -592,38 +555,44 @@ impl Muxer {
         } = self;
         let pack_header_length = pack_header::FIXED_LENGTH;
         let program_mux_rate = config.program_mux_rate;
-        let gap = last_pack
-            .zip(time)
-            .and_then(|(last, time)| rate.gap(last, time));
-        let first_at = rate.first_scr(gap.map(Gap::last).or(*last_pack), time);
+        let first_at = rate.plan(*last_pack, time, 0, 0).first_scr();
         let headers_due = headers_sent_at.zip(first_at).is_none_or(|(sent_at, at)| {
             at.ticks_since(sent_at) >= SystemTimeClock::ticks_in(config.header_interval)
         });
         headers.clear();
-        if headers_due {
+        let system_header_length = if headers_due {
             stream_definition::write_headers(
                 streams,
                 program_stream_info,
                 *map_version,
-                config.program_mux_rate,
-                rate.fixed_flag(),
+                system_header_fields,
                 header_loops,
                 headers,
-            )?;
-        }
+            )?
+        } else {
+            0
+        };
+        let plan = rate.plan(
+            *last_pack,
+            time,
+            system_header_length,
+            headers.len().saturating_sub(system_header_length),
+        );
+        let first_headers = plan.first_headers().len();
         let room = largest_pack.saturating_sub(pack_header_length);
         let longest_continued = room.min(pes::LONGEST_PES_PACKET);
         let longest = room
-            .saturating_sub(headers.len())
+            .saturating_sub(first_headers)
             .min(pes::LONGEST_PES_PACKET);
         let length = pack_header_length
-            .saturating_add(headers.len())
+            .saturating_add(first_headers)
             .saturating_add(packet.encoded_len().saturating_sub(packet.payload.len()))
             .saturating_add(packet.payload.len().min(1));
         if length > largest_pack {
             return Err(Error::PackLength { length });
         }
         let pieces = PesPacketPieces::new(packet, longest, longest_continued);
+        let gap = plan.gap();
         let gap_length = gap.map_or(0, |gap| usize::try_from(gap.bytes()).unwrap_or(usize::MAX));
         if gap_length > config.buffer_limit {
             return Err(Error::TimestampGap {
@@ -632,11 +601,19 @@ impl Muxer {
                     .map_or(0, |(clock, time)| time.timestamp_ticks_since(clock)),
             });
         }
-        let length = gap_length
-            .saturating_add(headers.len())
-            .saturating_add(pieces.len().saturating_mul(pack_header_length))
-            .saturating_add(pieces.encoded_len())
-            .saturating_add(pending.len());
+        let length = plan
+            .header_packs()
+            .map(|planned| planned.pack.length())
+            .chain(
+                pieces
+                    .clone()
+                    .enumerate()
+                    .map(|(index, piece)| plan.pes_pack_length(index, piece.encoded_len())),
+            )
+            .fold(
+                gap_length.saturating_add(pending.len()),
+                usize::saturating_add,
+            );
         if length > config.buffer_limit {
             return Err(Error::BufferFull { length });
         }
@@ -645,35 +622,35 @@ impl Muxer {
         let mux_delay = config.mux_delay;
         let mut written = *last_pack;
         write_or_truncate(pending, |out| {
-            let pack_header = |at: SystemTimeClock| {
-                PackHeader::new(at.to_clock_reference(mux_delay), program_mux_rate)
+            let write = |planned: PlannedPack, piece: Option<&PesPacket<'_>>, out: &mut Vec<u8>| {
+                writer
+                    .write_pack(
+                        &pack_header_at(planned.pack.at(), mux_delay, program_mux_rate),
+                        headers.get(planned.headers).unwrap_or_default(),
+                        piece,
+                        planned.fill,
+                        out,
+                    )
+                    .map(|()| planned.pack)
             };
-            for pack in gap.into_iter().flat_map(Gap::iter) {
-                writer.write_padding_pack(&pack_header(pack.at()), pack.length(), out)?;
-                written = Some(pack);
+            for planned in gap
+                .into_iter()
+                .flat_map(Gap::iter)
+                .chain(plan.header_packs())
+            {
+                written = Some(write(planned, None, out)?);
             }
             for (index, piece) in pieces.enumerate() {
-                let at = if index == 0 {
-                    first_at
-                } else {
-                    written.map(|pack| rate.following(pack))
-                };
-                let Some(at) = at else {
+                let Some(planned) = plan.pes_pack(index, piece.encoded_len(), written) else {
                     return Err(missing_pts);
                 };
-                let start = out.len();
-                writer.write_pack_header(&pack_header(at), out)?;
-                if index == 0 {
-                    out.extend_from_slice(headers);
-                }
-                writer.write_pes_packets(&piece, out)?;
-                written = Some(Pack::after(written, at, out.len().saturating_sub(start)));
+                written = Some(write(planned, Some(&piece), out)?);
             }
             Ok(())
         })?;
         *last_pack = written;
         if headers_due {
-            *headers_sent_at = first_at;
+            *headers_sent_at = plan.headers_scr();
         }
         if let (Some(time), Some(stream)) = (time, streams.get_mut(index)) {
             stream.last_timestamp = Some(time);
@@ -684,13 +661,27 @@ impl Muxer {
     /// Appends to `out` all the packs that can be given
     ///
     /// After [`finish`](Self::finish), they are followed by
-    /// `MPEG_program_end_code`, given once, when a pack has been written.
+    /// `MPEG_program_end_code`, given once, when a pack has been written; in
+    /// a CSPS, after a pack header alone where the end code would come
+    /// sooner than the packet rate allows (§2.7.9).
     pub fn poll_output(&mut self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.pending);
         self.pending.clear();
         if self.end == End::Finished {
-            if self.last_pack.is_some() {
-                PackWriter::new().write_program_end_code(out);
+            if let Some(last) = self.last_pack {
+                let writer = PackWriter::new();
+                if let Some(closing) = self.rate().closing(last) {
+                    let header = pack_header_at(
+                        closing.at(),
+                        self.config.mux_delay,
+                        self.config.program_mux_rate,
+                    );
+                    // Why not report the error: a pack header is refused only
+                    // for stuffing past 7 bytes or a program_mux_rate `new`
+                    // refuses.
+                    let _ = writer.write_pack_header(&header, out);
+                }
+                writer.write_program_end_code(out);
             }
             self.end = End::Ended;
         }

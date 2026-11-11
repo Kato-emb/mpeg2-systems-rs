@@ -314,16 +314,16 @@ fn a_system_header_the_system_header_writer_refuses_is_refused_leaving_out_as_it
 }
 
 #[test]
-fn the_count_and_the_bytes_of_the_pieces_are_known_before_they_are_cut() {
+fn the_count_of_the_pieces_is_known_before_they_are_cut() {
     // Pieces of at most 100 bytes, then 60: a header of 14 bytes with its
     // PTS leaves 86 for the first payload, and one of 9 without it 51
-    let shapes: Vec<((usize, usize), (usize, usize))> = [0, 86, 87, 86 + 51, 86 + 51 + 1, 5_000]
+    let shapes: Vec<(usize, (usize, usize))> = [0, 86, 87, 86 + 51, 86 + 51 + 1, 5_000]
         .into_iter()
         .map(|length| {
             let payload = vec![0xaa; length];
             let packet = video_packet(Some(90_000), None, &payload);
             let pieces = PesPacketPieces::new(&packet, 100, 60);
-            let known = (pieces.len(), pieces.encoded_len());
+            let known = pieces.len();
             let cut: Vec<PesPacket<'_>> = pieces.collect();
             (
                 known,
@@ -335,7 +335,7 @@ fn the_count_and_the_bytes_of_the_pieces_are_known_before_they_are_cut() {
     assert_eq!(
         (known, cut.clone()),
         (
-            cut,
+            cut.iter().map(|&(count, _)| count).collect::<Vec<_>>(),
             vec![
                 (1, 14),
                 (1, 100),
@@ -430,7 +430,7 @@ fn a_pack_of_padding_takes_stuffing_up_to_7_bytes_and_padding_packets_past_them(
     let written = |length: usize| {
         let mut out = Vec::new();
         PackWriter::new()
-            .write_padding_pack(&header, length, &mut out)
+            .write_pack(&header, &[], None, Fill::of(length - 14), &mut out)
             .unwrap();
         let stuffing = out.get(13).unwrap() & 0x07;
         let (pack_header, rest) = out.split_at(14 + usize::from(stuffing));
