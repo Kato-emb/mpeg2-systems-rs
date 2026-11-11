@@ -58,10 +58,9 @@
 use alloc::vec::Vec;
 
 use crate::field::write_or_truncate;
-use crate::pes::extension::{PStdBuffer, PesExtension};
+use crate::pes::extension::PesExtension;
 use crate::pes::{self, PesPacket, StreamId};
-use crate::ps::psm::ElementaryStream;
-use crate::ps::{PackHeader, pack_header, system_header};
+use crate::ps::{PackHeader, pack_header};
 use crate::psi::VersionNumber;
 use crate::time::SystemTimeClock;
 use pack_writer::PesPacketPieces;
@@ -278,132 +277,6 @@ impl Muxer {
             pending: Vec::new(),
             end: End::Open,
         })
-    }
-
-    /// Registers `stream`, its PES packets of its `elementary_stream_id`
-    /// and, when it is 0xFD, of its `elementary_stream_id_extension`
-    ///
-    /// `p_std_buffer` is both the bound of the stream in the system header
-    /// and the P-STD buffer size of its first PES packet, and no PES packet
-    /// of the stream may carry a larger one. The muxer copies the
-    /// `elementary_stream_info` of `stream`, the descriptors of the stream as
-    /// written.
-    ///
-    /// # Errors
-    ///
-    /// * [`StreamId`](Error::StreamId): `elementary_stream_id` is below 0xBD,
-    ///   which this entry point does not take: 0xBC, the
-    ///   `program_stream_map`, is written with
-    ///   [`ProgramStreamMap`](crate::ps::ProgramStreamMap), and those below it
-    ///   start the other elements of a Program Stream.
-    /// * [`StreamIdExtension`](Error::StreamIdExtension):
-    ///   `elementary_stream_id_extension` is present where
-    ///   `elementary_stream_id` is not 0xFD, or absent where it is.
-    /// * [`StreamInUse`](Error::StreamInUse): the stream is registered
-    ///   already.
-    /// * [`AudioBound`](Error::AudioBound), [`VideoBound`](Error::VideoBound):
-    ///   the stream would be the 33rd audio stream or the 17th video stream
-    ///   (§2.5.3.6).
-    /// * [`SystemHeader`](Error::SystemHeader):
-    ///   [`SystemHeader::write`](crate::ps::SystemHeader::write) refuses the
-    ///   bound of the stream, as it does a `p_std_buffer_scale` of `'1'` for
-    ///   audio or of `'0'` for video.
-    /// * [`ProgramStreamMap`](Error::ProgramStreamMap):
-    ///   [`ProgramStreamMap::write`](crate::ps::ProgramStreamMap::write)
-    ///   refuses the map with the stream, as it does
-    ///   `elementary_stream_info` that is not whole descriptors, a
-    ///   `stream_type` carried in sections, or a map past the 1018 bytes of
-    ///   `program_stream_map_length`, which is refused before
-    ///   `elementary_stream_info` is copied.
-    /// * [`PackLength`](Error::PackLength): the first pack, with the system
-    ///   header and the program stream map, could not carry a PES packet in
-    ///   [`MuxerConfig::pack_size`], or in the bytes that arrive within 0.7 s
-    ///   at [`MuxerConfig::program_mux_rate`] (§2.7.1).
-    ///
-    /// # Panics
-    ///
-    /// Panics if a PES packet has been taken already: every system header,
-    /// the first included, names every stream of the Program Stream
-    /// (§2.5.3.6, §2.7.8), and the muxer makes it of the streams registered.
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "a call out of order is the caller's mistake, which panics as documented"
-    )]
-    pub fn add_stream(
-        &mut self,
-        stream: ElementaryStream<'_>,
-        p_std_buffer: PStdBuffer,
-    ) -> Result<(), Error> {
-        assert!(
-            self.last_pack.is_none(),
-            "a stream is registered after the first PES packet"
-        );
-        let stream_id = stream.elementary_stream_id;
-        let stream_id_extension = stream.elementary_stream_id_extension;
-        if !stream_id.is_pes_packet() || stream_id == StreamId::PROGRAM_STREAM_MAP {
-            return Err(Error::StreamId { stream_id });
-        }
-        if stream_id_extension.is_some() != (stream_id == StreamId::EXTENDED_STREAM_ID) {
-            return Err(Error::StreamIdExtension { stream_id });
-        }
-        if self.stream(stream_id, stream_id_extension).is_some() {
-            return Err(Error::StreamInUse {
-                stream_id,
-                stream_id_extension,
-            });
-        }
-        stream_definition::check_map_length(
-            &self.program_stream_info,
-            self.streams
-                .iter()
-                .map(Stream::elementary_stream)
-                .chain(core::iter::once(stream)),
-        )?;
-        let stream = Stream {
-            stream_id,
-            stream_id_extension,
-            stream_type: stream.stream_type,
-            p_std_buffer,
-            es_info: stream.elementary_stream_info.as_bytes().to_vec(),
-            last_timestamp: None,
-        };
-        let (audio_bound, video_bound) = stream_definition::bounds(&self.streams);
-        if stream_definition::is_audio(stream.stream_type)
-            && audio_bound >= system_header::MAX_AUDIO_BOUND.into()
-        {
-            return Err(Error::AudioBound {
-                audio_bound: audio_bound.saturating_add(1),
-            });
-        }
-        if stream.stream_type.is_video() && video_bound >= system_header::MAX_VIDEO_BOUND.into() {
-            return Err(Error::VideoBound {
-                video_bound: video_bound.saturating_add(1),
-            });
-        }
-        self.streams.push(stream);
-        self.check_headers_of(&self.streams, &self.program_stream_info)
-            .inspect_err(|_| {
-                self.streams.pop();
-            })
-    }
-
-    /// Refuses the system header of `streams` and the program stream map of
-    /// `program_stream_info` and `streams` where
-    /// [`check_headers`](stream_definition::check_headers) does at the
-    /// settings and the map version of the muxer
-    fn check_headers_of(
-        &self,
-        streams: &[Stream],
-        program_stream_info: &[u8],
-    ) -> Result<(), Error> {
-        stream_definition::check_headers(
-            streams,
-            program_stream_info,
-            self.map_version,
-            self.config.program_mux_rate,
-            self.rate().fixed_flag(),
-            self.largest_pack(),
-        )
     }
 
     /// Returns the most bytes of a pack: [`MuxerConfig::pack_size`], or
