@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use crate::pes::PesPacket;
-use crate::ps::{ProgramStreamMap, SystemHeader};
+use crate::ps::{PackHeader, ProgramStreamMap, SystemHeader};
 use crate::psi::VersionNumber;
 
 mod event;
@@ -124,14 +124,11 @@ impl Demuxer {
             match self.framer.step() {
                 Output::NeedMoreData => return None,
                 Output::EndOfInput => {}
-                Output::SyncAcquired(header) => {
+                Output::SyncAcquired(range) => {
                     self.pending.push_back(Pending::Ready(Event::SyncAcquired));
                     self.pending
-                        .push_back(Pending::Ready(Event::PackHeader(header)));
+                        .push_back(Pending::Element(Element::PackHeader, range));
                 }
-                Output::PackHeader(header) => self
-                    .pending
-                    .push_back(Pending::Ready(Event::PackHeader(header))),
                 Output::Element(Element::SystemHeader, range) => {
                     // Why compare the bytes rather than the header read: a
                     // system header restates the same layout throughout a
@@ -151,18 +148,27 @@ impl Demuxer {
                     // a change: it announces the next version, and the map in
                     // force stays until that version comes with the indicator
                     // set (§2.5.4.2).
-                    if let Ok(map) = map
-                        && map.current_next_indicator
-                        && self.program_stream_map_version != Some(map.program_stream_map_version)
-                    {
-                        self.program_stream_map_version = Some(map.program_stream_map_version);
-                        self.pending
-                            .push_back(Pending::Element(Element::ProgramStreamMap, range));
+                    match map {
+                        Ok(map)
+                            if map.current_next_indicator
+                                && self.program_stream_map_version
+                                    != Some(map.program_stream_map_version) =>
+                        {
+                            self.program_stream_map_version = Some(map.program_stream_map_version);
+                            self.pending
+                                .push_back(Pending::Element(Element::ProgramStreamMap, range));
+                        }
+                        Ok(_) => {}
+                        // Why queue a map that does not read: the read when
+                        // polled reports it, as it does every element.
+                        Err(_) => self
+                            .pending
+                            .push_back(Pending::Element(Element::ProgramStreamMap, range)),
                     }
                 }
-                Output::Element(Element::PesPacket, range) => self
-                    .pending
-                    .push_back(Pending::Element(Element::PesPacket, range)),
+                Output::Element(element @ (Element::PackHeader | Element::PesPacket), range) => {
+                    self.pending.push_back(Pending::Element(element, range));
+                }
                 // Why forget the system header and map reported: the end code
                 // closes the Program Stream, so those of a stream after it
                 // are new there, though they repeat the ones before.
@@ -185,25 +191,40 @@ impl Demuxer {
         }
         let event = match self.pending.pop_front()? {
             Pending::Ready(event) => event,
-            // Why read the element again when polled: the queue holds what it
-            // lends as a range, and the element read borrows those bytes; the
-            // framer read the same bytes when it cut them, so the reading
-            // succeeds.
+            // Why read the element only when polled: the queue holds what it
+            // lends as a range, and the element read borrows those bytes. A
+            // program stream map is read once more here, after the read that
+            // compared its version.
             Pending::Element(element, range) => {
-                let bytes = self.framer.bytes(range);
-                match element {
-                    Element::SystemHeader => SystemHeader::read(bytes).map_or_else(
-                        |error| Event::Error(Error::SystemHeader { error }),
-                        Event::SystemHeader,
-                    ),
-                    Element::ProgramStreamMap => ProgramStreamMap::read(bytes).map_or_else(
-                        |error| Event::Error(Error::ProgramStreamMap { error }),
-                        Event::ProgramStreamMap,
-                    ),
-                    Element::PesPacket => PesPacket::read(bytes).map_or_else(
-                        |error| Event::Error(Error::PesPacket { error }),
-                        Event::PesPacket,
-                    ),
+                let bytes = self.framer.bytes(range.clone());
+                let read = match element {
+                    Element::PackHeader => PackHeader::read(bytes)
+                        .map(Event::PackHeader)
+                        .map_err(|error| Error::PackHeader { error }),
+                    Element::SystemHeader => SystemHeader::read(bytes)
+                        .map(Event::SystemHeader)
+                        .map_err(|error| Error::SystemHeader { error }),
+                    Element::ProgramStreamMap => ProgramStreamMap::read(bytes)
+                        .map(Event::ProgramStreamMap)
+                        .map_err(|error| Error::ProgramStreamMap { error }),
+                    Element::PesPacket => PesPacket::read(bytes)
+                        .map(Event::PesPacket)
+                        .map_err(|error| Error::PesPacket { error }),
+                };
+                match read {
+                    Ok(event) => event,
+                    // Why hand the bytes back after the error: an element that
+                    // does not read is still input, and every byte handed
+                    // over is reported (ADR 0004).
+                    Err(error) => {
+                        // Why forget the system header: the one reported no
+                        // longer stands, so the next one that reads is news
+                        if element == Element::SystemHeader {
+                            self.system_header.clear();
+                        }
+                        self.pending.push_front(Pending::Unframable(range));
+                        Event::Error(error)
+                    }
                 }
             }
             Pending::Unsynchronized(range) => Event::Unsynchronized {
@@ -802,6 +823,27 @@ mod tests {
                     error: PesPacket::read(&broken).unwrap_err(),
                 }),
                 unframable(&broken),
+                pack(&pack_bytes),
+            ]
+        );
+    }
+
+    #[test]
+    fn cuts_an_element_that_does_not_read_by_its_declared_length() {
+        let pack_bytes = pack_header_bytes(&[]);
+        let mut broken = pes_packet_bytes(0xE0, &[0xAA, 0xBB, 0xCC]);
+        broken[6] = 0x40;
+        let after = [0x12, 0x34];
+        assert_eq!(
+            demux(&concat(&[&pack_bytes, &broken, &after, &pack_bytes])),
+            [
+                acquired(),
+                pack(&pack_bytes),
+                error(Error::PesPacket {
+                    error: PesPacket::read(&broken).unwrap_err(),
+                }),
+                unframable(&broken),
+                unframable(&after),
                 pack(&pack_bytes),
             ]
         );

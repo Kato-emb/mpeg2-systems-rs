@@ -58,13 +58,15 @@ pub enum Event<'a> {
         /// The bytes, in input order
         bytes: &'a [u8],
     },
-    /// Input that could not be cut into an element while synchronized, up to
-    /// the next start code
+    /// Input that could not be cut into an element while synchronized, or an
+    /// element that does not read
     ///
-    /// Reported for a start code the demuxer does not cut, bytes that are no
-    /// start code, an element that does not read (an [`Event::Error`] before
-    /// this event says why), and a PES packet whose `PES_packet_length` is 0,
-    /// which a Program Stream does not allow.
+    /// Reported up to the next start code for a start code the demuxer does
+    /// not cut, bytes that are no start code, a pack header of a kind this
+    /// crate does not read, and a PES packet whose `PES_packet_length` is 0,
+    /// which a Program Stream does not allow. An element that does not read
+    /// is reported as cut, by its declared length. An [`Event::Error`] before
+    /// this event says why, where an element did not read.
     Unframable {
         /// The bytes, in input order
         bytes: &'a [u8],
