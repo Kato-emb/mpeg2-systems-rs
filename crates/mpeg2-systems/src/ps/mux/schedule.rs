@@ -5,8 +5,12 @@
 
 use core::time::Duration;
 
-use crate::ps::pack_header;
 use crate::time::{SYSTEM_CLOCK_FREQUENCY, SystemTimeClock};
+use gap::{Line, padding_layout};
+
+mod gap;
+
+pub(super) use gap::Gap;
 
 /// Bytes per second in a unit of `program_mux_rate`, ISO/IEC 13818-1 §2.5.3.4
 const PROGRAM_MUX_RATE_UNIT: u64 = 50;
@@ -221,11 +225,7 @@ impl VariableRate {
             .saturating_sub(longest)
             .div_ceil(longest)
             .saturating_add(1);
-        Some(Gap(GapKind::Filling {
-            before,
-            first,
-            count,
-        }))
+        Some(Gap::filling(before, first, count))
     }
 }
 
@@ -275,272 +275,9 @@ impl FixedRate {
             .reached(before, time)
             .checked_sub(before.next_offset())?;
         let layout = padding_layout(missing, as_u64(self.largest_pack))?;
-        Some(Gap(GapKind::Padding {
-            before,
-            line: self.line,
-            layout,
-        }))
-    }
-}
-
-/// The line of a fixed rate, ISO/IEC 13818-1 §2.5.3.6 equations 2-22 and
-/// 2-23: SCR(i) = c1 × i + c2, c1 the ticks of the STC a byte takes to arrive
-/// at `program_mux_rate` (§2.5.2.2 equation 2-21)
-#[derive(Debug, Clone, Copy)]
-struct Line {
-    program_mux_rate: u32,
-}
-
-impl Line {
-    const fn new(program_mux_rate: u32) -> Self {
-        Self { program_mux_rate }
-    }
-
-    /// Returns ⌊c1 × `bytes`⌋, or [`u64::MAX`] past it
-    fn ticks(self, bytes: u64) -> u64 {
-        // Why not in u64: the product passes it at the offsets a long stream
-        // reaches.
-        let ticks = u128::from(SYSTEM_CLOCK_FREQUENCY)
-            .saturating_mul(u128::from(bytes))
-            .div_euclid(u128::from(bytes_per_second(self.program_mux_rate)));
-        u64::try_from(ticks).unwrap_or(u64::MAX)
-    }
-
-    /// Returns the fewest bytes whose [`ticks`](Self::ticks) are `ticks` or
-    /// more
-    fn bytes(self, ticks: u64) -> u64 {
-        let bytes = u128::from(ticks)
-            .saturating_mul(u128::from(bytes_per_second(self.program_mux_rate)))
-            .div_ceil(u128::from(SYSTEM_CLOCK_FREQUENCY));
-        u64::try_from(bytes).unwrap_or(u64::MAX)
-    }
-
-    /// Returns the time on the line through the SCR of `through`, `offset`
-    /// bytes from the first SCR, which is not before `through`
-    fn at(self, through: Pack, offset: u64) -> SystemTimeClock {
-        // Why not the ticks of `offset - through.offset` alone: ⌊c1 × i⌋ is
-        // taken of the whole offset, or each pack would round on its own and
-        // drift from the line.
-        through.at.add_ticks(
-            self.ticks(offset)
-                .saturating_sub(self.ticks(through.offset)),
-        )
-    }
-
-    /// Returns the fewest bytes from the first SCR at which the line through
-    /// the SCR of `through` is at `time` or after it
-    fn reached(self, through: Pack, time: SystemTimeClock) -> u64 {
-        self.bytes(
-            self.ticks(through.offset)
-                .saturating_add(time.ticks_since(through.at)),
-        )
-    }
-}
-
-/// How the bytes missing before a PES packet are cut into packs of padding:
-/// `total` bytes in packs of `longest` bytes but the last two, the last no
-/// shorter than a pack header
-#[derive(Debug, Clone, Copy)]
-struct PaddingLayout {
-    longest: u64,
-    total: u64,
-}
-
-/// Returns how `missing` bytes are cut into packs of padding of at most
-/// `longest` bytes, each no shorter than a pack header, or `None` where none
-/// are
-///
-/// The packs take exactly the bytes missing: `longest` each, and the one
-/// before the last gives up what the last needs to be a pack header. Where
-/// fewer bytes than a pack header are missing, or are left for the last and
-/// the one before it cannot give them up without falling below a pack
-/// header itself, those bytes are left out, and the PES packet comes that
-/// much early.
-fn padding_layout(missing: u64, longest: u64) -> Option<PaddingLayout> {
-    let header = as_u64(pack_header::FIXED_LENGTH);
-    let count = missing.div_ceil(longest);
-    let rest = missing.saturating_sub(count.saturating_sub(1).saturating_mul(longest));
-    let total = if rest >= header
-        || (count >= 2 && longest.saturating_add(rest) >= header.saturating_mul(2))
-    {
-        missing
-    } else {
-        // Why not a pack header for the bytes left: the PES packet would
-        // come after its time, where leaving them has it come early.
-        missing.saturating_sub(rest)
-    };
-    (total > 0).then_some(PaddingLayout { longest, total })
-}
-
-impl PaddingLayout {
-    /// Returns how many packs there are
-    fn count(self) -> u64 {
-        self.total.div_ceil(self.longest)
-    }
-
-    /// Returns the bytes of the pack at `index`, and of the packs before it
-    fn pack(self, index: u64) -> (u64, u64) {
-        let header = as_u64(pack_header::FIXED_LENGTH);
-        let count = self.count();
-        let others = self.longest.saturating_mul(count.saturating_sub(1));
-        let last = self.total.saturating_sub(others).max(header);
-        let before = self.longest.saturating_mul(index);
-        if index.saturating_add(1) == count {
-            (last, self.total.saturating_sub(last))
-        } else if index.saturating_add(2) == count {
-            (
-                self.total.saturating_sub(before).saturating_sub(last),
-                before,
-            )
-        } else {
-            (self.longest, before)
-        }
-    }
-}
-
-/// The packs that fill the time from the pack after the one before them to
-/// a PES packet
-#[derive(Debug, Clone, Copy)]
-pub(super) struct Gap(GapKind);
-
-/// What the packs of a [`Gap`] are
-#[derive(Debug, Clone, Copy)]
-enum GapKind {
-    /// `count` packs of a pack header alone over a leap of the time stamps,
-    /// [`LONGEST_SCR_INTERVAL`] apart from `first` (§2.7.1)
-    Filling {
-        before: Pack,
-        first: SystemTimeClock,
-        count: u64,
-    },
-    /// Packs of padding at a fixed rate, on `line` through `before`, as
-    /// `layout` cuts them
-    Padding {
-        before: Pack,
-        line: Line,
-        layout: PaddingLayout,
-    },
-}
-
-impl Gap {
-    /// Returns the bytes of all the packs
-    pub(super) fn bytes(self) -> u64 {
-        match self.0 {
-            GapKind::Filling { count, .. } => {
-                count.saturating_mul(as_u64(pack_header::FIXED_LENGTH))
-            }
-            GapKind::Padding { layout, .. } => layout.total,
-        }
-    }
-
-    /// Returns the last of the packs
-    pub(super) fn last(self) -> Pack {
-        self.pack(self.count().saturating_sub(1))
-    }
-
-    pub(super) fn iter(self) -> impl Iterator<Item = Pack> {
-        (0..self.count()).map(move |index| self.pack(index))
-    }
-
-    fn count(self) -> u64 {
-        match self.0 {
-            GapKind::Filling { count, .. } => count,
-            GapKind::Padding { layout, .. } => layout.count(),
-        }
-    }
-
-    /// Returns the pack at `index`
-    fn pack(self, index: u64) -> Pack {
-        match self.0 {
-            GapKind::Filling { before, first, .. } => Pack {
-                at: first.add_ticks(index.saturating_mul(longest_scr_interval())),
-                length: pack_header::FIXED_LENGTH,
-                offset: before
-                    .next_offset()
-                    .saturating_add(index.saturating_mul(as_u64(pack_header::FIXED_LENGTH))),
-            },
-            GapKind::Padding {
-                before,
-                line,
-                layout,
-            } => {
-                let (length, packs_before) = layout.pack(index);
-                let offset = before.next_offset().saturating_add(packs_before);
-                Pack {
-                    at: line.at(before, offset),
-                    length: usize::try_from(length).unwrap_or(usize::MAX),
-                    offset,
-                }
-            }
-        }
+        Some(Gap::padding(before, self.line, layout))
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use alloc::vec;
-    use alloc::vec::Vec;
-
-    use super::{Line, Pack, Rate};
-    use crate::time::{SystemTimeClock, Timestamp};
-
-    /// A `program_mux_rate` of 1 260 000 bytes a second
-    const RATE: u32 = 25_200;
-
-    /// Ticks of the STC that 7 bytes take to arrive at [`RATE`]
-    const TICKS_OF_SEVEN_BYTES: u64 = 150;
-
-    fn timestamp(value: u64) -> Timestamp {
-        Timestamp::try_from(value).unwrap()
-    }
-
-    #[test]
-    fn the_padding_fills_the_bytes_missing_exactly_in_packs_of_at_most_the_longest_from_a_pack_header_on()
-     {
-        let before = Pack::after(None, SystemTimeClock::first(timestamp(90_000)), 100);
-        let lengths = |bytes: u64| {
-            let time = before
-                .at
-                .add_ticks((100 + bytes) * TICKS_OF_SEVEN_BYTES / 7);
-            Rate::fixed(RATE, 2_048).gap(before, time).map(|padding| {
-                (
-                    padding.iter().map(|pack| pack.length).collect::<Vec<_>>(),
-                    padding.bytes(),
-                    padding.last().next_offset() - 100,
-                )
-            })
-        };
-
-        // Below a pack header, none; from it on, the bytes missing
-        assert_eq!(
-            [0, 1, 13, 14, 2_048, 2_049, 2_061, 2_062, 4_097].map(lengths),
-            [
-                None,
-                None,
-                None,
-                Some((vec![14], 14, 14)),
-                Some((vec![2_048], 2_048, 2_048)),
-                Some((vec![2_035, 14], 2_049, 2_049)),
-                Some((vec![2_047, 14], 2_061, 2_061)),
-                Some((vec![2_048, 14], 2_062, 2_062)),
-                Some((vec![2_048, 2_035, 14], 4_097, 4_097)),
-            ]
-        );
-    }
-
-    #[test]
-    fn the_line_is_taken_in_whole_ticks_rounded_down_past_the_width_of_u64() {
-        // 2^40 bytes: 27 000 000 × 2^40 is past u64
-        let far = 1_u64 << 40;
-        let far_ticks = u64::try_from(u128::from(far) * 150 / 7).unwrap();
-
-        assert_eq!(
-            (
-                [0, 1, 6, 7, far].map(|bytes| Line::new(RATE).ticks(bytes)),
-                Line::new(1).ticks(u64::MAX),
-                [128, 129, 150, 151].map(|ticks| Line::new(RATE).bytes(ticks)),
-            ),
-            ([0, 21, 128, 150, far_ticks], u64::MAX, [6, 7, 7, 8])
-        );
-    }
-}
+mod tests;
