@@ -144,7 +144,7 @@ impl PackWriter {
         out: &mut Vec<u8>,
     ) -> Result<usize, Error> {
         let stream_id = packet.stream_id;
-        if !stream_id.is_pes_packet() || stream_id == StreamId::PROGRAM_STREAM_MAP {
+        if !is_written_in_pes_packets(stream_id) {
             return Err(Error::StreamId { stream_id });
         }
         // Why not split a packet of an unspecified length into more of the
@@ -205,6 +205,13 @@ impl PackWriter {
     }
 }
 
+/// Returns whether [`PackWriter::write_pes_packets`] writes PES packets of
+/// `stream_id`: those of 0xBD and above, the PES packets but the
+/// `program_stream_map`
+pub(super) fn is_written_in_pes_packets(stream_id: StreamId) -> bool {
+    stream_id.is_pes_packet() && stream_id != StreamId::PROGRAM_STREAM_MAP
+}
+
 /// The bytes a pack takes past what it carries: `stuffing_byte`s after its
 /// pack header where they are 7 or fewer (§2.5.3.4), or past that PES packets
 /// of `padding_stream` (§2.4.3.6, §2.4.3.7), of as near the same length as
@@ -231,7 +238,7 @@ impl Fill {
     }
 
     /// Returns the `pack_stuffing_length` of the pack header
-    pub(super) const fn pack_stuffing_length(self) -> u8 {
+    const fn pack_stuffing_length(self) -> u8 {
         match self.0 {
             FillKind::Stuffing(stuffing) => stuffing,
             FillKind::Padding(_) => 0,
@@ -247,7 +254,7 @@ impl Fill {
     }
 
     /// Appends the PES packets of padding to `out`
-    pub(super) fn write_padding(self, out: &mut Vec<u8>) {
+    fn write_padding(self, out: &mut Vec<u8>) {
         let FillKind::Padding(bytes) = self.0 else {
             return;
         };
@@ -266,14 +273,15 @@ impl Fill {
 }
 
 /// The PES packets a payload is split into, each no longer than a length
-/// given: the first with the optional header of the packet, the ones after
-/// it with the same header without its PTS, DTS and ESCR
+/// given and than the longest PES packet: the first with the optional header
+/// of the packet, the ones after it with the same header without its PTS,
+/// DTS and ESCR
 ///
 /// An empty payload still gives one packet, and the payloads of the packets
 /// join back into the payload in order. How many packets is known before
 /// they are cut.
 #[derive(Debug, Clone)]
-pub(crate) struct PesPacketPieces<'packet> {
+pub(super) struct PesPacketPieces<'packet> {
     /// The header of the next packet and the payload left, `None` once the
     /// last packet is given
     rest: Option<PesPacket<'packet>>,
@@ -285,17 +293,26 @@ pub(crate) struct PesPacketPieces<'packet> {
 
 impl<'packet> PesPacketPieces<'packet> {
     /// Returns the packets of `packet`, the first at most `longest` bytes
-    /// and each after it at most `longest_continued`
-    pub(crate) fn new(
+    /// and each after it at most `longest_continued`, none past the longest
+    /// PES packet
+    pub(super) fn new(
         packet: &PesPacket<'packet>,
         longest: usize,
         longest_continued: usize,
     ) -> Self {
         Self {
             rest: Some(packet.clone()),
-            longest,
-            longest_continued,
+            longest: longest.min(pes::LONGEST_PES_PACKET),
+            longest_continued: longest_continued.min(pes::LONGEST_PES_PACKET),
         }
+    }
+
+    /// Returns the fewest bytes the next packet takes: its header and a byte
+    /// of the payload left, the header alone where none is left
+    pub(super) fn shortest_next(&self) -> usize {
+        self.rest.as_ref().map_or(0, |rest| {
+            header_length(rest).saturating_add(rest.payload.len().min(1))
+        })
     }
 
     /// Returns how many packets are left, from the lengths of the headers
@@ -325,12 +342,7 @@ impl<'packet> PesPacketPieces<'packet> {
 
 /// Returns the bytes of the header of `packet`, up to its payload
 fn header_length(packet: &PesPacket<'_>) -> usize {
-    pes::PREFIX_LENGTH.saturating_add(
-        packet
-            .optional_header
-            .as_ref()
-            .map_or(0, OptionalHeader::encoded_len),
-    )
+    packet.encoded_len().saturating_sub(packet.payload.len())
 }
 
 /// Returns the payload a packet of at most `longest` bytes holds after a
