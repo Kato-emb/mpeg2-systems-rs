@@ -682,7 +682,7 @@ mod tests {
 
     use super::*;
     use crate::descriptor::DescriptorLoop;
-    use crate::pes::OptionalHeader;
+    use crate::pes::{self, OptionalHeader};
     use crate::psi::VersionNumber;
     use crate::psi::pat::{Program as PatProgram, ProgramAssociationSection, ProgramLoop};
     use crate::psi::pmt::{ElementaryStream, ElementaryStreamLoop, TsProgramMapSection};
@@ -963,6 +963,26 @@ mod tests {
         assert_eq!(
             (refused, out),
             (Err(Error::BufferFull { length: 4 * 188 }), Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_padding_byte_other_than_0xff_is_refused_as_the_pes_packet_refuses_it() {
+        let mut muxer = muxer_of(MuxerConfig::new());
+        muxer
+            .handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &[], Some(90_000)))
+            .unwrap();
+        assert_eq!(
+            muxer.handle_pes_packet(
+                pid(AUDIO_PID),
+                &PesPacket::new(StreamId::PADDING_STREAM, &[0xff, 0x00])
+            ),
+            Err(Error::PesPacket {
+                error: pes::Error::Forbidden {
+                    field: "padding_byte",
+                    value: 0x00
+                }
+            })
         );
     }
 

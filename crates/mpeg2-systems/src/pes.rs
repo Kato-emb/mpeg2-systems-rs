@@ -428,6 +428,8 @@ impl<'input> PesPacket<'input> {
     ///   that is not video.
     /// * [`TooLong`](Error::TooLong): the packet after `PES_packet_length` is
     ///   longer than 65535 bytes and its length is specified.
+    /// * [`Forbidden`](Error::Forbidden): the packet is of `padding_stream`
+    ///   and its payload holds a `padding_byte` other than 0xFF (§2.4.3.7).
     /// * Any error of [`OptionalHeader::write`].
     #[cfg(feature = "alloc")]
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
@@ -454,6 +456,14 @@ impl<'input> PesPacket<'input> {
                 stream_id: self.stream_id,
             });
         }
+        if self.stream_id == StreamId::PADDING_STREAM
+            && let Some(&padding_byte) = self.payload.iter().find(|&&byte| byte != 0xff)
+        {
+            return Err(Error::Forbidden {
+                field: "padding_byte",
+                value: u32::from(padding_byte),
+            });
+        }
 
         write_or_truncate(out, |out| {
             let mut writer = FieldWriter::new(out);
@@ -477,6 +487,8 @@ impl<'input> PesPacket<'input> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "alloc")]
+    use alloc::vec;
     #[cfg(feature = "alloc")]
     use alloc::vec::Vec;
 
@@ -605,6 +617,29 @@ mod tests {
             ]
         );
         assert_eq!(written, []);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_padding_byte_other_than_0xff_is_refused_by_the_first_one_before_a_byte_is_written() {
+        let mut written = vec![0x47];
+
+        assert_eq!(
+            PesPacket::new(StreamId::PADDING_STREAM, &[0xff, 0x01, 0x02]).write(&mut written),
+            Err(Error::Forbidden {
+                field: "padding_byte",
+                value: 0x01
+            })
+        );
+        assert_eq!(written, [0x47]);
+    }
+
+    #[test]
+    fn a_padding_byte_other_than_0xff_is_read_as_found() {
+        assert_eq!(
+            PesPacket::read(&[0x00, 0x00, 0x01, 0xbe, 0x00, 0x02, 0xff, 0x00]),
+            Ok(PesPacket::new(StreamId::PADDING_STREAM, &[0xff, 0x00]))
+        );
     }
 
     #[test]
