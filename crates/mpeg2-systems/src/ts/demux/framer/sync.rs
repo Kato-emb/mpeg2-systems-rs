@@ -1,7 +1,6 @@
 //! Search for the packet grid: the `sync_byte` cadence and the packet size it
 //! implies
 
-use crate::input_buffer::Input;
 use crate::ts::packet::{PACKET_LENGTH, SYNC_BYTE};
 
 // ETSI TR 101 290: lock onto the grid after five consecutive sync bytes at a
@@ -57,8 +56,6 @@ pub(super) enum SearchObservation {
     GridConfirmed(PacketSize),
     /// Too few bytes to confirm or rule out every candidate period
     Undecided,
-    /// The input ended with no bytes left to search
-    InputExhausted,
     /// A unit could start at the front, but no candidate period repeats it
     NoGridAtFront,
 }
@@ -85,7 +82,6 @@ pub(super) fn observe(
     bytes: &[u8],
     fixed: Option<PacketSize>,
     garbage_limit: usize,
-    input: Input,
 ) -> SearchObservation {
     let candidates = fixed
         .as_ref()
@@ -136,13 +132,10 @@ pub(super) fn observe(
             GridCheck::NeedMoreData => undecided = true,
         }
     }
-    match (undecided, input) {
-        (true, Input::Continues) => SearchObservation::Undecided,
-        (true, Input::Ends) if bytes.is_empty() => SearchObservation::InputExhausted,
-        // Why rule an undecided candidate out at the end, rather than give up
-        // the search: no bytes will arrive to confirm it, and a grid can still
-        // start at a later place in the bytes left.
-        (true, Input::Ends) | (false, _) => SearchObservation::NoGridAtFront,
+    if undecided {
+        SearchObservation::Undecided
+    } else {
+        SearchObservation::NoGridAtFront
     }
 }
 
@@ -196,8 +189,7 @@ pub(super) mod tests {
                 observe(
                     &grid(packet_size.stride(), SYNC_LOCK_COUNT, packet_size.prefix()),
                     None,
-                    usize::MAX,
-                    Input::Continues
+                    usize::MAX
                 ),
                 SearchObservation::GridConfirmed(packet_size)
             );
@@ -207,12 +199,7 @@ pub(super) mod tests {
     #[test]
     fn four_sync_bytes_leave_the_grid_undecided() {
         assert_eq!(
-            observe(
-                &grid(188, SYNC_LOCK_COUNT - 1, 0),
-                None,
-                usize::MAX,
-                Input::Continues
-            ),
+            observe(&grid(188, SYNC_LOCK_COUNT - 1, 0), None, usize::MAX),
             SearchObservation::Undecided
         );
     }
@@ -220,12 +207,7 @@ pub(super) mod tests {
     #[test]
     fn a_192_byte_unit_starts_at_the_timestamp_before_its_sync_byte() {
         assert_eq!(
-            observe(
-                &grid(192, SYNC_LOCK_COUNT, 4),
-                None,
-                usize::MAX,
-                Input::Continues
-            ),
+            observe(&grid(192, SYNC_LOCK_COUNT, 4), None, usize::MAX),
             SearchObservation::GridConfirmed(PacketSize::Timestamped192)
         );
     }
@@ -236,8 +218,7 @@ pub(super) mod tests {
             observe(
                 &grid(188, SYNC_LOCK_COUNT, 10),
                 Some(PacketSize::Standard188),
-                usize::MAX,
-                Input::Continues
+                usize::MAX
             ),
             SearchObservation::LeadingGarbage(10)
         );
@@ -246,12 +227,7 @@ pub(super) mod tests {
     #[test]
     fn detection_keeps_the_bytes_a_timestamp_could_take_before_a_sync_byte() {
         assert_eq!(
-            observe(
-                &grid(188, SYNC_LOCK_COUNT, 10),
-                None,
-                usize::MAX,
-                Input::Continues
-            ),
+            observe(&grid(188, SYNC_LOCK_COUNT, 10), None, usize::MAX),
             SearchObservation::LeadingGarbage(10 - 4)
         );
     }
@@ -262,8 +238,7 @@ pub(super) mod tests {
             observe(
                 &grid(192, SYNC_LOCK_COUNT, 2),
                 Some(PacketSize::Timestamped192),
-                usize::MAX,
-                Input::Continues
+                usize::MAX
             ),
             SearchObservation::LeadingGarbage(2 + 192 - 4)
         );
@@ -275,7 +250,7 @@ pub(super) mod tests {
         bytes[188 * 3] = 0x00;
         bytes.extend_from_slice(&[0x00; 204 * SYNC_LOCK_COUNT]);
         assert_eq!(
-            observe(&bytes, None, usize::MAX, Input::Continues),
+            observe(&bytes, None, usize::MAX),
             SearchObservation::NoGridAtFront
         );
     }
@@ -285,12 +260,7 @@ pub(super) mod tests {
         let mut bytes = grid(188, SYNC_LOCK_COUNT, 0);
         bytes.extend_from_slice(&[0x00; 204 * SYNC_LOCK_COUNT]);
         assert_eq!(
-            observe(
-                &bytes,
-                Some(PacketSize::ReedSolomon204),
-                usize::MAX,
-                Input::Continues
-            ),
+            observe(&bytes, Some(PacketSize::ReedSolomon204), usize::MAX),
             SearchObservation::NoGridAtFront
         );
     }

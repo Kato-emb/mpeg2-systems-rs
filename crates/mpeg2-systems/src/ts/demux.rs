@@ -4,6 +4,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use crate::framing::{Framer, Next};
 use crate::pes::PesPacket;
 use crate::psi::section::Section;
 use crate::ts::Pid;
@@ -16,7 +17,7 @@ mod framer;
 use analyzer::PacketAnalyzer;
 pub use event::{Error, Event};
 pub use framer::sync::PacketSize;
-use framer::{Output, PacketFramer};
+use framer::{Output, TransportPackets};
 
 /// Settings of a [`Demuxer`]
 ///
@@ -207,7 +208,7 @@ enum Lent {
 /// ```
 #[derive(Debug, Clone)]
 pub struct Demuxer {
-    framer: PacketFramer,
+    framer: Framer<TransportPackets>,
     analyzer: PacketAnalyzer,
     pending: VecDeque<Pending>,
     subscribe_elementary_pids: bool,
@@ -218,7 +219,7 @@ impl Demuxer {
     #[must_use]
     pub const fn new(config: DemuxerConfig) -> Self {
         Self {
-            framer: PacketFramer::new(config.packet_size),
+            framer: Framer::new(TransportPackets::new(config.packet_size)),
             analyzer: PacketAnalyzer::new(config.pes_buffer_limit),
             pending: VecDeque::new(),
             subscribe_elementary_pids: config.subscribe_elementary_pids,
@@ -389,8 +390,15 @@ impl Demuxer {
         // in the framer or in a reassembler.
         while self.pending.is_empty() {
             self.framer.compact();
-            let pending = match self.framer.step() {
-                Output::NeedMoreData => return None,
+            let output = match self.framer.next() {
+                Next::NeedMoreData => return None,
+                Next::EndOfInput => {
+                    self.analyzer.finish(&mut self.pending);
+                    continue;
+                }
+                Next::Item(output) => output,
+            };
+            let pending = match output {
                 Output::Packet { range, offset } => {
                     let start = range.start;
                     self.analyzer.analyze(
@@ -409,14 +417,10 @@ impl Demuxer {
                     self.analyzer.reset();
                     Pending::Ready(Event::Error(Error::SyncLost))
                 }
-                Output::EndOfInput => {
-                    self.analyzer.finish(&mut self.pending);
-                    continue;
-                }
                 Output::SyncAcquired(packet_size) => {
                     Pending::Ready(Event::SyncAcquired { packet_size })
                 }
-                Output::SyncByteMissing { found } => {
+                Output::SyncByteMissing { found, .. } => {
                     Pending::Ready(Event::Error(Error::SyncByteMissing { found }))
                 }
                 Output::Unsynchronized(range) => Pending::Unsynchronized(range),
