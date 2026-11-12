@@ -75,7 +75,6 @@
 //! ```
 
 use alloc::vec::Vec;
-use core::time::Duration;
 
 use crate::descriptor::DescriptorLoop;
 use crate::pes::{PesPacket, StreamId};
@@ -86,10 +85,7 @@ use crate::ts::adaptation_field::AdaptationField;
 use crate::ts::packet::PACKET_LENGTH;
 use packet_writer::{packet_count, section_packets_length};
 use program_definition::ProgramDefinition;
-use schedule::{Schedule, Times};
-
-/// The longest time from one PCR to the next, ISO/IEC 13818-1 §2.7.2
-const LONGEST_PCR_INTERVAL: Duration = Duration::from_millis(100);
+use schedule::{Plan, Schedule, Sending};
 
 mod config;
 mod error;
@@ -224,10 +220,7 @@ impl Muxer {
     ///   [`MuxerConfig::pcr_interval`] is shorter than a tick of the 27 MHz
     ///   system clock, or longer than 0.1 s (§2.7.2, §2.4.2.3 equation 2-5).
     pub fn new(config: MuxerConfig) -> Result<Self, Error> {
-        let pcr_interval = config.pcr_interval;
-        if SystemTimeClock::ticks_in(pcr_interval) == 0 || pcr_interval > LONGEST_PCR_INTERVAL {
-            return Err(Error::PcrInterval { pcr_interval });
-        }
+        schedule::check_pcr_interval(config.pcr_interval)?;
         Ok(Self {
             config,
             writer: PacketWriter::new(),
@@ -538,55 +531,39 @@ impl Muxer {
                 });
             }
         };
-        let (clock, psi_times, pcr_times, mut next) = match (schedule.zip(reached), time) {
-            (None, Some(clock)) => {
-                let next = Schedule {
-                    psi_sent_at: clock,
-                    pcr_sent_at: clock,
-                    several_pcrs: false,
-                };
-                (clock, Times::once(clock), Times::once(clock), next)
-            }
+        let (clock, previous) = match (schedule.zip(reached), time) {
+            (None, Some(clock)) => (clock, None),
             // Why not unreachable!: `stream_time` gives the first PES packet a
             // time, so the arm is never taken, and an Err keeps it panic free.
             (None, None) => return Err(Error::MissingPts { pid }),
-            (Some((schedule, reached)), time) => {
-                let clock = time.map_or(reached, |time| reached.max(time));
-                let interval = |duration| SystemTimeClock::ticks_in(duration);
-                let psi_times =
-                    Times::due(schedule.psi_sent_at, clock, interval(config.psi_interval));
-                let pcr_times =
-                    Times::due(schedule.pcr_sent_at, clock, interval(config.pcr_interval));
-                let next = Schedule {
-                    psi_sent_at: psi_times.last().unwrap_or(schedule.psi_sent_at),
-                    pcr_sent_at: pcr_times.last().unwrap_or(schedule.pcr_sent_at),
-                    several_pcrs: schedule.several_pcrs || pcr_times.count > 0,
-                };
-                (clock, psi_times, pcr_times, next)
-            }
+            (Some((schedule, reached)), time) => (
+                time.map_or(reached, |time| reached.max(time)),
+                Some(schedule),
+            ),
         };
         // Why not refuse a program without a PCR PID: a stream is registered
         // on `pid`, so the program has one.
         let pcr_pid = program.pcr_pid().unwrap_or(pid);
         let on_pcr_pid = pcr_pid == pid;
-        let pcr_due = on_pcr_pid && pcr_times.last() == Some(clock);
+        let plan = Plan::new(
+            previous,
+            clock,
+            SystemTimeClock::ticks_in(config.psi_interval),
+            SystemTimeClock::ticks_in(config.pcr_interval),
+            on_pcr_pid,
+        );
         let pcr_at_clock = clock.to_clock_reference(config.mux_delay);
-        let after_last_pcr = schedule.is_none_or(|schedule| clock > schedule.pcr_sent_at);
-        let pcr_in_packet =
-            fields.pcr_in_first_packet(pid, on_pcr_pid, pcr_due, pcr_at_clock, after_last_pcr)?;
+        let pcr_in_packet = fields.pcr_in_first_packet(
+            pid,
+            on_pcr_pid,
+            plan.pcr_due(),
+            pcr_at_clock,
+            plan.after_last_pcr(),
+        )?;
         let adaptation_field = fields.adaptation_field(pcr_in_packet.then_some(pcr_at_clock));
-        let pcrs_alone = pcr_times
-            .count
-            .saturating_sub(u64::from(pcr_due && pcr_in_packet));
-        // Why not count the PCR due at the PES packet, split from it, with the
-        // PCRs that fill a leap: it is sent at the PES packet's time, and is
-        // part of what the PES packet adds to the output.
-        let pcr_split = pcr_due && !pcr_in_packet;
-        if pcr_in_packet && !pcr_due {
-            next = next.with_pcr_sent_at(clock);
-        }
+        let plan = plan.with_pcr_in_packet(pcr_in_packet);
 
-        let sections = if psi_times.count > 0 {
+        let sections = if plan.psi_count() > 0 {
             Some(program.psi_sections(config.transport_stream_id, section_bodies)?)
         } else {
             None
@@ -597,18 +574,15 @@ impl Muxer {
         });
         let as_length = |count: u64| usize::try_from(count).unwrap_or(usize::MAX);
         let filling = psi_length
-            .saturating_mul(as_length(psi_times.count))
-            .saturating_add(
-                PACKET_LENGTH
-                    .saturating_mul(as_length(pcrs_alone.saturating_sub(u64::from(pcr_split)))),
-            );
+            .saturating_mul(as_length(plan.psi_count()))
+            .saturating_add(PACKET_LENGTH.saturating_mul(as_length(plan.filling_pcrs())));
         if filling > config.buffer_limit {
             return Err(Error::TimestampGap {
                 gap: clock.timestamp_ticks_since(reached.unwrap_or(clock)),
             });
         }
         let length = filling
-            .saturating_add(if pcr_split { PACKET_LENGTH } else { 0 })
+            .saturating_add(if plan.pcr_split() { PACKET_LENGTH } else { 0 })
             .saturating_add(
                 packet_count(
                     pes_length,
@@ -627,29 +601,20 @@ impl Muxer {
             .write(scratch)
             .map_err(|error| Error::PesPacket { error })?;
 
-        // Why not all the PSI and then all the PCRs: each goes at its time,
-        // the PSI first where the two fall together, so that a PCR stays
-        // the time its bytes arrive at.
-        let mut psi_at = psi_times.iter().zip(sections.iter().cycle()).peekable();
-        let mut pcrs_at = pcr_times.iter().take(as_length(pcrs_alone)).peekable();
-        loop {
-            let psi_first = match (psi_at.peek(), pcrs_at.peek()) {
-                (Some((psi, _)), Some(pcr)) => psi <= pcr,
-                (Some(_), None) => true,
-                (None, Some(_)) => false,
-                (None, None) => break,
-            };
-            if psi_first {
-                if let Some((_, (pat, pmt))) = psi_at.next() {
+        for sending in plan.sendings() {
+            match (sending, &sections) {
+                (Sending::Psi, Some((pat, pmt))) => {
                     writer.write_section(Pid::PAT, pat, pending)?;
                     writer.write_section(program.program_map_pid(), pmt, pending)?;
                 }
-            } else if let Some(at) = pcrs_at.next() {
-                writer.write_program_clock_reference(
-                    pcr_pid,
-                    at.to_clock_reference(config.mux_delay),
-                    pending,
-                )?;
+                (Sending::Psi, None) => {}
+                (Sending::Pcr(at), _) => {
+                    writer.write_program_clock_reference(
+                        pcr_pid,
+                        at.to_clock_reference(config.mux_delay),
+                        pending,
+                    )?;
+                }
             }
         }
         writer.write_pes_packet_with(
@@ -662,7 +627,7 @@ impl Muxer {
             fields.transport_priority,
             pending,
         )?;
-        *schedule = Some(next);
+        *schedule = Some(plan.next());
         if let (Some(time), Some(program)) = (time, self.program.as_mut()) {
             program.set_last_timestamp(pid, time);
         }
@@ -678,13 +643,9 @@ impl Muxer {
         if let (true, Some(schedule), Some(program)) =
             (self.finished, self.schedule.as_mut(), self.program.as_ref())
             && let (Some(pcr_pid), Some(reached)) = (program.pcr_pid(), program.latest_timestamp())
-            && !schedule.several_pcrs
-        {
-            let at = schedule
-                .pcr_sent_at
-                .add_ticks(SystemTimeClock::ticks_in(self.config.pcr_interval))
-                .max(reached);
-            if self
+            && let Some(at) = schedule
+                .closing_pcr_at(SystemTimeClock::ticks_in(self.config.pcr_interval), reached)
+            && self
                 .writer
                 .write_program_clock_reference(
                     pcr_pid,
@@ -692,9 +653,8 @@ impl Muxer {
                     &mut self.pending,
                 )
                 .is_ok()
-            {
-                schedule.several_pcrs = true;
-            }
+        {
+            schedule.closing_pcr_sent();
         }
         out.extend_from_slice(&self.pending);
         self.pending.clear();

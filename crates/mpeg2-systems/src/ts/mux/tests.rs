@@ -1,6 +1,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use core::num::NonZeroU16;
+use core::time::Duration;
 
 use super::*;
 use crate::descriptor::DescriptorLoop;
