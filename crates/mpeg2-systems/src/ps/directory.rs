@@ -532,8 +532,9 @@ mod tests {
     #[cfg(feature = "alloc")]
     #[test]
     fn directories_the_specification_does_not_allow_are_refused_before_a_byte_is_written() {
-        let mut entries = Vec::new();
-        DirectoryEntryLoop::write_from([video_entry(); 3_641], &mut entries).unwrap();
+        // Why not 3 641 entries written by the crate: the length is refused
+        // before an entry is read.
+        let entries = vec![0xff; 65_538];
         let mut written = vec![0x47];
 
         assert_eq!(

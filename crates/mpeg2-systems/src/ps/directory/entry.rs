@@ -5,9 +5,9 @@
 use alloc::vec::Vec;
 
 use super::{Error, field_error};
-use crate::field::{self, FieldReader, TwoBitFieldOutOfRange};
 #[cfg(feature = "alloc")]
-use crate::field::{FieldWriter, write_or_truncate};
+use crate::field::{self, FieldWriter, write_or_truncate};
+use crate::field::{FieldReader, TwoBitFieldOutOfRange};
 use crate::pes::StreamId;
 use crate::time::Timestamp;
 
@@ -83,8 +83,8 @@ impl TryFrom<u8> for CodingParametersIndicator {
 /// The `for` loop of `directory_PES_packet`, ISO/IEC 13818-1 §2.5.5.1,
 /// Table 2-42
 ///
-/// `PES_header_position_offset` and `prev_directory_offset` count from the
-/// first byte of the start code of the directory that holds the entry.
+/// `PES_header_position_offset` counts from the first byte of the start code
+/// of the directory that holds the entry.
 #[doc(alias = "directory entry")]
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -94,8 +94,8 @@ pub struct DirectoryEntry {
     /// `stream_id_extension` of the PES packets of the access unit, present
     /// only where `packet_stream_id` is 0xFD
     pub packet_stream_id_extension: Option<u8>,
-    /// `PES_header_position_offset_sign`: the PES packet lies before the
-    /// directory
+    /// `PES_header_position_offset_sign`: `PES_header_position_offset` is a
+    /// negative offset
     pub pes_header_position_offset_sign: bool,
     /// `PES_header_position_offset`: the bytes from the directory's start code
     /// to that of the PES packet holding the first byte of the access unit,
@@ -218,7 +218,13 @@ impl<'input> DirectoryEntryLoop<'input> {
     ///     [DirectoryEntry::new(StreamId::from(0xe0), false, 0, 0, Timestamp::try_from(90_000)?, 1_000)],
     ///     &mut written,
     /// )?;
-    /// assert_eq!(written.len(), 18);
+    /// assert_eq!(
+    ///     written,
+    ///     [
+    ///         0xe0, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xf1, 0x00, 0x05, 0xbf, 0x21,
+    ///         0x00, 0x07, 0xe8, 0x8f,
+    ///     ]
+    /// );
     /// # }
     /// # Ok::<(), Box<dyn core::error::Error>>(())
     /// ```
@@ -278,7 +284,7 @@ impl<'input> DirectoryEntryLoop<'input> {
                     writer.write_bits::<4>(extension & 0x0f)?;
                     writer.finish()
                 })()
-                .map_err(field_error("access_unit"))?;
+                .map_err(field_error("packet_stream_id"))?;
             }
 
             Ok(())
@@ -327,37 +333,41 @@ impl Iterator for DirectoryEntryIter<'_> {
         if self.0.is_empty() {
             return None;
         }
-        let Some((bytes, rest)) = self.0.split_first_chunk::<ENTRY_LENGTH>() else {
-            let remaining_bits = u64::try_from(self.0.len())
-                .unwrap_or(u64::MAX)
-                .saturating_mul(8);
-            self.0 = &[];
-            return Some(Err(Error::Field {
-                field: "access_unit",
-                error: field::Error::Truncated {
-                    required_bits: 144,
-                    remaining_bits,
-                },
-            }));
-        };
-        self.0 = rest;
 
-        let mut reader = FieldReader::new(bytes);
-        // Why not an error per field: the 18 bytes hold every field.
+        let mut reader = FieldReader::new(self.0);
         let entry = (|| {
-            let packet_stream_id = StreamId::from(reader.read_u8::<8>()?);
-            let position = reader.read_marked::<15>()?;
-            let reference_offset = reader.read_u16::<16>()?;
-            reader.read_bits::<1>()?;
-            let extension_msbs = reader.read_u8::<3>()?;
-            let pts = reader.read_marked::<3>()?;
-            let bytes_to_read_msbs = reader.read_u32::<15>()?;
-            reader.read_bits::<1>()?;
-            let bytes_to_read = bytes_to_read_msbs.wrapping_shl(8) | reader.read_u32::<8>()?;
-            reader.read_bits::<1>()?;
-            let intra_coded_indicator = reader.read_bool()?;
-            let coding_parameters_indicator = reader.read_u8::<2>()?;
-            let extension_lsbs = reader.read_u8::<4>()?;
+            let packet_stream_id = reader
+                .read_u8::<8>()
+                .map(StreamId::from)
+                .map_err(field_error("packet_stream_id"))?;
+            let position = reader
+                .read_marked::<15>()
+                .map_err(field_error("PES_header_position_offset"))?;
+            let reference_offset = reader
+                .read_u16::<16>()
+                .and_then(|offset| reader.read_bits::<1>().map(|_| offset))
+                .map_err(field_error("reference_offset"))?;
+            let extension_msbs = reader
+                .read_u8::<3>()
+                .map_err(field_error("packet_stream_id_extension_msbs"))?;
+            let pts = reader.read_marked::<3>().map_err(field_error("PTS"))?;
+            let mut bytes_to_read = || {
+                let msbs = reader.read_u32::<15>()?;
+                reader.read_bits::<1>()?;
+                let lsbs = reader.read_u32::<8>()?;
+                reader.read_bits::<1>()?;
+                Ok(msbs.wrapping_shl(8) | lsbs)
+            };
+            let bytes_to_read = bytes_to_read().map_err(field_error("bytes_to_read"))?;
+            let intra_coded_indicator = reader
+                .read_bool()
+                .map_err(field_error("intra_coded_indicator"))?;
+            let coding_parameters_indicator = reader
+                .read_u8::<2>()
+                .map_err(field_error("coding_parameters_indicator"))?;
+            let extension_lsbs = reader
+                .read_u8::<4>()
+                .map_err(field_error("packet_stream_id_extension_lsbs"))?;
             Ok(DirectoryEntry {
                 packet_stream_id,
                 packet_stream_id_extension: (packet_stream_id == StreamId::EXTENDED_STREAM_ID)
@@ -371,8 +381,15 @@ impl Iterator for DirectoryEntryIter<'_> {
                 coding_parameters_indicator: CodingParametersIndicator(coding_parameters_indicator),
             })
         })();
+        // Why not an error: the entry ends on a byte boundary, or the entry
+        // failed and nothing after it is read.
+        self.0 = reader
+            .read_bytes(reader.remaining_bytes())
+            .ok()
+            .filter(|_| entry.is_ok())
+            .unwrap_or_default();
 
-        Some(entry.map_err(field_error("access_unit")))
+        Some(entry)
     }
 }
 
@@ -433,10 +450,10 @@ pub(super) mod tests {
             [
                 Some(Ok(video_entry())),
                 Some(Err(Error::Field {
-                    field: "access_unit",
+                    field: "PTS",
                     error: field::Error::Truncated {
-                        required_bits: 144,
-                        remaining_bits: 96
+                        required_bits: 15,
+                        remaining_bits: 0
                     }
                 })),
                 None
