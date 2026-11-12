@@ -337,6 +337,7 @@ mod tests {
                     vec![
                         reported.clone(),
                         Seen::Error(Error::SyncByteMissing { found: 0x00 }),
+                        Seen::Unsynchronized(broken.clone()),
                         Seen::Error(Error::SyncLost),
                         Seen::Unsynchronized(broken),
                         Seen::SyncAcquired(PacketSize::Standard188),

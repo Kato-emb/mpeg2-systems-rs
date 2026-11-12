@@ -201,8 +201,9 @@ pub enum Event<'a> {
     },
     /// Input that was not cut into a Transport Packet
     ///
-    /// Reported for the bytes before the grid is found, those the search
-    /// walks past after [`Error::SyncLost`], and those
+    /// Reported for the bytes before the grid is found, those of a packet
+    /// passed over after [`Error::SyncByteMissing`], those the search walks
+    /// past after [`Error::SyncLost`], and those
     /// [`Demuxer::finish`](super::Demuxer::finish) leaves that fill no packet. A long run arrives as several events, so
     /// the bytes the demuxer holds stay bounded. The bytes
     /// of these events and of the packets cut add up to every byte handed to
@@ -222,7 +223,8 @@ pub enum Event<'a> {
 pub enum Error {
     /// One packet on the grid did not start with `sync_byte` 0x47
     ///
-    /// The packet's bytes are passed over and the grid is kept.
+    /// The packet's bytes are passed over, and come next as an
+    /// [`Event::Unsynchronized`]; the grid is kept.
     SyncByteMissing {
         /// The byte found where `sync_byte` was expected
         found: u8,

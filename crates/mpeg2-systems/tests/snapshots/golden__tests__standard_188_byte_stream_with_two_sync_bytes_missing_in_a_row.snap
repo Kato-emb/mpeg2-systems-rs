@@ -9,6 +9,7 @@ expression: events_of(&stream)
     "TsProgramMapSection { pid: Pid(4096), section: TsProgramMapSection { program_number: 1, version_number: VersionNumber(0), current_next_indicator: true, section_number: 0, last_section_number: 0, pcr_pid: Some(Pid(256)), program_info: DescriptorLoop([]), elementary_streams: ElementaryStreamLoop([2, 225, 0, 240, 0, 3, 225, 1, 240, 0]) } }",
     "ProgramClockReference { pid: Pid(256), program_clock_reference: ClockReference { base: 63000, extension: 0 } }",
     "Error(SyncByteMissing { found: 0 })",
+    "Unsynchronized { bytes: 188 bytes [00 01 00 17 9c 04 a1 f7 d1 81 13 fd 93 7e 5a 0d ..] }",
     "Error(SyncLost)",
     "Unsynchronized { bytes: 188 bytes [00 01 00 18 20 b2 8b 40 0e 80 74 59 45 a1 39 d0 ..] }",
     "SyncAcquired { packet_size: Standard188 }",
