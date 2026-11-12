@@ -113,7 +113,7 @@ fn a_pass_over_an_input_allocates_nothing_once_the_buffers_have_grown() {
     allocations.push(("pes packets", ACCESS_UNIT_LENGTH, "ps muxer", counted));
     none.push(("pes packets", ACCESS_UNIT_LENGTH, "ps muxer", 0));
     let mut muxer = registered_program_stream_muxer_of(
-        ps::mux::MuxerConfig::new(25_200).with_header_interval(Duration::ZERO),
+        ps::mux::MuxerConfig::new(25_200, Duration::from_millis(700)).with_header_interval(Duration::ZERO),
     );
     let mut first_dts = 90_000;
     let counted = allocations_once_grown(&ALLOCATOR, || {
@@ -133,7 +133,7 @@ fn a_pass_over_an_input_allocates_nothing_once_the_buffers_have_grown() {
         0,
     ));
     let mut muxer =
-        registered_program_stream_muxer_of(ps::mux::MuxerConfig::new(25_200).with_fixed_rate(true));
+        registered_program_stream_muxer_of(ps::mux::MuxerConfig::new(25_200, Duration::from_millis(700)).with_fixed_rate(true));
     let mut first_dts = 90_000;
     let counted = allocations_once_grown(&ALLOCATOR, || {
         multiplex_program_stream_pes_packets(&mut muxer, &access_unit, first_dts, &mut out);
@@ -177,7 +177,7 @@ fn a_pass_over_an_input_allocates_nothing_once_the_buffers_have_grown() {
     });
     allocations.push(("es_info past the pmt", es_info.len(), "ts muxer", counted));
     none.push(("es_info past the pmt", es_info.len(), "ts muxer", 0));
-    let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
+    let mut muxer = Muxer::new(MuxerConfig::new(Duration::from_millis(700))).unwrap();
     muxer
         .add_program(1, Pid::try_from(0x1000).unwrap())
         .unwrap();
@@ -196,18 +196,18 @@ fn a_pass_over_an_input_allocates_nothing_once_the_buffers_have_grown() {
     for (name, config) in [
         (
             "ps muxer, csps",
-            ps::mux::MuxerConfig::new(3_528).with_pack_size(2_324),
+            ps::mux::MuxerConfig::new(3_528, Duration::from_millis(700)).with_pack_size(2_324),
         ),
         (
             "ps muxer, csps, fixed rate, headers each",
-            ps::mux::MuxerConfig::new(3_528)
+            ps::mux::MuxerConfig::new(3_528, Duration::from_millis(700))
                 .with_pack_size(2_324)
                 .with_fixed_rate(true)
                 .with_header_interval(Duration::ZERO),
         ),
         (
             "ps muxer, csps, fixed rate",
-            ps::mux::MuxerConfig::new(3_528)
+            ps::mux::MuxerConfig::new(3_528, Duration::from_millis(700))
                 .with_pack_size(2_324)
                 .with_fixed_rate(true),
         ),
@@ -221,7 +221,7 @@ fn a_pass_over_an_input_allocates_nothing_once_the_buffers_have_grown() {
         allocations.push(("pes packets", ACCESS_UNIT_LENGTH, name, counted));
         none.push(("pes packets", ACCESS_UNIT_LENGTH, name, 0));
     }
-    let config = ps::mux::MuxerConfig::new(3_528)
+    let config = ps::mux::MuxerConfig::new(3_528, Duration::from_millis(700))
         .with_pack_size(2_324)
         .with_fixed_rate(true);
     let mut muxer = csps_muxer_of(config);

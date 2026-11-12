@@ -30,6 +30,7 @@ mod tools;
 mod tests {
     use std::collections::BTreeMap;
     use std::process::Command;
+    use std::time::Duration;
 
     use mpeg2_systems::pes::{PesPacket, StreamId};
     use mpeg2_systems::psi::pmt::ElementaryStream;
@@ -42,6 +43,9 @@ mod tests {
         ProgramAssociation, ProgramMap, Timing, ffprobe, integer, pes_packet, pes_packets_of_188,
         run, tables_tstables,
     };
+
+    /// The `mux_delay` of the tests, 0.7 s
+    const MUX_DELAY: Duration = Duration::from_millis(700);
 
     const PMT_PID: u16 = 0x1000;
     const VIDEO_PID: u16 = 0x0100;
@@ -111,7 +115,7 @@ mod tests {
     /// An input of `private_stream_2` is given without an optional header.
     fn multiplexed_of(name: &str, streams: &[(u16, StreamType)], inputs: Vec<Input>) -> String {
         let pid = |value: u16| Pid::try_from(value).unwrap();
-        let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
+        let mut muxer = Muxer::new(MuxerConfig::new(MUX_DELAY)).unwrap();
         muxer.add_program(1, pid(PMT_PID)).unwrap();
         for &(stream_pid, stream_type) in streams {
             muxer
@@ -535,7 +539,7 @@ mod tests {
                     .with_transport_private_data(data),
             }
         };
-        let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
+        let mut muxer = Muxer::new(MuxerConfig::new(MUX_DELAY)).unwrap();
         muxer.add_program(1, pid(PMT_PID)).unwrap();
         for (stream_pid, stream_type) in STREAMS {
             muxer

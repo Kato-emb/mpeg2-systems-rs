@@ -65,7 +65,7 @@ use crate::pes::extension::{PStdBuffer, PesExtension};
 use crate::pes::{PesPacket, StreamId};
 use crate::ps::pack_header;
 use crate::ps::psm::ElementaryStream;
-use crate::time::{StreamTime, stream_time};
+use crate::time::{StreamTime, is_mux_delay_allowed, stream_time};
 use csps::Constraints;
 use headers::Headers;
 use input_buffer::InputBuffers;
@@ -174,6 +174,7 @@ pub use pack_writer::PackWriter;
 /// `current_next_indicator` is `'1'`.
 ///
 /// ```
+/// use core::time::Duration;
 /// use mpeg2_systems::pes::extension::PStdBuffer;
 /// use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
 /// use mpeg2_systems::ps::demux::{Demuxer, Event};
@@ -183,7 +184,7 @@ pub use pack_writer::PackWriter;
 /// use mpeg2_systems::time::Timestamp;
 ///
 /// let video = StreamId::from(0xe0);
-/// let mut muxer = Muxer::new(MuxerConfig::new(25_200))?;
+/// let mut muxer = Muxer::new(MuxerConfig::new(25_200, Duration::from_millis(700)))?;
 /// let mut stream = Vec::new();
 ///
 /// // Register the stream, its P-STD buffer 224 KiB
@@ -251,6 +252,8 @@ impl Muxer {
     /// * [`ProgramMuxRate`](Error::ProgramMuxRate):
     ///   [`MuxerConfig::program_mux_rate`] is 0 or does not fit 22 bits
     ///   (§2.5.3.4).
+    /// * [`MuxDelay`](Error::MuxDelay): [`MuxerConfig::mux_delay`] is longer
+    ///   than 1 s (§2.5.2.3).
     /// * [`PackSize`](Error::PackSize): [`MuxerConfig::pack_size`] cannot
     ///   hold a pack header, the shortest PES packet header and a byte of
     ///   payload, or in a CSPS at a fixed rate the shortest pack of one
@@ -260,6 +263,10 @@ impl Muxer {
         let program_mux_rate = config.program_mux_rate;
         if !pack_header::is_program_mux_rate_allowed(program_mux_rate) {
             return Err(Error::ProgramMuxRate { program_mux_rate });
+        }
+        let mux_delay = config.mux_delay;
+        if !is_mux_delay_allowed(mux_delay) {
+            return Err(Error::MuxDelay { mux_delay });
         }
         let pack_size = config.pack_size;
         // Why not refuse a program_mux_rate the shortest pack does not arrive
@@ -746,6 +753,7 @@ impl Muxer {
     ///   (§2.7.9).
     ///
     /// ```
+    /// use core::time::Duration;
     /// use mpeg2_systems::descriptor::DescriptorLoop;
     /// use mpeg2_systems::pes::extension::PStdBuffer;
     /// use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
@@ -756,7 +764,7 @@ impl Muxer {
     /// use mpeg2_systems::time::Timestamp;
     ///
     /// let video = StreamId::from(0xe0);
-    /// let mut muxer = Muxer::new(MuxerConfig::new(25_200))?;
+    /// let mut muxer = Muxer::new(MuxerConfig::new(25_200, Duration::from_millis(700)))?;
     /// let mut stream = Vec::new();
     /// muxer.add_stream(
     ///     ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, video),
@@ -867,6 +875,7 @@ impl Muxer {
     /// [`Audio`]: DecoderBufferBound::Audio
     ///
     /// ```
+    /// use core::time::Duration;
     /// use mpeg2_systems::pes::extension::PStdBuffer;
     /// use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
     /// use mpeg2_systems::ps::mux::{DecoderBufferBound, Error, Muxer, MuxerConfig};
@@ -875,7 +884,7 @@ impl Muxer {
     /// use mpeg2_systems::time::Timestamp;
     ///
     /// let video = StreamId::from(0xe0);
-    /// let mut muxer = Muxer::new(MuxerConfig::new(3_528).with_csps(true))?;
+    /// let mut muxer = Muxer::new(MuxerConfig::new(3_528, Duration::from_millis(700)).with_csps(true))?;
     /// // A VBV of 40 KiB, at 1.15 Mbit/s
     /// muxer.add_stream(
     ///     ElementaryStream::new(StreamType::ISO_IEC_11172_2_VIDEO, video),
@@ -891,7 +900,7 @@ impl Muxer {
     /// muxer.handle_pes_packet(&access_unit)?;
     ///
     /// // A P-STD buffer past the VBV and 6 KiB is refused
-    /// let mut muxer = Muxer::new(MuxerConfig::new(3_528).with_csps(true))?;
+    /// let mut muxer = Muxer::new(MuxerConfig::new(3_528, Duration::from_millis(700)).with_csps(true))?;
     /// muxer.add_stream(
     ///     ElementaryStream::new(StreamType::ISO_IEC_11172_2_VIDEO, video),
     ///     PStdBuffer::new(true, 47),
@@ -990,7 +999,7 @@ mod tests {
     }
 
     fn muxer() -> Muxer {
-        muxer_of(MuxerConfig::new(RATE))
+        muxer_of(MuxerConfig::new(RATE, MUX_DELAY))
     }
 
     /// Whole descriptors of tag 0x80 that come to `length` bytes, which is not 1
@@ -1260,8 +1269,8 @@ mod tests {
         let (video, audio) = ([0xaa; 12_500], [0xbb; 576]);
         let packets = access_units(&video, &audio);
         for config in [
-            MuxerConfig::new(RATE),
-            MuxerConfig::new(RATE).with_fixed_rate(true),
+            MuxerConfig::new(RATE, MUX_DELAY),
+            MuxerConfig::new(RATE, MUX_DELAY).with_fixed_rate(true),
         ] {
             let stream = multiplexed_by(muxer_of(config), &packets);
             let fared = fared(&stream);
@@ -1277,12 +1286,17 @@ mod tests {
         }
     }
 
-    /// The 27 MHz ticks the default `mux_delay` comes to
+    /// The `mux_delay` of the tests
+    const MUX_DELAY: Duration = Duration::from_millis(700);
+
+    /// The 27 MHz ticks `MUX_DELAY` comes to
     const DELAY: u64 = 18_900_000;
 
     #[test]
     fn a_program_mux_rate_of_0_or_past_22_bits_is_refused() {
-        let new = |program_mux_rate| Muxer::new(MuxerConfig::new(program_mux_rate)).map(|_| ());
+        let new = |program_mux_rate| {
+            Muxer::new(MuxerConfig::new(program_mux_rate, MUX_DELAY)).map(|_| ())
+        };
         assert_eq!(
             [0, 1 << 22, (1 << 22) - 1].map(new),
             [
@@ -1298,9 +1312,19 @@ mod tests {
     }
 
     #[test]
+    fn a_mux_delay_is_taken_up_to_1_s() {
+        let taken = |mux_delay| Muxer::new(MuxerConfig::new(RATE, mux_delay)).map(|_| ());
+        let past = Duration::from_secs(1) + Duration::from_nanos(1);
+        assert_eq!(
+            (taken(Duration::from_secs(1)), taken(past)),
+            (Ok(()), Err(Error::MuxDelay { mux_delay: past }))
+        );
+    }
+
+    #[test]
     fn a_pack_size_is_taken_from_the_shortest_pack_up() {
         let new = |pack_size| {
-            let mut config = MuxerConfig::new(RATE);
+            let mut config = MuxerConfig::new(RATE, MUX_DELAY);
             config.pack_size = pack_size;
             Muxer::new(config).map(|_| ())
         };
@@ -1427,7 +1451,7 @@ mod tests {
         let mut extension = PesExtension::new();
         extension.p_std_buffer = Some(PStdBuffer::new(false, 8));
         own.optional_header.as_mut().unwrap().pes_extension = Some(extension);
-        let mut private = Muxer::new(MuxerConfig::new(RATE)).unwrap();
+        let mut private = Muxer::new(MuxerConfig::new(RATE, MUX_DELAY)).unwrap();
         private
             .add_stream(
                 ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, StreamId::from(VIDEO)),
@@ -1543,7 +1567,7 @@ mod tests {
 
     #[test]
     fn a_stream_past_32_audio_or_16_video_streams_is_refused() {
-        let mut muxer = Muxer::new(MuxerConfig::new(RATE)).unwrap();
+        let mut muxer = Muxer::new(MuxerConfig::new(RATE, MUX_DELAY)).unwrap();
         for value in 0xc0..=0xdf {
             muxer
                 .add_stream(
@@ -1582,7 +1606,7 @@ mod tests {
 
     #[test]
     fn a_stream_is_refused_whose_first_pack_would_not_fit_pack_size() {
-        let mut config = MuxerConfig::new(RATE);
+        let mut config = MuxerConfig::new(RATE, MUX_DELAY);
         config.pack_size = 55;
         let mut muxer = Muxer::new(config).unwrap();
         let add = |muxer: &mut Muxer| {
@@ -1604,7 +1628,7 @@ mod tests {
 
     #[test]
     fn a_pes_packet_is_refused_whose_header_and_a_byte_do_not_fit_a_pack() {
-        let mut config = MuxerConfig::new(RATE);
+        let mut config = MuxerConfig::new(RATE, MUX_DELAY);
         config.pack_size = 100;
         let mut muxer = muxer_of(config);
         let mut packet = pes_packet(VIDEO, &[0xaa; 10], Some(90_000));
@@ -1629,7 +1653,7 @@ mod tests {
             packet.optional_header.as_mut().unwrap().pes_extension = Some(pes_extension);
             packet
         };
-        let mut muxer = Muxer::new(MuxerConfig::new(RATE)).unwrap();
+        let mut muxer = Muxer::new(MuxerConfig::new(RATE, MUX_DELAY)).unwrap();
         for extension in [0x55, 0x56] {
             muxer
                 .add_stream(
@@ -1731,7 +1755,7 @@ mod tests {
 
     #[test]
     fn a_first_pes_packet_without_a_time_stamp_is_refused_on_a_stream_without_an_optional_header() {
-        let mut muxer = Muxer::new(MuxerConfig::new(RATE)).unwrap();
+        let mut muxer = Muxer::new(MuxerConfig::new(RATE, MUX_DELAY)).unwrap();
         muxer
             .add_stream(
                 ElementaryStream::new(
@@ -1773,7 +1797,7 @@ mod tests {
             pes_packet(AUDIO, &[0xbb; 300], Some(91_000)),
             pes_packet(VIDEO, &[0xaa; 3_000], Some(93_600)),
         ];
-        let mut config = MuxerConfig::new(RATE);
+        let mut config = MuxerConfig::new(RATE, MUX_DELAY);
         config.buffer_limit = 5_000;
         let mut muxer = muxer_of(config);
         let mut stream = Vec::new();
@@ -1803,8 +1827,7 @@ mod tests {
     #[test]
     fn a_pes_packet_its_input_buffer_cannot_take_in_time_is_refused_and_leaves_the_muxer_as_it_was()
     {
-        let mut config = MuxerConfig::new(RATE);
-        config.mux_delay = Duration::from_millis(5);
+        let config = MuxerConfig::new(RATE, Duration::from_millis(5));
         let packets = [
             pes_packet(VIDEO, &[0xaa; 3_000], Some(90_000)),
             pes_packet(VIDEO, &[0xaa; 3_000], Some(93_600)),
@@ -1843,10 +1866,9 @@ mod tests {
     fn a_pes_packet_that_arrives_in_time_is_taken_though_the_padding_after_it_arrives_later() {
         // 50 000 bytes a second in a CSPS at a fixed rate: the pack of a
         // byte of payload is filled to over 300 bytes, past the PES packet
-        let mut config = MuxerConfig::new(1_000)
+        let config = MuxerConfig::new(1_000, Duration::from_millis(15))
             .with_fixed_rate(true)
             .with_csps(true);
-        config.mux_delay = Duration::from_millis(15);
         let mut muxer = Muxer::new(config).unwrap();
         muxer
             .add_stream(
@@ -1881,7 +1903,7 @@ mod tests {
 
     #[test]
     fn a_buffer_limit_of_0_refuses_every_pes_packet_and_of_usize_max_none() {
-        let mut config = MuxerConfig::new(RATE);
+        let mut config = MuxerConfig::new(RATE, MUX_DELAY);
         config.buffer_limit = 0;
         let refused = muxer_of(config).handle_pes_packet(&pes_packet(VIDEO, &[0xaa], Some(0)));
         config.buffer_limit = usize::MAX;
@@ -1899,7 +1921,7 @@ mod tests {
 
     #[test]
     fn a_leap_too_long_to_fill_within_the_buffer_limit_is_refused_however_much_is_taken() {
-        let mut config = MuxerConfig::new(RATE);
+        let mut config = MuxerConfig::new(RATE, MUX_DELAY);
         config.buffer_limit = 150;
         let mut muxer = muxer_of(config);
         let mut stream = Vec::new();
@@ -1973,8 +1995,7 @@ mod tests {
 
     #[test]
     fn the_scr_is_the_time_less_the_mux_delay_or_after_the_bytes_of_the_pack_before() {
-        let mut config = MuxerConfig::new(RATE);
-        config.mux_delay = Duration::from_millis(1);
+        let config = MuxerConfig::new(RATE, Duration::from_millis(1));
         let stream = multiplexed_by(
             muxer_of(config),
             &[
@@ -2033,7 +2054,7 @@ mod tests {
         muxer.poll_output(&mut first);
         let mut second = Vec::new();
         muxer.poll_output(&mut second);
-        let mut nothing_given = Muxer::new(MuxerConfig::new(RATE)).unwrap();
+        let mut nothing_given = Muxer::new(MuxerConfig::new(RATE, MUX_DELAY)).unwrap();
         nothing_given.finish();
         let mut empty = Vec::new();
         nothing_given.poll_output(&mut empty);
@@ -2077,7 +2098,7 @@ mod tests {
 
     #[test]
     fn a_pes_packet_too_long_for_the_buffer_limit_is_refused_with_the_bytes_of_all_its_packs() {
-        let mut config = MuxerConfig::new(RATE);
+        let mut config = MuxerConfig::new(RATE, MUX_DELAY);
         config.pack_size = 128;
         config.buffer_limit = 128;
         let payload = vec![0xaa; 200_000];
@@ -2098,11 +2119,13 @@ mod tests {
         // 15 of system header + 20 of map with the descriptors + 6 + 1 is 56
         // bytes, and 70 with 14 bytes of descriptors
         let add = |es_info: &[u8]| {
-            Muxer::new(MuxerConfig::new(2)).unwrap().add_stream(
-                ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, StreamId::from(VIDEO))
-                    .with_elementary_stream_info(DescriptorLoop::from(es_info)),
-                VIDEO_BUFFER,
-            )
+            Muxer::new(MuxerConfig::new(2, MUX_DELAY))
+                .unwrap()
+                .add_stream(
+                    ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, StreamId::from(VIDEO))
+                        .with_elementary_stream_info(DescriptorLoop::from(es_info)),
+                    VIDEO_BUFFER,
+                )
         };
         let descriptor = |length: u8| {
             let mut bytes = vec![0x80, length - 2];
@@ -2127,7 +2150,7 @@ mod tests {
             packet
         };
         let registered = || {
-            let mut muxer = Muxer::new(MuxerConfig::new(RATE)).unwrap();
+            let mut muxer = Muxer::new(MuxerConfig::new(RATE, MUX_DELAY)).unwrap();
             muxer
                 .add_stream(
                     ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, StreamId::from(VIDEO)),
@@ -2246,8 +2269,8 @@ mod tests {
         #[test]
         fn at_a_variable_rate_each_pack_waits_for_the_packet_rate_of_equation_2_28() {
             let inputs = audio_every_millisecond();
-            let csps = multiplexed_by(csps_muxer(MuxerConfig::new(VCD_RATE)), &inputs);
-            let not_csps = multiplexed_by(muxer_of(MuxerConfig::new(VCD_RATE)), &inputs);
+            let csps = multiplexed_by(csps_muxer(MuxerConfig::new(VCD_RATE, MUX_DELAY)), &inputs);
+            let not_csps = multiplexed_by(muxer_of(MuxerConfig::new(VCD_RATE, MUX_DELAY)), &inputs);
 
             let met = meets_the_packet_rate(&csps, VCD_RATE);
             assert_eq!(met, vec![true; met.len()]);
@@ -2259,8 +2282,8 @@ mod tests {
         fn a_pack_header_alone_goes_before_the_end_code_where_it_would_come_sooner_than_the_packet_rate()
          {
             let inputs = [pes_packet(AUDIO, &[0xbb; 100], Some(90_000))];
-            let csps = multiplexed_by(csps_muxer(MuxerConfig::new(VCD_RATE)), &inputs);
-            let not_csps = multiplexed_by(muxer_of(MuxerConfig::new(VCD_RATE)), &inputs);
+            let csps = multiplexed_by(csps_muxer(MuxerConfig::new(VCD_RATE, MUX_DELAY)), &inputs);
+            let not_csps = multiplexed_by(muxer_of(MuxerConfig::new(VCD_RATE, MUX_DELAY)), &inputs);
             let tail = |stream: &[u8]| -> Vec<bool> {
                 elements(stream)
                     .into_iter()
@@ -2293,7 +2316,7 @@ mod tests {
         }
 
         fn vcd() -> MuxerConfig {
-            MuxerConfig::new(VCD_RATE)
+            MuxerConfig::new(VCD_RATE, MUX_DELAY)
                 .with_pack_size(VCD_PACK_SIZE)
                 .with_fixed_rate(true)
         }
@@ -2376,8 +2399,8 @@ mod tests {
         #[test]
         fn the_system_header_of_a_csps_has_csps_flag_set_and_packet_rate_restriction_flag_clear() {
             let inputs = [pes_packet(VIDEO, &[0xaa; 100], Some(90_000))];
-            let csps = multiplexed_by(csps_muxer(MuxerConfig::new(VCD_RATE)), &inputs);
-            let not_csps = multiplexed_by(muxer_of(MuxerConfig::new(VCD_RATE)), &inputs);
+            let csps = multiplexed_by(csps_muxer(MuxerConfig::new(VCD_RATE, MUX_DELAY)), &inputs);
+            let not_csps = multiplexed_by(muxer_of(MuxerConfig::new(VCD_RATE, MUX_DELAY)), &inputs);
             let system_header =
                 |stream| SystemHeader::read(carried(stream)[0].system_header.unwrap()).unwrap();
 
@@ -2395,7 +2418,7 @@ mod tests {
             // packet of padding to 2 084 bytes
             let new = |pack_size| {
                 Muxer::new(
-                    MuxerConfig::new(RATE)
+                    MuxerConfig::new(RATE, MUX_DELAY)
                         .with_pack_size(pack_size)
                         .with_fixed_rate(true)
                         .with_csps(true),
@@ -2413,7 +2436,7 @@ mod tests {
             );
             assert!(
                 Muxer::new(
-                    MuxerConfig::new(RATE)
+                    MuxerConfig::new(RATE, MUX_DELAY)
                         .with_pack_size(2_048)
                         .with_fixed_rate(true)
                 )
@@ -2431,7 +2454,8 @@ mod tests {
             declared: Option<DecoderBufferBound>,
             carried: Option<PStdBuffer>,
         ) -> Result<(), Error> {
-            let mut muxer = Muxer::new(MuxerConfig::new(VCD_RATE).with_csps(true)).unwrap();
+            let mut muxer =
+                Muxer::new(MuxerConfig::new(VCD_RATE, MUX_DELAY).with_csps(true)).unwrap();
             let stream_id = StreamId::from(stream_id);
             muxer
                 .add_stream(ElementaryStream::new(stream_type, stream_id), registered)
@@ -2533,7 +2557,7 @@ mod tests {
 
         #[test]
         fn outside_a_csps_the_p_std_buffer_is_not_bounded_by_its_stream() {
-            let mut muxer = Muxer::new(MuxerConfig::new(VCD_RATE)).unwrap();
+            let mut muxer = Muxer::new(MuxerConfig::new(VCD_RATE, MUX_DELAY)).unwrap();
             muxer
                 .add_stream(
                     ElementaryStream::new(StreamType::ISO_IEC_11172_3_AUDIO, StreamId::from(AUDIO)),
@@ -2563,7 +2587,8 @@ mod tests {
         #[test]
         fn a_bound_declared_is_taken_where_the_stream_may_have_it() {
             let declare = |stream_type: StreamType, bound| {
-                let mut muxer = Muxer::new(MuxerConfig::new(VCD_RATE).with_csps(true)).unwrap();
+                let mut muxer =
+                    Muxer::new(MuxerConfig::new(VCD_RATE, MUX_DELAY).with_csps(true)).unwrap();
                 muxer
                     .add_stream(
                         ElementaryStream::new(stream_type, StreamId::from(VIDEO)),
@@ -2601,8 +2626,8 @@ mod tests {
 
         #[test]
         fn a_stream_type_the_bound_declared_for_the_stream_does_not_fit_is_refused() {
-            let mut declared = csps_muxer(MuxerConfig::new(VCD_RATE));
-            let mut undeclared = muxer_of(MuxerConfig::new(VCD_RATE).with_csps(true));
+            let mut declared = csps_muxer(MuxerConfig::new(VCD_RATE, MUX_DELAY));
+            let mut undeclared = muxer_of(MuxerConfig::new(VCD_RATE, MUX_DELAY).with_csps(true));
             let avc = ElementaryStream::new(StreamType::AVC_VIDEO, StreamId::from(VIDEO));
 
             assert_eq!(
@@ -2704,7 +2729,7 @@ mod tests {
         }
 
         fn fixed_rate() -> MuxerConfig {
-            MuxerConfig::new(RATE).with_fixed_rate(true)
+            MuxerConfig::new(RATE, MUX_DELAY).with_fixed_rate(true)
         }
 
         /// PES packets of video and audio over 3 s, one split over packs, with a
@@ -2972,7 +2997,7 @@ mod tests {
         fn the_headers_go_again_in_the_first_pack_header_interval_or_more_after_the_last() {
             let at_interval = |interval: Duration| {
                 multiplexed_by(
-                    muxer_of(MuxerConfig::new(RATE).with_header_interval(interval)),
+                    muxer_of(MuxerConfig::new(RATE, MUX_DELAY).with_header_interval(interval)),
                     &every_half_second(),
                 )
             };
@@ -3008,7 +3033,7 @@ mod tests {
                 pes_packet(AUDIO, &[0xbb; 100], Some(3 * HALF_SECOND)),
             ];
             let stream = multiplexed_by(
-                muxer_of(MuxerConfig::new(RATE).with_header_interval(Duration::ZERO)),
+                muxer_of(MuxerConfig::new(RATE, MUX_DELAY).with_header_interval(Duration::ZERO)),
                 &packets,
             );
 
@@ -3292,7 +3317,7 @@ mod tests {
             ];
             // 14 of pack header, 18 of system header, 24 of map, 6 of PES packet
             // header and a byte of payload
-            let mut tight = muxer_of(MuxerConfig::new(RATE).with_pack_size(63));
+            let mut tight = muxer_of(MuxerConfig::new(RATE, MUX_DELAY).with_pack_size(63));
             let info = descriptors(2);
             let past_pack_size = [
                 tight.update_stream(avc_video(&info)),
@@ -3320,7 +3345,7 @@ mod tests {
             // The first pack: 14 + 18 + 24 + 6 + 3 + 5 of PTS + 3 of P-STD buffer
             // and a byte of payload. One with a PTS and a DTS takes 14 + 6 + 3 + 10
             // and a byte alone, 18 + 24 more with the headers
-            let config = MuxerConfig::new(RATE).with_pack_size(74);
+            let config = MuxerConfig::new(RATE, MUX_DELAY).with_pack_size(74);
             let mut with_dts = pes_packet(VIDEO, &[0xaa], Some(3_600));
             with_dts.optional_header.as_mut().unwrap().dts = Some(timestamp(3_000));
             let first = pes_packet(VIDEO, &[0xaa], Some(0));

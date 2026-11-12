@@ -11,6 +11,7 @@
 )]
 mod tests {
     use std::collections::BTreeMap;
+    use std::time::Duration;
 
     use mpeg2_systems::pes::extension::PStdBuffer;
     use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
@@ -21,18 +22,21 @@ mod tests {
     use mpeg2_systems::stream_type::StreamType;
     use mpeg2_systems::time::{ClockReference, Timestamp};
 
+    /// The `mux_delay` of the tests, 0.7 s
+    const MUX_DELAY: Duration = Duration::from_millis(700);
+
     const VIDEO: u8 = 0xe0;
     const AUDIO: u8 = 0xc0;
     const VIDEO_BUFFER: PStdBuffer = PStdBuffer::new(true, 224);
-    /// 16 KiB, room for the audio the default `mux_delay` sends ahead, so
+    /// 16 KiB, room for the audio `MUX_DELAY` sends ahead, so
     /// that the SCRs follow the time stamps and the bytes alone
     const AUDIO_BUFFER: PStdBuffer = PStdBuffer::new(false, 128);
 
     /// 1 260 000 bytes a second
     const RATE: u32 = 25_200;
 
-    /// The 27 MHz ticks of the default `mux_delay`, 0.7 s
-    const MUX_DELAY: u64 = 18_900_000;
+    /// The 27 MHz ticks of `MUX_DELAY`
+    const MUX_DELAY_TICKS: u64 = 18_900_000;
 
     /// The 27 MHz ticks of 0.7 s, the longest ISO/IEC 13818-1 §2.7.1 allows
     /// from one SCR to the next
@@ -216,7 +220,7 @@ mod tests {
     fn the_pes_packets_given_read_back_as_given_with_the_p_std_buffer_on_the_first_of_each_stream()
     {
         let inputs = inputs();
-        let stream = multiplex(MuxerConfig::new(RATE), &inputs);
+        let stream = multiplex(MuxerConfig::new(RATE, MUX_DELAY), &inputs);
 
         let mut demuxer = Demuxer::new();
         demuxer.handle_input(&stream);
@@ -264,7 +268,7 @@ mod tests {
 
     #[test]
     fn every_pack_fits_pack_size_and_only_the_first_has_the_system_header_and_the_map() {
-        let (packs, ended) = packs(&multiplex(MuxerConfig::new(RATE), &inputs()));
+        let (packs, ended) = packs(&multiplex(MuxerConfig::new(RATE, MUX_DELAY), &inputs()));
 
         let headers: Vec<(usize, Vec<u8>)> = packs
             .iter()
@@ -280,11 +284,13 @@ mod tests {
 
     #[test]
     fn each_scr_is_the_dts_less_the_mux_delay_or_the_one_before_on_by_the_bytes_of_its_pack() {
-        let (packs, _) = packs(&multiplex(MuxerConfig::new(RATE), &inputs()));
+        let (packs, _) = packs(&multiplex(MuxerConfig::new(RATE, MUX_DELAY), &inputs()));
 
         let mut expected: Vec<u64> = Vec::new();
         for (index, pack) in packs.iter().enumerate() {
-            let due = pack.timestamp.map(|timestamp| timestamp * 300 - MUX_DELAY);
+            let due = pack
+                .timestamp
+                .map(|timestamp| timestamp * 300 - MUX_DELAY_TICKS);
             let scr = match index.checked_sub(1).map(|before| &packs[before]) {
                 None => due.unwrap(),
                 Some(before) => {
@@ -300,14 +306,17 @@ mod tests {
 
     #[test]
     fn time_stamps_from_below_the_mux_delay_keep_the_scrs_within_0_7_s() {
-        let (packs, _) = packs(&multiplex(MuxerConfig::new(RATE), &stepped(0, 0)));
+        let (packs, _) = packs(&multiplex(
+            MuxerConfig::new(RATE, MUX_DELAY),
+            &stepped(0, 0),
+        ));
         assert!(scr_steps(&packs, RATE).0);
     }
 
     #[test]
     fn time_stamps_across_the_wrap_of_33_bits_keep_the_scrs_within_0_7_s() {
         let (packs, _) = packs(&multiplex(
-            MuxerConfig::new(RATE),
+            MuxerConfig::new(RATE, MUX_DELAY),
             &stepped(Timestamp::MODULUS - 50 * 1_800, 0),
         ));
         assert!(scr_steps(&packs, RATE).0);
@@ -316,7 +325,7 @@ mod tests {
     #[test]
     fn a_leap_of_the_time_stamps_keeps_the_scrs_within_0_7_s() {
         let (packs, _) = packs(&multiplex(
-            MuxerConfig::new(RATE),
+            MuxerConfig::new(RATE, MUX_DELAY),
             &stepped(90_000, 180_000),
         ));
         let (kept, _) = scr_steps(&packs, RATE);
@@ -328,41 +337,40 @@ mod tests {
 
     #[test]
     fn a_leap_at_the_longest_pack_size_for_the_rate_keeps_the_scrs_within_0_7_s() {
-        // 5 000 bytes a second, and packs of 3 500 bytes, which take 0.7 s;
-        // the two full packs arrive within the 2 s before their DTS
-        let mut config = MuxerConfig::new(100);
+        // 5 000 bytes a second, and packs of 3 500 bytes, which take 0.7 s
+        // and arrive within the 1 s before their DTS
+        let mut config = MuxerConfig::new(100, Duration::from_secs(1));
         config.pack_size = 3_500;
-        config.mux_delay = core::time::Duration::from_secs(2);
         let mut inputs = stepped(90_000, 900_000);
         for input in &mut inputs {
             input.payload.truncate(10);
         }
-        // The last before the leap in two full packs: 14 + 19 of header and
-        // 3 467 bytes, then 14 + 9 and 3 477
-        inputs[49].payload = vec![0xbb; 3_467 + 3_477];
+        // The last before the leap in a full pack: 14 + 19 of header and
+        // 3 467 bytes
+        inputs[49].payload = vec![0xbb; 3_467];
         let (packs, _) = packs(&multiplex(config, &inputs));
         let (kept, longest) = scr_steps(&packs, 100);
         let lengths: Vec<usize> = packs.iter().map(|pack| pack.length).collect();
         let full = lengths.iter().rposition(|&length| length == 3_500).unwrap();
         assert_eq!(
-            (kept, longest, &lengths[full - 1..=full + 1]),
-            (true, LONGEST_SCR_INTERVAL, &[3_500, 3_500, 14][..])
+            (kept, longest, &lengths[full..=full + 1]),
+            (true, LONGEST_SCR_INTERVAL, &[3_500, 14][..])
         );
     }
 
     #[test]
     fn at_a_low_rate_every_pack_arrives_within_0_7_s_whatever_pack_size() {
         // 500 bytes a second: 350 bytes arrive in 0.7 s, less than the
-        // default pack_size of 2048. 1 000 bytes of video take some 2.2 s
-        // with their headers, within the 3 s before their DTS.
-        let mut config = MuxerConfig::new(10);
-        config.mux_delay = core::time::Duration::from_secs(3);
+        // default pack_size of 2048. 300 bytes of video, more than the first
+        // pack holds, take some 0.8 s with their headers, within the 1 s
+        // before their DTS.
+        let config = MuxerConfig::new(10, Duration::from_secs(1));
         let inputs = [
             Input {
                 stream_id: VIDEO,
                 pts: 360_000,
                 dts: Some(360_000),
-                payload: vec![0xaa; 1_000],
+                payload: vec![0xaa; 300],
             },
             Input {
                 stream_id: AUDIO,
@@ -406,7 +414,7 @@ mod tests {
         // 150 bytes a second: the lowest rate whose 0.7 s carries the first
         // pack of the two streams and a PES packet with its PTS and DTS
         let (packs, _) = packs(&multiplex(
-            MuxerConfig::new(3),
+            MuxerConfig::new(3, MUX_DELAY),
             &sparse([900_000, 90_000 * 3_500]),
         ));
         let (kept, longest) = scr_steps(&packs, 3);
@@ -428,7 +436,7 @@ mod tests {
     #[test]
     fn a_leap_across_the_wrap_of_33_bits_keeps_the_scrs_within_0_7_s() {
         let (packs, _) = packs(&multiplex(
-            MuxerConfig::new(RATE),
+            MuxerConfig::new(RATE, MUX_DELAY),
             &stepped(Timestamp::MODULUS - 50 * 1_800, 180_000),
         ));
         assert!(scr_steps(&packs, RATE).0);
@@ -438,8 +446,8 @@ mod tests {
     fn the_same_input_gives_the_same_stream() {
         let inputs = stepped(Timestamp::MODULUS - 50 * 1_800, 180_000);
         assert_eq!(
-            multiplex(MuxerConfig::new(RATE), &inputs),
-            multiplex(MuxerConfig::new(RATE), &inputs)
+            multiplex(MuxerConfig::new(RATE, MUX_DELAY), &inputs),
+            multiplex(MuxerConfig::new(RATE, MUX_DELAY), &inputs)
         );
     }
 }

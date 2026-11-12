@@ -58,6 +58,7 @@ caller gives the access units it has, from an encoder or another demuxer, in
 the order of their time across the streams.
 
 ```rust
+use core::time::Duration;
 use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
 use mpeg2_systems::psi::pmt::ElementaryStream;
 use mpeg2_systems::stream_type::StreamType;
@@ -65,7 +66,7 @@ use mpeg2_systems::time::Timestamp;
 use mpeg2_systems::ts::{Pid, mux::{Muxer, MuxerConfig}};
 
 let (video, audio) = (Pid::try_from(0x0100)?, Pid::try_from(0x0101)?);
-let mut muxer = Muxer::new(MuxerConfig::new())?;
+let mut muxer = Muxer::new(MuxerConfig::new(Duration::from_millis(700)))?;
 muxer.add_program(1, Pid::try_from(0x1000)?)?;
 muxer.add_stream(1, ElementaryStream::new(StreamType::AVC_VIDEO, video))?;
 muxer.add_stream(1, ElementaryStream::new(StreamType::ISO_IEC_13818_7_AUDIO, audio))?;

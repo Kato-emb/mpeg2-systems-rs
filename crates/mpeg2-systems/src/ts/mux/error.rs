@@ -83,6 +83,12 @@ pub enum Error {
         /// The `pcr_interval` set
         pcr_interval: Duration,
     },
+    /// The `mux_delay` set is longer than the 1 s a byte may wait in the
+    /// T-STD before it is decoded (ISO/IEC 13818-1 §2.4.2.6)
+    MuxDelay {
+        /// The `mux_delay` set
+        mux_delay: Duration,
+    },
     /// The first PES packet supplied for a stream that carries the optional
     /// header has no PTS, which this muxer requires to initialize the
     /// stream's timeline, or the first PES packet supplied to the muxer has
@@ -182,6 +188,9 @@ impl fmt::Display for Error {
                 formatter,
                 "pcr_interval {pcr_interval:?} is outside one tick of the system clock to 0.1 s"
             ),
+            Self::MuxDelay { mux_delay } => {
+                write!(formatter, "mux_delay {mux_delay:?} is longer than 1 s")
+            }
             Self::MissingPts { pid } => write!(
                 formatter,
                 "the first PES packet on PID {:#06x} has no PTS",
@@ -239,6 +248,7 @@ impl core::error::Error for Error {
             | Self::PidInUse { .. }
             | Self::UnregisteredPid { .. }
             | Self::PcrInterval { .. }
+            | Self::MuxDelay { .. }
             | Self::MissingPts { .. }
             | Self::DecreasingTimestamp { .. }
             | Self::TimestampGap { .. }

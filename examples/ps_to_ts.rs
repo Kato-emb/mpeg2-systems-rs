@@ -20,7 +20,8 @@
 //! streams, is registered; their PES packets are left out, and how many is
 //! printed at the end. The streams take PIDs from 0x0100 in the order they
 //! are registered, in program 1 with its PMT on PID 0x1000, and the muxer
-//! chooses the PCR PID.
+//! chooses the PCR PID. Each PES packet goes out at most 0.7 s before its
+//! DTS.
 //!
 //! The PES packets go to the muxer in the order of the packs; they are not
 //! sorted into the order of their DTS across the streams.
@@ -29,6 +30,7 @@ use std::env;
 use std::error::Error;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::time::Duration;
 
 use mpeg2_systems::pes::StreamId;
 use mpeg2_systems::ps::demux::{Demuxer, Event};
@@ -63,7 +65,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// `writer`, and returns how many PES packets it left out
 fn convert(mut reader: impl BufRead, mut writer: impl Write) -> Result<usize, Box<dyn Error>> {
     let mut demuxer = Demuxer::new();
-    let mut muxer = Muxer::new(MuxerConfig::new())?;
+    let mut muxer = Muxer::new(MuxerConfig::new(Duration::from_millis(700)))?;
     let mut mapped: Option<Vec<(StreamId, StreamType)>> = None;
     let mut bounded: Option<Vec<(StreamId, StreamType)>> = None;
     let mut registered = false;
