@@ -212,7 +212,7 @@ impl<'input> ProgramAssociationSection<'input> {
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
-        super::LONG_SECTION_OVERHEAD.saturating_add(self.programs.0.len())
+        section::LONG_SECTION_OVERHEAD.saturating_add(self.programs.0.len())
     }
 
     /// Appends the section to `out`, with its `CRC_32`
@@ -233,7 +233,7 @@ impl<'input> ProgramAssociationSection<'input> {
     ///   `last_section_number`.
     #[cfg(feature = "alloc")]
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
-        super::check_section_length(TableId::PROGRAM_ASSOCIATION, self.encoded_len())?;
+        section::check_encoded_len(TableId::PROGRAM_ASSOCIATION, self.encoded_len())?;
         let mut entries = self.programs.iter();
         while let Some(program) = entries.next() {
             let program = program?.check()?;
@@ -254,7 +254,7 @@ impl<'input> ProgramAssociationSection<'input> {
     /// Appends the bytes of the program loop to `body`, for a section
     /// [`write`](Self::write) accepts
     #[cfg(feature = "alloc")]
-    pub(crate) fn write_body(&self, body: &mut Vec<u8>) -> Result<(), Error> {
+    fn write_body(&self, body: &mut Vec<u8>) -> Result<(), Error> {
         program::write_entries(self.programs, body)
     }
 

@@ -181,7 +181,7 @@ impl<'input> CaSection<'input> {
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
-        super::LONG_SECTION_OVERHEAD.saturating_add(self.descriptors.0.len())
+        section::LONG_SECTION_OVERHEAD.saturating_add(self.descriptors.0.len())
     }
 
     /// Appends the section to `out`, with its `CRC_32`
@@ -199,7 +199,7 @@ impl<'input> CaSection<'input> {
     ///   [`RawDescriptor::write`](crate::descriptor::RawDescriptor::write).
     #[cfg(feature = "alloc")]
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
-        super::check_section_length(TableId::CONDITIONAL_ACCESS, self.encoded_len())?;
+        section::check_encoded_len(TableId::CONDITIONAL_ACCESS, self.encoded_len())?;
         let mut body = Vec::with_capacity(self.descriptors.0.len());
         DescriptorLoop::write_entries(self.descriptors, &mut body)?;
 

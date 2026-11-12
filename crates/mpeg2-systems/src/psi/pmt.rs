@@ -325,7 +325,7 @@ impl<'input> TsProgramMapSection<'input> {
 
         let mut body = Vec::with_capacity(
             self.encoded_len()
-                .saturating_sub(super::LONG_SECTION_OVERHEAD),
+                .saturating_sub(section::LONG_SECTION_OVERHEAD),
         );
         self.write_body(&mut body)?;
         Ok(self.section(&body).write(out)?)
@@ -335,7 +335,7 @@ impl<'input> TsProgramMapSection<'input> {
     /// elementary stream loop to `body`, for a section
     /// [`write`](Self::write) accepts
     #[cfg(feature = "alloc")]
-    pub(crate) fn write_body(&self, body: &mut Vec<u8>) -> Result<(), Error> {
+    fn write_body(&self, body: &mut Vec<u8>) -> Result<(), Error> {
         Self::write_body_with(self.pcr_pid, self.program_info, body, |body| {
             elementary_stream::write_entries(self.elementary_streams, body)
         })
@@ -390,7 +390,7 @@ impl<'input> TsProgramMapSection<'input> {
 /// `program_info_length` bytes and whose elementary stream loop takes
 /// `loop_length`
 const fn encoded_len(program_info_length: usize, loop_length: usize) -> usize {
-    super::LONG_SECTION_OVERHEAD
+    section::LONG_SECTION_OVERHEAD
         .saturating_add(PROGRAM_HEADER_LENGTH)
         .saturating_add(program_info_length)
         .saturating_add(loop_length)
@@ -418,7 +418,7 @@ pub(crate) fn check_lengths<'stream>(
 /// than 1021
 #[cfg(feature = "alloc")]
 fn check_encoded_len(encoded_len: usize) -> Result<(), Error> {
-    Ok(super::check_section_length(
+    Ok(section::check_encoded_len(
         TableId::TS_PROGRAM_MAP,
         encoded_len,
     )?)
