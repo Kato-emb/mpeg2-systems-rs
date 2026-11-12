@@ -1,5 +1,5 @@
-//! Search for the packet grid: the `sync_byte` cadence and the packet size it
-//! implies
+//! The packet grid: the search for the `sync_byte` cadence and the packet
+//! size it implies, and the units on the grid once found
 
 use crate::ts::packet::{PACKET_LENGTH, SYNC_BYTE};
 
@@ -153,6 +153,34 @@ fn check_grid(bytes: &[u8], packet_size: PacketSize) -> GridCheck {
         GridCheck::NeedMoreData
     } else {
         GridCheck::Confirmed
+    }
+}
+
+/// What the unit at the front of the bytes holds on the locked grid
+pub(super) enum FrameObservation {
+    OnGrid,
+    SyncByteMissing {
+        found: u8,
+    },
+    /// Fewer bytes than a unit, but a packet on the grid without the carrier
+    /// bytes after it
+    PacketWithoutCarrier,
+    /// Fewer bytes than a unit, and no packet on the grid among them
+    Short,
+}
+
+/// Classifies the unit at the front of `bytes` against the locked grid
+pub(super) fn observe_on_grid(bytes: &[u8], packet_size: PacketSize) -> FrameObservation {
+    let prefix = packet_size.prefix();
+    match (bytes.get(prefix), bytes.len()) {
+        (Some(&SYNC_BYTE), length) if length >= packet_size.stride() => FrameObservation::OnGrid,
+        (Some(&found), length) if length >= packet_size.stride() => {
+            FrameObservation::SyncByteMissing { found }
+        }
+        (Some(&SYNC_BYTE), length) if length >= prefix.saturating_add(PACKET_LENGTH) => {
+            FrameObservation::PacketWithoutCarrier
+        }
+        _ => FrameObservation::Short,
     }
 }
 

@@ -8,11 +8,11 @@
 use core::ops::Range;
 
 use crate::framing::{Buffer, Decoder, Skipped};
-use crate::ts::packet::{PACKET_LENGTH, SYNC_BYTE};
+use crate::ts::packet::PACKET_LENGTH;
 
 pub(super) mod sync;
 
-use sync::{PacketSize, SearchObservation};
+use sync::{FrameObservation, PacketSize, SearchObservation};
 
 // ETSI TR 101 290: declare loss after two consecutive missing sync bytes.
 const SYNC_LOSS_COUNT: u8 = 2;
@@ -31,20 +31,6 @@ enum State {
         packet_size: PacketSize,
         consecutive_misses: u8,
     },
-}
-
-/// What the framer saw in the unit at the front of the buffer on the locked
-/// grid
-enum FrameObservation {
-    OnGrid,
-    SyncByteMissing {
-        found: u8,
-    },
-    /// Fewer bytes than a unit, but a packet on the grid without the carrier
-    /// bytes after it
-    PacketWithoutCarrier,
-    /// Fewer bytes than a unit, and no packet on the grid among them
-    Short,
 }
 
 /// A unit [`TransportPackets`] cut
@@ -199,7 +185,7 @@ impl TransportPackets {
             State::Synced {
                 packet_size,
                 consecutive_misses,
-            } => match (observe(rest, packet_size), eof) {
+            } => match (sync::observe_on_grid(rest, packet_size), eof) {
                 (FrameObservation::OnGrid, _) => (
                     State::Synced {
                         packet_size,
@@ -296,21 +282,6 @@ impl Decoder for TransportPackets {
 
     fn decode_eof(&mut self, buffer: &mut Buffer) -> Option<Output> {
         self.cut(buffer, true)
-    }
-}
-
-/// Classifies the unit at the front of `bytes` against the locked grid
-fn observe(bytes: &[u8], packet_size: PacketSize) -> FrameObservation {
-    let prefix = packet_size.prefix();
-    match (bytes.get(prefix), bytes.len()) {
-        (Some(&SYNC_BYTE), length) if length >= packet_size.stride() => FrameObservation::OnGrid,
-        (Some(&found), length) if length >= packet_size.stride() => {
-            FrameObservation::SyncByteMissing { found }
-        }
-        (Some(&SYNC_BYTE), length) if length >= prefix.saturating_add(PACKET_LENGTH) => {
-            FrameObservation::PacketWithoutCarrier
-        }
-        _ => FrameObservation::Short,
     }
 }
 

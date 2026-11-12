@@ -6,6 +6,7 @@ use super::sync::tests::grid;
 use super::*;
 use crate::framing::tests::{Reported, check};
 use crate::framing::{Framer, Next};
+use crate::ts::packet::SYNC_BYTE;
 
 const STANDARD_188: &[u8] = include_bytes!("../../../../tests/fixtures/188.ts");
 const TIMESTAMPED_192: &[u8] = include_bytes!("../../../../tests/fixtures/192.ts");
