@@ -68,6 +68,7 @@ use crate::ps::psm::ElementaryStream;
 use crate::time::{StreamTime, stream_time};
 use csps::Constraints;
 use headers::Headers;
+use input_buffer::InputBuffers;
 use pack_writer::PesPacketPieces;
 use schedule::{Gap, Pack, PlannedPack, Rate};
 use stream_definition::{StreamDefinition, SystemHeaderFields};
@@ -76,6 +77,7 @@ mod config;
 mod csps;
 mod error;
 mod headers;
+mod input_buffer;
 mod pack_writer;
 mod schedule;
 mod stream_definition;
@@ -130,11 +132,24 @@ pub use pack_writer::PackWriter;
 /// - The time of the stream is the DTS of each PES packet (its PTS when it
 ///   has none), held from going back, and counted on past the wrap of the
 ///   33 bits; a PES packet without either does not move it. The SCR of a
-///   pack is the later of the time of its PES packet, less
-///   [`MuxerConfig::mux_delay`], and the SCR of the pack before plus the
-///   time its bytes take to arrive at `program_mux_rate` (§2.5.2.2 equation
-///   2-21), rounded up to a tick of the 27 MHz system clock. A pack that
-///   carries the rest of a split PES packet takes the latter.
+///   pack is the latest of the time of its PES packet, less
+///   [`MuxerConfig::mux_delay`], the SCR of the pack before plus the time
+///   its bytes take to arrive at `program_mux_rate` (§2.5.2.2 equation
+///   2-21), rounded up to a tick of the 27 MHz system clock, and the time
+///   from which every byte of the PES packet's payload finds room in the
+///   input buffer of its stream in the P-STD. A pack that carries the rest
+///   of a split PES packet takes the second.
+/// - The input buffer of each stream in the P-STD (§2.5.2.3) neither
+///   overflows nor underflows. Its size `BSn` is the P-STD buffer size
+///   registered, or the one the last PES packet of the stream that carries
+///   one gave. Only the payload of a PES packet enters it. As the muxer does
+///   not read the elementary streams, it takes the payload of a PES packet
+///   to leave at the time of the packet, and that of a PES packet without a
+///   time stamp to leave with the next PES packet of its stream that has
+///   one. A PES packet whose payload, with the payload held until its time,
+///   would not fit the buffer, or would not arrive in full by its time, is
+///   refused. The streams whose `stream_id` carries no optional header have
+///   no time stamps, and are not held to their buffers.
 /// - A leap of the time stamps is filled with packs of a pack header alone,
 ///   so that consecutive SCRs are never more than 0.7 s apart (§2.7.1).
 /// - At a [`MuxerConfig::fixed_rate`], the SCR of each pack is on the line
@@ -145,8 +160,9 @@ pub use pack_writer::PackWriter;
 ///   faster than §2.7.9 allows, and the P-STD buffer size of each stream is
 ///   within its bound ([`set_decoder_buffer_bound`](Self::set_decoder_buffer_bound)).
 ///
-/// The muxer does not guarantee that the stream fits the buffers of the
-/// P-STD.
+/// The muxer does not tell an access unit that may underflow its buffer,
+/// as a video stream with `low_delay` set or in trick mode may (§2.5.2.3),
+/// from one that may not; it refuses both.
 /// It writes padding and pack stuffing only at a fixed rate.
 /// It does not read the elementary streams for the bounds of a CSPS; the
 /// caller declares those their `stream_id` and `stream_type` do not say.
@@ -207,6 +223,7 @@ pub struct Muxer {
     headers: Headers,
     /// The last pack written, `None` before the first PES packet
     last_pack: Option<Pack>,
+    input_buffers: InputBuffers,
     /// The packs [`poll_output`](Self::poll_output) gives next
     // Why not write into the caller's buffer on input: only
     // `handle_pes_packet` can fail, and an input refused must leave nothing.
@@ -255,6 +272,7 @@ impl Muxer {
             definition: StreamDefinition::new(),
             headers: Headers::new(),
             last_pack: None,
+            input_buffers: InputBuffers::new(),
             pending: Vec::new(),
             end: End::Open,
         };
@@ -357,6 +375,13 @@ impl Muxer {
     ///   since the PES packet before, or at a fixed rate the packs of padding
     ///   before it, do not fit
     ///   [`MuxerConfig::buffer_limit`], however much `poll_output` takes.
+    /// * [`PStdBufferOverflow`](Error::PStdBufferOverflow): the payload of
+    ///   the packet, with that of the packets before it on its stream that
+    ///   have no time stamp, is more than the input buffer of the stream in
+    ///   the P-STD holds (§2.5.2.3).
+    /// * [`PStdBufferUnderflow`](Error::PStdBufferUnderflow): the packet
+    ///   could not arrive in full by its DTS, or its PTS without one, after
+    ///   the packs before it and once its input buffer has room (§2.5.2.3).
     /// * [`BufferFull`](Error::BufferFull): the packs would grow the output
     ///   held past [`MuxerConfig::buffer_limit`]; once `poll_output` has
     ///   taken it, the same input may be given again.
@@ -415,13 +440,11 @@ impl Muxer {
                 });
             }
         };
-        let registered_p_std_buffer = stream.p_std_buffer_to_add(
-            header
-                .and_then(|header| header.pes_extension.as_ref())
-                .and_then(|extension| extension.p_std_buffer),
-            header.is_some(),
-            self.constraints(),
-        )?;
+        let given_p_std_buffer = header
+            .and_then(|header| header.pes_extension.as_ref())
+            .and_then(|extension| extension.p_std_buffer);
+        let registered_p_std_buffer =
+            stream.p_std_buffer_to_add(given_p_std_buffer, header.is_some(), self.constraints())?;
         let with_p_std_buffer;
         let packet = match (header, registered_p_std_buffer) {
             (Some(header), Some(p_std_buffer)) => {
@@ -447,10 +470,24 @@ impl Muxer {
             headers,
             last_pack,
             pending,
+            input_buffers,
             ..
         } = self;
         let program_mux_rate = config.program_mux_rate;
-        let first_at = rate.plan(*last_pack, time, 0, 0).first_scr();
+        let mux_delay = config.mux_delay;
+        let payload = packet.payload.len();
+        let earliest = input_buffers
+            .earliest(index, given_p_std_buffer, payload, |bytes| {
+                rate.bytes_ticks(bytes)
+            })
+            .map_err(|(length, size)| Error::PStdBufferOverflow {
+                stream_id,
+                stream_id_extension,
+                length,
+                size,
+            })?;
+        let planned = time.max(earliest.map(|earliest| rate.time_for(earliest, mux_delay)));
+        let first_at = rate.plan(*last_pack, planned, 0, 0).first_scr();
         let headers_due = headers.is_due(first_at, config.header_interval);
         let system_header_length = if headers_due {
             headers.write(|version, loops, out| {
@@ -462,7 +499,7 @@ impl Muxer {
         };
         let plan = rate.plan(
             *last_pack,
-            time,
+            planned,
             system_header_length,
             headers.bytes().len().saturating_sub(system_header_length),
         );
@@ -499,7 +536,6 @@ impl Muxer {
         }
 
         let writer = PackWriter::new();
-        let mux_delay = config.mux_delay;
         let mut written = *last_pack;
         write_or_truncate(pending, |out| {
             let write = |planned: PlannedPack, piece: Option<&PesPacket<'_>>, out: &mut Vec<u8>| {
@@ -529,9 +565,22 @@ impl Muxer {
                 };
                 written = Some(write(planned, Some(&piece), out)?);
             }
+            if let (Some(time), Some(last)) = (time, written)
+                && rate.last_byte_arrival(last, mux_delay) > time
+            {
+                return Err(Error::PStdBufferUnderflow {
+                    stream_id,
+                    stream_id_extension,
+                    timestamp: time.to_timestamp(),
+                });
+            }
             Ok(())
         })?;
         *last_pack = written;
+        input_buffers.put(index, given_p_std_buffer, time, payload);
+        if let Some(last) = written {
+            input_buffers.forget(last.scr(mux_delay));
+        }
         if headers_due {
             headers.sent(plan.headers_scr());
         }
@@ -638,7 +687,10 @@ impl Muxer {
             "a stream is registered after the first PES packet"
         );
         let definition = self.definition.with_stream(stream, p_std_buffer)?;
-        self.replace_definition(definition)
+        self.replace_definition(definition)?;
+        self.input_buffers
+            .register(stream.elementary_stream_id, p_std_buffer);
+        Ok(())
     }
 
     /// Replaces the `stream_type` and the `elementary_stream_info` of the
@@ -1072,6 +1124,148 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// How a stream's P-STD buffer fares: the most bytes it holds, and the
+    /// most 27 MHz ticks the last byte of a PES packet arrives after the
+    /// packet is decoded, 0 or less where every one arrives in time
+    #[derive(Debug, PartialEq, Eq)]
+    struct Fared {
+        stream_id: u8,
+        fullest: usize,
+        latest: i64,
+    }
+
+    /// How the P-STD buffer of each stream fares on `bytes`, by `stream_id`
+    ///
+    /// Each byte arrives at the time equation 2-21 of §2.5.2.2 gives, from
+    /// the SCR of its pack and the `program_mux_rate`, rounded down to a
+    /// tick. PES packets of `padding_stream` enter no buffer. The payload of
+    /// a PES packet leaves the buffer at its DTS, or
+    /// its PTS without one, and that of a PES packet without either at the
+    /// time of the one before it on its stream (§2.5.2.3).
+    fn fared(bytes: &[u8]) -> Vec<Fared> {
+        struct Stream {
+            fared: Fared,
+            held: alloc::collections::VecDeque<(u64, usize)>,
+            removal: u64,
+        }
+        let mut streams: Vec<Stream> = Vec::new();
+        let (mut position, mut scr, mut scr_byte, mut rate) = (0_u64, 0_u64, 0_u64, 1_u64);
+        for (element, length) in elements(bytes) {
+            let end = position.saturating_add(u64::try_from(length).unwrap());
+            match element {
+                Element::PackHeader(header) => {
+                    scr = header.system_clock_reference.ticks();
+                    scr_byte = position.saturating_add(8);
+                    rate = u64::from(header.program_mux_rate).saturating_mul(50);
+                }
+                Element::PesPacket(packet) if packet.stream_id != StreamId::PADDING_STREAM => {
+                    let stream_id = packet.stream_id.get();
+                    if !streams
+                        .iter()
+                        .any(|stream| stream.fared.stream_id == stream_id)
+                    {
+                        streams.push(Stream {
+                            fared: Fared {
+                                stream_id,
+                                fullest: 0,
+                                latest: i64::MIN,
+                            },
+                            held: alloc::collections::VecDeque::new(),
+                            removal: 0,
+                        });
+                    }
+                    let stream = streams
+                        .iter_mut()
+                        .find(|stream| stream.fared.stream_id == stream_id)
+                        .unwrap();
+                    let header = packet.optional_header.as_ref();
+                    if let Some(time) = header
+                        .and_then(|header| header.dts.or(header.pts))
+                        .map(Timestamp::get)
+                    {
+                        stream.removal = time.saturating_mul(300);
+                    }
+                    let payload = u64::try_from(packet.payload.len()).unwrap();
+                    let arrival = |byte: u64| {
+                        scr.saturating_add(
+                            byte.saturating_sub(scr_byte)
+                                .saturating_mul(27_000_000)
+                                .div_euclid(rate),
+                        )
+                    };
+                    let mut full = stream
+                        .held
+                        .iter()
+                        .fold(0_usize, |full, (_, bytes)| full.saturating_add(*bytes));
+                    for byte in end.saturating_sub(payload)..end {
+                        let at = arrival(byte);
+                        while let Some(&(removal, bytes)) = stream.held.front()
+                            && removal <= at
+                        {
+                            full = full.saturating_sub(bytes);
+                            stream.held.pop_front();
+                        }
+                        full = full.saturating_add(1);
+                        stream.fared.fullest = stream.fared.fullest.max(full);
+                    }
+                    if payload > 0 {
+                        stream
+                            .held
+                            .push_back((stream.removal, packet.payload.len()));
+                        let last = i64::try_from(arrival(end.saturating_sub(1))).unwrap();
+                        let removal = i64::try_from(stream.removal).unwrap();
+                        stream.fared.latest = stream.fared.latest.max(last.saturating_sub(removal));
+                    }
+                }
+                Element::PesPacket(_)
+                | Element::SystemHeader(_)
+                | Element::ProgramStreamMap(_)
+                | Element::ProgramEnd => {}
+            }
+            position = end;
+        }
+        streams.into_iter().map(|stream| stream.fared).collect()
+    }
+
+    /// Access units of `video` at 60 a second and of `audio` 1 024 samples
+    /// at 48 kHz long for 2 s, from a PTS of 1 s, in the order of their PTS
+    fn access_units<'a>(video: &'a [u8], audio: &'a [u8]) -> Vec<PesPacket<'a>> {
+        let mut packets: Vec<(u64, PesPacket<'a>)> = (0_u64..120)
+            .map(|frame| frame.saturating_mul(1_500).saturating_add(90_000))
+            .map(|pts| (pts, pes_packet(VIDEO, video, Some(pts))))
+            .chain(
+                (0_u64..94)
+                    .map(|frame| frame.saturating_mul(1_920).saturating_add(90_000))
+                    .map(|pts| (pts, pes_packet(AUDIO, audio, Some(pts)))),
+            )
+            .collect();
+        packets.sort_by_key(|(pts, _)| *pts);
+        packets.into_iter().map(|(_, packet)| packet).collect()
+    }
+
+    #[test]
+    fn no_p_std_buffer_holds_more_than_its_bound_and_every_pes_packet_arrives_in_time() {
+        // 12 500 bytes 60 times a second, 6 Mbit/s, and 576 bytes 46.875 times
+        let (video, audio) = ([0xaa; 12_500], [0xbb; 576]);
+        let packets = access_units(&video, &audio);
+        for config in [
+            MuxerConfig::new(RATE),
+            MuxerConfig::new(RATE).with_fixed_rate(true),
+        ] {
+            let stream = multiplexed_by(muxer_of(config), &packets);
+            let fared = fared(&stream);
+            let within = |fared: &Fared, bound: PStdBuffer| {
+                fared.fullest <= usize::try_from(bound.size_in_bytes()).unwrap()
+                    && fared.latest <= 0
+            };
+            assert!(
+                matches!(fared.as_slice(), [video, audio]
+                    if within(video, VIDEO_BUFFER) && within(audio, AUDIO_BUFFER)),
+                "{config:?}: {fared:?}"
+            );
+        }
     }
 
     /// The 27 MHz ticks the default `mux_delay` comes to
@@ -1598,6 +1792,64 @@ mod tests {
     }
 
     #[test]
+    fn a_pes_packet_its_input_buffer_cannot_take_in_time_is_refused_and_leaves_the_muxer_as_it_was()
+    {
+        let mut config = MuxerConfig::new(RATE);
+        config.mux_delay = Duration::from_millis(5);
+        let packets = [
+            pes_packet(VIDEO, &[0xaa; 3_000], Some(90_000)),
+            pes_packet(VIDEO, &[0xaa; 3_000], Some(93_600)),
+        ];
+        let mut muxer = muxer_of(config);
+        let mut stream = Vec::new();
+        muxer.handle_pes_packet(&packets[0]).unwrap();
+        // One byte past the 224 KiB of the video stream's buffer
+        let past = muxer.handle_pes_packet(&pes_packet(VIDEO, &[0xaa; 229_377], Some(93_600)));
+        // 10 000 bytes take 7.9 ms to arrive at 1 260 000 bytes a second,
+        // past the 5 ms before the PTS
+        let late = muxer.handle_pes_packet(&pes_packet(VIDEO, &[0xaa; 10_000], Some(93_600)));
+        muxer.handle_pes_packet(&packets[1]).unwrap();
+        muxer.finish();
+        muxer.poll_output(&mut stream);
+        assert_eq!(
+            (past, late, stream),
+            (
+                Err(Error::PStdBufferOverflow {
+                    stream_id: StreamId::from(VIDEO),
+                    stream_id_extension: None,
+                    length: 229_377,
+                    size: 229_376
+                }),
+                Err(Error::PStdBufferUnderflow {
+                    stream_id: StreamId::from(VIDEO),
+                    stream_id_extension: None,
+                    timestamp: timestamp(93_600)
+                }),
+                multiplexed_by(muxer_of(config), &packets)
+            )
+        );
+    }
+
+    #[test]
+    fn a_p_std_buffer_size_a_pes_packet_carries_is_the_size_of_the_input_buffer_from_it_on() {
+        let mut own = pes_packet(VIDEO, &[0xaa; 1_000], Some(90_000));
+        let mut extension = PesExtension::new();
+        extension.p_std_buffer = Some(PStdBuffer::new(true, 4));
+        own.optional_header.as_mut().unwrap().pes_extension = Some(extension);
+        let mut muxer = muxer();
+        muxer.handle_pes_packet(&own).unwrap();
+        assert_eq!(
+            muxer.handle_pes_packet(&pes_packet(VIDEO, &[0xaa; 5_000], Some(93_600))),
+            Err(Error::PStdBufferOverflow {
+                stream_id: StreamId::from(VIDEO),
+                stream_id_extension: None,
+                length: 5_000,
+                size: 4_096
+            })
+        );
+    }
+
+    #[test]
     fn a_buffer_limit_of_0_refuses_every_pes_packet_and_of_usize_max_none() {
         let mut config = MuxerConfig::new(RATE);
         config.buffer_limit = 0;
@@ -1606,7 +1858,7 @@ mod tests {
         let mut muxer = muxer_of(config);
         let taken: Vec<_> = (0..100)
             .map(|index| {
-                muxer.handle_pes_packet(&pes_packet(VIDEO, &[0xaa; 60_000], Some(index * 3_600)))
+                muxer.handle_pes_packet(&pes_packet(VIDEO, &[0xaa; 60_000], Some(index * 9_000)))
             })
             .collect();
         assert_eq!(
@@ -1692,7 +1944,7 @@ mod tests {
     #[test]
     fn the_scr_is_the_time_less_the_mux_delay_or_after_the_bytes_of_the_pack_before() {
         let mut config = MuxerConfig::new(RATE);
-        config.mux_delay = Duration::ZERO;
+        config.mux_delay = Duration::from_millis(1);
         let stream = multiplexed_by(
             muxer_of(config),
             &[
@@ -1704,14 +1956,14 @@ mod tests {
         );
         // The first pack of 14 + 18 + 24 + 27 bytes, the next of 14 + 27, at
         // 1 260 000 bytes a second, 27 000 000 / 1 260 000 ticks a byte, rounded
-        // up: 1 779 and 879 ticks
+        // up: 1 779 and 879 ticks. 1 ms is 27 000 ticks.
         assert_eq!(
             scrs(&stream),
             [
-                27_000_000,
-                27_000_000 + 1_779,
-                27_000_000 + 1_779 + 879,
-                93_600 * 300
+                27_000_000 - 27_000,
+                27_000_000 - 27_000 + 1_779,
+                27_000_000 - 27_000 + 1_779 + 879,
+                93_600 * 300 - 27_000
             ]
         );
     }
@@ -1798,12 +2050,12 @@ mod tests {
         let mut config = MuxerConfig::new(RATE);
         config.pack_size = 128;
         config.buffer_limit = 128;
-        let payload = vec![0xaa; 8 << 20];
+        let payload = vec![0xaa; 200_000];
         // The first pack: 14 + 18 + 24, and a PES packet header of 6 + 3 + 5 of
         // PTS + 3 of P-STD buffer, leaving 55 bytes of payload; the ones after
-        // it: 14 and a header of 6 + 3 + 3, leaving 102. 82 241 packs follow
+        // it: 14 and a header of 6 + 3 + 3, leaving 102. 1 961 packs follow
         // the first.
-        let length = 42 + 82_242 * 14 + 17 + (8 << 20) + 82_241 * 12;
+        let length = 42 + 1_962 * 14 + 17 + 200_000 + 1_961 * 12;
         assert_eq!(
             muxer_of(config).handle_pes_packet(&pes_packet(VIDEO, &payload, Some(90_000))),
             Err(Error::BufferFull { length })

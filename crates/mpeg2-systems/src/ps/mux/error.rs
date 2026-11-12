@@ -179,6 +179,33 @@ pub enum Error {
         /// The leap, in ticks of the 90 kHz clock of PTS and DTS
         gap: u64,
     },
+    /// The payload of a PES packet, with the payload of the PES packets
+    /// before it on its stream that have no time stamp, is more than the
+    /// input buffer of the stream in the P-STD holds, so the buffer would
+    /// overflow however late it arrived (ISO/IEC 13818-1 §2.5.2.3)
+    PStdBufferOverflow {
+        /// The `stream_id` of the stream
+        stream_id: StreamId,
+        /// The `stream_id_extension` of the stream, if it has one
+        stream_id_extension: Option<u8>,
+        /// The bytes that would be in the buffer at once
+        length: usize,
+        /// The size of the buffer, `BSn`, in bytes
+        size: usize,
+    },
+    /// A PES packet could not arrive in full by the time its DTS, or its PTS
+    /// without one, gives, after the packs before it at
+    /// [`MuxerConfig::program_mux_rate`](super::MuxerConfig::program_mux_rate)
+    /// and once its stream's input buffer in the P-STD has room for it, so
+    /// the buffer would underflow (ISO/IEC 13818-1 §2.5.2.3)
+    PStdBufferUnderflow {
+        /// The `stream_id` of the stream
+        stream_id: StreamId,
+        /// The `stream_id_extension` of the stream, if it has one
+        stream_id_extension: Option<u8>,
+        /// The DTS of the PES packet, or its PTS without one
+        timestamp: Timestamp,
+    },
     /// The input would grow the output held for
     /// [`Muxer::poll_output`](super::Muxer::poll_output) past
     /// [`MuxerConfig::buffer_limit`](super::MuxerConfig::buffer_limit)
@@ -325,6 +352,28 @@ impl fmt::Display for Error {
                 formatter,
                 "a leap of {gap} ticks in the time stamps needs more packs than buffer_limit holds"
             ),
+            Self::PStdBufferOverflow {
+                stream_id,
+                stream_id_extension,
+                length,
+                size,
+            } => write!(
+                formatter,
+                "{length} bytes on stream_id {:#04x}{} would be in its P-STD input buffer at once, past its {size} bytes",
+                stream_id.get(),
+                ExtensionOf(*stream_id_extension),
+            ),
+            Self::PStdBufferUnderflow {
+                stream_id,
+                stream_id_extension,
+                timestamp,
+            } => write!(
+                formatter,
+                "a PES packet on stream_id {:#04x}{} decoded at {} would arrive after it",
+                stream_id.get(),
+                ExtensionOf(*stream_id_extension),
+                timestamp.get()
+            ),
             Self::BufferFull { length } => write!(
                 formatter,
                 "the output held would grow to {length} bytes, past buffer_limit"
@@ -370,6 +419,8 @@ impl core::error::Error for Error {
             | Self::DecoderBufferBound { .. }
             | Self::DecreasingTimestamp { .. }
             | Self::TimestampGap { .. }
+            | Self::PStdBufferOverflow { .. }
+            | Self::PStdBufferUnderflow { .. }
             | Self::BufferFull { .. } => None,
         }
     }

@@ -49,6 +49,16 @@ pub(super) fn arrival_ticks(bytes: u64, program_mux_rate: u32) -> u64 {
     u64::try_from(ticks).unwrap_or(u64::MAX)
 }
 
+/// Returns ⌈c1 × `bytes`⌉, the ticks of the STC `bytes` bytes take to
+/// arrive at `program_mux_rate` (§2.5.2.2 equation 2-21) rounded up, or
+/// [`u64::MAX`] past it
+pub(super) fn arrival_ticks_rounded_up(bytes: u64, program_mux_rate: u32) -> u64 {
+    let ticks = u128::from(SYSTEM_CLOCK_FREQUENCY)
+        .saturating_mul(u128::from(bytes))
+        .div_ceil(u128::from(bytes_per_second(program_mux_rate)));
+    u64::try_from(ticks).unwrap_or(u64::MAX)
+}
+
 /// Returns `bytes` as a `u64`
 pub(super) fn as_u64(bytes: usize) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
@@ -126,6 +136,12 @@ impl Pack {
     /// `mux_delay` is taken off
     pub(super) const fn at(self) -> SystemTimeClock {
         self.at
+    }
+
+    /// Returns the time of the STC its SCR samples, `mux_delay` before
+    /// [`at`](Self::at)
+    pub(in crate::ps::mux) fn scr(self, mux_delay: Duration) -> SystemTimeClock {
+        self.at.sub_ticks(SystemTimeClock::ticks_in(mux_delay))
     }
 
     /// Returns the bytes of the pack

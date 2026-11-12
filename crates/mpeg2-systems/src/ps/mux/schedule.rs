@@ -5,12 +5,15 @@
 //! rate of a CSPS asks for
 
 use core::ops::Range;
+use core::time::Duration;
 
 use super::csps::Constraints;
 use crate::ps::pack_header;
 use crate::time::SystemTimeClock;
 use fixed_rate::{FixedRate, Line, Padding};
-use pack::{PES_PACKETS, arrival_ticks, as_u64, as_usize, pes_pack_packets};
+use pack::{
+    PES_PACKETS, arrival_ticks, arrival_ticks_rounded_up, as_u64, as_usize, pes_pack_packets,
+};
 use variable_rate::{Filling, VariableRate};
 
 mod fixed_rate;
@@ -141,6 +144,43 @@ impl Rate {
             )
             .pack
         })
+    }
+
+    /// Returns the `program_mux_rate` of the rate
+    const fn program_mux_rate(self) -> u32 {
+        match self.0 {
+            RateKind::Variable(rate) => rate.program_mux_rate,
+            RateKind::Fixed(rate) => rate.line.program_mux_rate(),
+        }
+    }
+
+    /// Returns the ticks of the STC `bytes` bytes take to arrive (§2.5.2.2
+    /// equation 2-21), rounded down
+    pub(super) fn bytes_ticks(self, bytes: usize) -> u64 {
+        arrival_ticks(as_u64(bytes), self.program_mux_rate())
+    }
+
+    /// Returns the time to plan a PES packet for so that the SCR of its
+    /// first pack, `mux_delay` before that time, samples `earliest` or later
+    pub(super) fn time_for(
+        self,
+        earliest: SystemTimeClock,
+        mux_delay: Duration,
+    ) -> SystemTimeClock {
+        let time = earliest.add_ticks(SystemTimeClock::ticks_in(mux_delay));
+        match self.0 {
+            RateKind::Variable(_) => time,
+            RateKind::Fixed(rate) => rate.time_for(time),
+        }
+    }
+
+    /// Returns the time of the STC the last byte of `pack` arrives at, its
+    /// SCR `mux_delay` before [`Pack::at`] (§2.5.2.2 equation 2-21), rounded
+    /// up to a tick
+    pub(super) fn last_byte_arrival(self, pack: Pack, mux_delay: Duration) -> SystemTimeClock {
+        let after_scr = as_u64(pack.length().saturating_sub(SCR_BYTE.saturating_add(1)));
+        pack.scr(mux_delay)
+            .add_ticks(arrival_ticks_rounded_up(after_scr, self.program_mux_rate()))
     }
 
     /// Returns the SCR of the pack after `pack`

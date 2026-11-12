@@ -1,10 +1,10 @@
 //! The SCRs of a variable rate, and the packs of a pack header alone that
 //! fill a leap of the time stamps
 
-use super::pack::{Pack, PlannedPack, as_u64, bytes_per_second, longest_scr_interval};
+use super::pack::{Pack, PlannedPack, arrival_ticks_rounded_up, as_u64, longest_scr_interval};
 use crate::ps::mux::csps::Constraints;
 use crate::ps::pack_header;
-use crate::time::{SYSTEM_CLOCK_FREQUENCY, SystemTimeClock};
+use crate::time::SystemTimeClock;
 
 /// The SCRs of a variable rate: each pack once the bytes of the one before
 /// have arrived at `program_mux_rate` (§2.5.2.2 equation 2-21), and the
@@ -34,9 +34,7 @@ impl VariableRate {
     pub(super) fn following(self, pack: Pack) -> SystemTimeClock {
         // Why round up: an SCR before the last byte of the pack before has
         // arrived would have the next byte arrive before it.
-        let ticks = SYSTEM_CLOCK_FREQUENCY
-            .saturating_mul(as_u64(pack.length()))
-            .div_ceil(bytes_per_second(self.program_mux_rate));
+        let ticks = arrival_ticks_rounded_up(as_u64(pack.length()), self.program_mux_rate);
         pack.at()
             .add_ticks(ticks.max(self.constraints.packet_ticks(pack.packets())))
     }
