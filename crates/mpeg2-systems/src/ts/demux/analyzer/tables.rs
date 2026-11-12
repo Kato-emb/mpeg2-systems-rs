@@ -189,7 +189,7 @@ mod tests {
     use crate::psi::pat::ProgramAssociationSection;
     use crate::psi::section::Section;
     use crate::ts::Pid;
-    use crate::ts::demux::analyzer::tests::{
+    use crate::ts::demux::tests::{
         behind_null_packets, events_of, pat_section_of, pmt_section, section_packet,
     };
     use crate::ts::demux::{Demuxer, DemuxerConfig};
