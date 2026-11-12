@@ -411,64 +411,6 @@ mod tests {
         );
     }
 
-    /// A PAT section of `transport_stream_id` 1, section 0 of 2, naming
-    /// `programs`
-    fn first_of_two_pat_sections(version_number: u8, programs: &[(u16, u16)]) -> Vec<u8> {
-        let mut bytes = pat_section(version_number, programs);
-        bytes[7] = 0x01;
-        let crc_start = bytes.len() - 4;
-        let crc = mpeg2_systems::crc::crc_32(&bytes[..crc_start]).to_be_bytes();
-        bytes[crc_start..].copy_from_slice(&crc);
-        bytes
-    }
-
-    #[test]
-    fn unsubscribing_a_pid_not_subscribed_changes_nothing_on_a_pid_left_from_a_pat_version_dropped()
-    {
-        let section = short_section(0x80, &[0xAA; 10]);
-        let pat_packet = |version_number: u8, programs: &[(u16, u16)], continuity_counter: u8| {
-            let pat = first_of_two_pat_sections(version_number, programs);
-            packet(
-                0x0000,
-                true,
-                continuity_counter,
-                None,
-                Some(&[&[0x00][..], &pat].concat()),
-            )
-        };
-        let stream = behind_null_packets(&[
-            pat_packet(0, &[(1, 0x1000)], 0),
-            pat_packet(1, &[], 1),
-            packet(
-                0x1000,
-                true,
-                0,
-                None,
-                Some(&[&[0x00][..], &section].concat()),
-            ),
-        ]);
-        let run = |unsubscribe: bool| {
-            let mut demuxer = Demuxer::new(DemuxerConfig::default());
-            demuxer.handle_input(&stream);
-            let mut seen = Vec::new();
-            for _ in 0..3 {
-                seen.push(seen_event(demuxer.poll_event().unwrap()));
-            }
-            if unsubscribe {
-                demuxer.unsubscribe_sections(Pid::try_from(0x1000).unwrap());
-            }
-            drain(&mut demuxer, &mut seen);
-            demuxer.finish();
-            drain(&mut demuxer, &mut seen);
-            seen
-        };
-        let unchanged = run(false);
-        assert_eq!(
-            (run(true), unchanged.last().cloned()),
-            (unchanged, Some(seen_section(0x1000, &read(&section))))
-        );
-    }
-
     #[test]
     fn a_program_map_table_id_without_the_syntax_is_reported_as_read_on_a_pid_the_pat_does_not_name()
      {

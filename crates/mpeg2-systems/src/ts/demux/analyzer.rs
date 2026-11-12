@@ -242,18 +242,16 @@ fn reassemble(
             }
             if let (Event::ProgramAssociationSection(pat), Some(program_maps)) =
                 (&event, program_maps.as_deref_mut())
+                && tables.follow(pat) != Followed::Repeated
             {
-                let followed = tables.follow(pat);
-                if followed != Followed::Repeated {
-                    for pid in tables::program_map_pids(&pat.programs) {
-                        program_maps.for_psi(pid);
-                    }
+                for pid in tables::program_map_pids(&pat.programs) {
+                    program_maps.for_psi(pid);
                 }
-                // Why stop reassembling only once a version is whole: until
-                // then, the programs of the previous version stay named.
-                if followed == Followed::Whole {
-                    program_maps.retain(|pid| tables.carries_psi(pid));
-                }
+                // Why not stop reassembling only once a version is whole: a
+                // version started drops the programs only an unfinished one
+                // named, and their sections would be reported untyped until a
+                // version completes, if one ever does.
+                program_maps.retain(|pid| tables.carries_psi(pid));
             }
             let body = |section_start: usize| {
                 let start = section_start.saturating_add(section.header_len());
@@ -278,12 +276,14 @@ fn reassemble(
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::String;
     use alloc::vec;
     use alloc::vec::Vec;
 
     use crate::ts::Pid;
     use crate::ts::demux::tests::{
-        behind_null_packets, events_of, packet, pat_section, pat_section_of, section_packet,
+        behind_null_packets, events_of, packet, pat_section, pat_section_of, pmt_section,
+        section_packet,
     };
     use crate::ts::demux::{Demuxer, DemuxerConfig};
 
@@ -370,6 +370,23 @@ mod tests {
                 vec![0x0000, 0x0200, 0x0300],
                 vec![0x0000, 0x0200, 0x0300, 0x0400],
             ]
+        );
+    }
+
+    #[test]
+    fn a_program_map_only_an_unfinished_pat_version_named_is_not_reported_once_another_starts() {
+        let stream = behind_null_packets(&[
+            section_packet(0x0000, 0, &pat_section(0, &[(1, 0x0100)])),
+            section_packet(0x0000, 1, &pat_section_of(1, (0, 1), &[(2, 0x0200)])),
+            section_packet(0x0000, 2, &pat_section_of(2, (0, 1), &[(3, 0x0300)])),
+        ]);
+        let mut demuxer = Demuxer::new(DemuxerConfig::default());
+        events_of(&mut demuxer, &stream);
+        let followed: Vec<u16> = demuxer.analyzer.sections.pids().map(Pid::get).collect();
+        let pmt = section_packet(0x0200, 0, &pmt_section(2, 0, &[]));
+        assert_eq!(
+            (followed, events_of(&mut demuxer, &pmt)),
+            (vec![0x0000, 0x0100, 0x0300], Vec::<String>::new())
         );
     }
 }
