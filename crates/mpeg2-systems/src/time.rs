@@ -483,39 +483,12 @@ impl ClockReference {
     }
 }
 
-/// Reads 33 bits laid out as 3, a `marker_bit`, 15, a `marker_bit`, 15 and a
-/// `marker_bit`, ignoring the markers
-pub(crate) fn read_marked_33_bits(reader: &mut FieldReader<'_>) -> Result<u64, field::Error> {
-    let high = reader.read_bits::<3>()?;
-    reader.read_bits::<1>()?;
-    let middle = reader.read_bits::<15>()?;
-    reader.read_bits::<1>()?;
-    let low = reader.read_bits::<15>()?;
-    reader.read_bits::<1>()?;
-
-    Ok(high.wrapping_shl(30) | middle.wrapping_shl(15) | low)
-}
-
-/// Writes 33 bits as 3, a `marker_bit`, 15, a `marker_bit`, 15 and a `marker_bit`
-#[cfg(feature = "alloc")]
-pub(crate) fn write_marked_33_bits(
-    writer: &mut FieldWriter<'_>,
-    value: u64,
-) -> Result<(), field::Error> {
-    writer.write_bits::<3>(value.wrapping_shr(30) & 0b111)?;
-    writer.write_bool(true)?;
-    writer.write_bits::<15>(value.wrapping_shr(15) & 0x7fff)?;
-    writer.write_bool(true)?;
-    writer.write_bits::<15>(value & 0x7fff)?;
-    writer.write_bool(true)
-}
-
 /// Reads a clock reference laid out as 33 marked bits, 9 of extension and a
 /// `marker_bit`, ignoring the markers, as an SCR and an ESCR are
 pub(crate) fn read_marked_clock_reference(
     reader: &mut FieldReader<'_>,
 ) -> Result<ClockReference, field::Error> {
-    let base = read_marked_33_bits(reader)?;
+    let base = reader.read_marked::<3>()?;
     let extension = reader.read_u16::<9>()?;
     reader.read_bits::<1>()?;
 
@@ -529,7 +502,7 @@ pub(crate) fn write_marked_clock_reference(
     writer: &mut FieldWriter<'_>,
     reference: ClockReference,
 ) -> Result<(), field::Error> {
-    write_marked_33_bits(writer, reference.base())?;
+    writer.write_marked::<3>(reference.base())?;
     writer.write_bits::<9>(reference.extension())?;
     writer.write_bool(true)
 }

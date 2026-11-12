@@ -124,6 +124,24 @@ impl<'output> FieldWriter<'output> {
         self.write_bits::<1>(value)
     }
 
+    /// Writes `value` as `HIGH` bits, a `marker_bit`, 15 bits, a
+    /// `marker_bit`, 15 bits and a `marker_bit`, the markers `'1'`
+    ///
+    /// A `value` with a bit set above `HIGH` + 30 is a
+    /// [`ValueTooWide`](Error::ValueTooWide) of that width.
+    pub(crate) fn write_marked<const HIGH: u32>(&mut self, value: u64) -> Result<(), Error> {
+        let width = HIGH.saturating_add(30);
+        if value.checked_shr(width).unwrap_or(0) != 0 {
+            return Err(Error::ValueTooWide { width, value });
+        }
+        self.write_bits::<HIGH>(value.wrapping_shr(30))?;
+        self.write_bool(true)?;
+        self.write_bits::<15>(value.wrapping_shr(15) & 0x7fff)?;
+        self.write_bool(true)?;
+        self.write_bits::<15>(value & 0x7fff)?;
+        self.write_bool(true)
+    }
+
     /// Writes the next field, a run of whole bytes
     ///
     /// # Errors
