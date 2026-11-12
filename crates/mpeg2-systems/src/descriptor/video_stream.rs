@@ -5,8 +5,9 @@
 use alloc::vec::Vec;
 
 #[cfg(feature = "alloc")]
-use super::write_descriptor;
-use super::{DescriptorTag, Error, RawDescriptor, body_of, field_error};
+use super::typed::write_descriptor;
+use super::typed::{body_of, field_error};
+use super::{DescriptorTag, Error, RawDescriptor};
 use crate::field::{FieldReader, FourBitFieldOutOfRange, TwoBitFieldOutOfRange};
 
 /// Bytes of the body when `MPEG_1_only_flag` is `'1'`
@@ -338,7 +339,7 @@ impl VideoStreamDescriptor {
         reason = "every syntax element writes from a reference"
     )]
     pub const fn encoded_len(&self) -> usize {
-        super::HEADER_LENGTH.saturating_add(body_length(self.mpeg_1_only_flag()))
+        super::raw::HEADER_LENGTH.saturating_add(body_length(self.mpeg_1_only_flag()))
     }
 
     /// Appends the descriptor to `out`, its `reserved` bits all `'1'`

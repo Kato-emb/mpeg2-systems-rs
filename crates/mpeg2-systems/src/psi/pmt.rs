@@ -231,7 +231,7 @@ impl<'input> TsProgramMapSection<'input> {
             section_number: 0,
             last_section_number: 0,
             pcr_pid: None,
-            program_info: DescriptorLoop(&[]),
+            program_info: DescriptorLoop::EMPTY,
             elementary_streams: ElementaryStreamLoop(&[]),
         }
     }
@@ -284,7 +284,10 @@ impl<'input> TsProgramMapSection<'input> {
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
-        encoded_len(self.program_info.0.len(), self.elementary_streams.0.len())
+        encoded_len(
+            self.program_info.as_bytes().len(),
+            self.elementary_streams.0.len(),
+        )
     }
 
     /// Appends the section to `out`, with its `CRC_32`
@@ -359,7 +362,9 @@ impl<'input> TsProgramMapSection<'input> {
             writer.write_bits::<3>(0b111_u8)?;
             writer.write_bits::<13>(pcr_pid.unwrap_or(Pid::NULL).get())?;
             writer.write_bits::<4>(0b1111_u8)?;
-            writer.write_bits::<12>(u64::try_from(program_info.0.len()).unwrap_or(u64::MAX))?;
+            writer.write_bits::<12>(
+                u64::try_from(program_info.as_bytes().len()).unwrap_or(u64::MAX),
+            )?;
             writer.finish()
         })()
         .map_err(|error| Error::Field {
@@ -411,7 +416,7 @@ pub(crate) fn check_lengths<'stream>(
             elementary_stream::check_es_info_length(stream.es_info)?;
             Ok::<_, Error>(length.saturating_add(stream.encoded_len()))
         })?;
-    check_encoded_len(encoded_len(program_info.0.len(), loop_length))
+    check_encoded_len(encoded_len(program_info.as_bytes().len(), loop_length))
 }
 
 /// Refuses a section of `encoded_len` bytes, its `section_length` larger
@@ -478,7 +483,7 @@ impl<'input> TryFrom<&Section<'input>> for TsProgramMapSection<'input> {
             section_number: syntax.section_number,
             last_section_number: syntax.last_section_number,
             pcr_pid: Some(Pid(pcr_pid)).filter(|pid| *pid != Pid::NULL),
-            program_info: DescriptorLoop(program_info),
+            program_info: DescriptorLoop::from(program_info),
             // Why not an error: the fields before end on a byte boundary.
             elementary_streams: ElementaryStreamLoop::from(
                 reader

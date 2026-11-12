@@ -4,17 +4,19 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use mpeg2_systems::field::{self, FourBitFieldOutOfRange};
+use mpeg2_systems::field;
 
 use self::data_group::DataGroupId;
 
 pub mod data_group;
 pub mod data_unit;
+mod dmf;
 pub mod management;
 mod range;
 pub mod statement;
 mod time;
 
+pub use dmf::Dmf;
 pub use range::{SixBitFieldOutOfRange, ThreeBitFieldOutOfRange};
 pub use time::{BcdTime, BcdTimeOutOfRange, Tmd};
 
@@ -198,78 +200,4 @@ fn write_or_truncate<E>(
     }
 
     written
-}
-
-/// Returns the `CRC_16` of `bytes`, ARIB STD-B24 Volume 1 Part 3 §9.2
-///
-/// The division by G(X) = X^16 + X^12 + X^5 + 1 that §9.2 describes, from 0
-/// and with nothing inverted: CRC-16/XMODEM of the CRC catalog.
-fn crc_16(bytes: &[u8]) -> u16 {
-    bytes.iter().fold(0, |crc, &byte| {
-        (0..8).fold(crc ^ u16::from(byte) << 8, |crc, _| {
-            if crc & 0x8000 == 0 {
-                crc << 1
-            } else {
-                crc << 1 ^ 0x1021
-            }
-        })
-    })
-}
-
-/// Display mode, whether a caption is shown on its own when received and
-/// when played back from a recording
-///
-/// `DMF`, ARIB STD-B24 Volume 1 Part 3 Table 9-5 and §9.6.1
-///
-/// The 4 bits are two halves: b4b3 is the mode on reception and b2b1 the
-/// mode on playback of a recording. In each, `'00'` shows the caption on
-/// its own, `'01'` does not, and `'10'` lets the viewer choose; `'11'`
-/// shows or hides it under a condition on reception and is reserved on
-/// playback. In a data component descriptor, `'1111'` says that the DMF of
-/// the caption management data changes, and `'0011'` that the elementary
-/// stream has a language whose captions are shown on their own.
-///
-/// # Examples
-///
-/// ```
-/// use mpeg2_systems::field::FourBitFieldOutOfRange;
-/// use mpeg2_systems_arib::caption::Dmf;
-///
-/// assert_eq!(Dmf::try_from(0b1010).map(Dmf::get), Ok(0b1010));
-/// // A DMF is 4 bits
-/// assert_eq!(Dmf::try_from(16).map_err(FourBitFieldOutOfRange::value), Err(16));
-/// ```
-#[doc(alias("DMF", "display_mode"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Dmf(pub(crate) u8);
-
-impl Dmf {
-    /// Returns the 4 bits
-    #[must_use]
-    pub const fn get(self) -> u8 {
-        self.0
-    }
-}
-
-impl TryFrom<u8> for Dmf {
-    type Error = FourBitFieldOutOfRange;
-
-    /// Takes the 4 bits of `value`
-    ///
-    /// # Errors
-    ///
-    /// [`FourBitFieldOutOfRange`]: `value` is 16 or more.
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        FourBitFieldOutOfRange::check(value).map(Self)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::crc_16;
-
-    #[test]
-    fn crc_16_is_the_crc_16_xmodem_of_the_crc_catalog() {
-        assert_eq!(crc_16(b"123456789"), 0x31c3);
-    }
 }

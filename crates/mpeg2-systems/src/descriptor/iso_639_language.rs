@@ -4,9 +4,10 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use super::{DescriptorTag, Error, RawDescriptor, body_of};
+use super::typed::body_of;
 #[cfg(feature = "alloc")]
-use super::{field_error, write_descriptor};
+use super::typed::{field_error, write_descriptor};
+use super::{DescriptorTag, Error, RawDescriptor};
 #[cfg(feature = "alloc")]
 use crate::field::write_or_truncate;
 
@@ -273,7 +274,7 @@ impl<'input> Iso639LanguageDescriptor<'input> {
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
-        super::HEADER_LENGTH.saturating_add(self.languages.0.len())
+        super::raw::HEADER_LENGTH.saturating_add(self.languages.0.len())
     }
 
     /// Appends the descriptor to `out`, its languages written from the

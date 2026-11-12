@@ -146,7 +146,7 @@ impl<'input> CaSection<'input> {
             current_next_indicator: true,
             section_number: 0,
             last_section_number: 0,
-            descriptors: DescriptorLoop(&[]),
+            descriptors: DescriptorLoop::EMPTY,
         }
     }
 
@@ -181,7 +181,7 @@ impl<'input> CaSection<'input> {
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
-        section::LONG_SECTION_OVERHEAD.saturating_add(self.descriptors.0.len())
+        section::LONG_SECTION_OVERHEAD.saturating_add(self.descriptors.as_bytes().len())
     }
 
     /// Appends the section to `out`, with its `CRC_32`
@@ -200,7 +200,7 @@ impl<'input> CaSection<'input> {
     #[cfg(feature = "alloc")]
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
         section::check_encoded_len(TableId::CONDITIONAL_ACCESS, self.encoded_len())?;
-        let mut body = Vec::with_capacity(self.descriptors.0.len());
+        let mut body = Vec::with_capacity(self.descriptors.as_bytes().len());
         DescriptorLoop::write_entries(self.descriptors, &mut body)?;
 
         let mut section = Section::new(TableId::CONDITIONAL_ACCESS, &body);
@@ -240,7 +240,7 @@ impl<'input> TryFrom<&Section<'input>> for CaSection<'input> {
             current_next_indicator: syntax.current_next_indicator,
             section_number: syntax.section_number,
             last_section_number: syntax.last_section_number,
-            descriptors: DescriptorLoop(section.body),
+            descriptors: DescriptorLoop::from(section.body),
         })
     }
 }

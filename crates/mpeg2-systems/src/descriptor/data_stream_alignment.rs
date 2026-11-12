@@ -4,9 +4,10 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
+use super::typed::fixed_body;
 #[cfg(feature = "alloc")]
-use super::write_descriptor;
-use super::{DescriptorTag, Error, RawDescriptor, fixed_body};
+use super::typed::write_descriptor;
+use super::{DescriptorTag, Error, RawDescriptor};
 
 /// Bytes of the body
 const BODY_LENGTH: usize = 1;
@@ -178,7 +179,7 @@ impl DataStreamAlignmentDescriptor {
         reason = "every syntax element writes from a reference"
     )]
     pub const fn encoded_len(&self) -> usize {
-        super::HEADER_LENGTH.saturating_add(BODY_LENGTH)
+        super::raw::HEADER_LENGTH.saturating_add(BODY_LENGTH)
     }
 
     /// Appends the descriptor to `out`
@@ -210,7 +211,7 @@ impl DataStreamAlignmentDescriptor {
             |writer| {
                 writer
                     .write_bits::<8>(alignment_type)
-                    .map_err(super::field_error("alignment_type"))
+                    .map_err(super::typed::field_error("alignment_type"))
             },
         )
     }

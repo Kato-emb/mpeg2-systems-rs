@@ -5,8 +5,9 @@
 use alloc::vec::Vec;
 
 #[cfg(feature = "alloc")]
-use super::write_descriptor;
-use super::{DescriptorTag, Error, RawDescriptor, field_error, prefix_body};
+use super::typed::write_descriptor;
+use super::typed::{field_error, prefix_body};
+use super::{DescriptorTag, Error, RawDescriptor};
 use crate::field::FieldReader;
 use crate::ts::Pid;
 
@@ -77,7 +78,7 @@ impl<'input> CaDescriptor<'input> {
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
-        super::HEADER_LENGTH
+        super::raw::HEADER_LENGTH
             .saturating_add(FIXED_LENGTH)
             .saturating_add(self.private_data_byte.len())
     }
@@ -210,5 +211,16 @@ mod tests {
             ]
         );
         assert_eq!(written, WITH_PRIVATE_DATA);
+    }
+
+    #[test]
+    fn a_descriptor_of_another_tag_is_refused() {
+        assert_eq!(
+            CaDescriptor::try_from(&RawDescriptor::new(DescriptorTag::REGISTRATION, b"HDMV")),
+            Err(Error::DescriptorTag {
+                expected: DescriptorTag::CA,
+                found: DescriptorTag::REGISTRATION
+            })
+        );
     }
 }

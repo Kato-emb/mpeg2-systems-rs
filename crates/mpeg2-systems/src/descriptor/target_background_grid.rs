@@ -5,8 +5,9 @@
 use alloc::vec::Vec;
 
 #[cfg(feature = "alloc")]
-use super::write_descriptor;
-use super::{DescriptorTag, Error, RawDescriptor, field_error, fixed_body};
+use super::typed::write_descriptor;
+use super::typed::{field_error, fixed_body};
+use super::{DescriptorTag, Error, RawDescriptor};
 use crate::field::{FieldReader, FourBitFieldOutOfRange};
 
 /// Bytes of the body
@@ -116,7 +117,7 @@ impl TargetBackgroundGridDescriptor {
         reason = "every syntax element writes from a reference"
     )]
     pub const fn encoded_len(&self) -> usize {
-        super::HEADER_LENGTH.saturating_add(BODY_LENGTH)
+        super::raw::HEADER_LENGTH.saturating_add(BODY_LENGTH)
     }
 
     /// Appends the descriptor to `out`

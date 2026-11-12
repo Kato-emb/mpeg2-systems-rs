@@ -72,7 +72,7 @@ impl Language {
     /// Appends the entry to `out`, refusing reserved values and a `DC` that
     /// does not match the `DMF`
     #[cfg(feature = "alloc")]
-    pub(super) fn write(self, out: &mut Vec<u8>) -> Result<(), Error> {
+    fn write(self, out: &mut Vec<u8>) -> Result<(), Error> {
         let forbidden = |field, value: u8| Error::Forbidden {
             field,
             value: u64::from(value),
@@ -175,9 +175,19 @@ impl<'input> LanguageLoop<'input> {
         languages: impl IntoIterator<Item = Language>,
         out: &mut Vec<u8>,
     ) -> Result<(), Error> {
+        Self::write_entries(languages.into_iter().map(Ok), out)
+    }
+
+    /// Appends the bytes of `entries` to `out`, leaving `out` as it was if an
+    /// entry is an error or is refused
+    #[cfg(feature = "alloc")]
+    pub(super) fn write_entries(
+        entries: impl IntoIterator<Item = Result<Language, Error>>,
+        out: &mut Vec<u8>,
+    ) -> Result<(), Error> {
         write_or_truncate(out, |out| {
-            for language in languages {
-                language.write(out)?;
+            for language in entries {
+                language?.write(out)?;
             }
 
             Ok(())
@@ -227,9 +237,27 @@ impl Iterator for LanguageIter<'_> {
     }
 }
 
+/// Splits `bytes` after the `num_languages` entries at their head, into the
+/// loop of them and the bytes after it
+pub(super) fn read_loop(
+    bytes: &[u8],
+    num_languages: u8,
+) -> Result<(LanguageLoop<'_>, &[u8]), Error> {
+    let mut after_languages = bytes;
+    for _ in 0..num_languages {
+        let (_, next) = frame(after_languages)?;
+        after_languages = next;
+    }
+    let languages = bytes
+        .get(..bytes.len().saturating_sub(after_languages.len()))
+        .unwrap_or_default();
+
+    Ok((LanguageLoop::from(languages), after_languages))
+}
+
 /// Reads the entry at the head of `bytes`, and returns it with the bytes
 /// after it
-pub(super) fn frame(bytes: &[u8]) -> Result<(Language, &[u8]), Error> {
+fn frame(bytes: &[u8]) -> Result<(Language, &[u8]), Error> {
     let mut reader = FieldReader::new(bytes);
     let field = |field| move |error| Error::Field { field, error };
     // Why not name each field of a byte in its error: the byte is read whole
@@ -239,7 +267,7 @@ pub(super) fn frame(bytes: &[u8]) -> Result<(Language, &[u8]), Error> {
     reader.read_u8::<1>().map_err(field("language_tag"))?;
     let dmf = Dmf(reader.read_u8::<4>().map_err(field("language_tag"))?);
     let dc = if matches!(dmf.get(), 0b1100..=0b1110) {
-        Some(Dc(reader.read_u8::<8>().map_err(field("DC"))?))
+        Some(Dc::from(reader.read_u8::<8>().map_err(field("DC"))?))
     } else {
         None
     };
