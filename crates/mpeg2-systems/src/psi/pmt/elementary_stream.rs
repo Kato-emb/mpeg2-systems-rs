@@ -228,7 +228,7 @@ impl<'input> Iterator for ElementaryStreamIter<'input> {
             let elementary_pid = reader
                 .read_bits::<3>()
                 .and_then(|_| reader.read_u16::<13>())
-                .map(Pid)
+                .map(Pid::from_bits_truncate)
                 .map_err(|error| Error::Field {
                     field: "elementary_PID",
                     error,

@@ -12,7 +12,7 @@ use core::fmt;
 /// and writes the counter; judging the continuity of a PID is the
 /// demultiplexer's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ContinuityCounter(pub(super) u8);
+pub struct ContinuityCounter(u8);
 
 impl ContinuityCounter {
     /// Number of distinct counter values, 16
@@ -22,6 +22,12 @@ impl ContinuityCounter {
     #[must_use]
     pub const fn get(self) -> u8 {
         self.0
+    }
+
+    /// Takes the 4 bits of a `continuity_counter` field, keeping only those
+    /// bits
+    pub(super) const fn from_bits_truncate(value: u8) -> Self {
+        Self(value & (Self::MODULUS - 1))
     }
 
     /// Returns the counter of the next packet of the PID, 15 wrapping to 0
@@ -103,6 +109,17 @@ mod tests {
                 counter(4),
                 counter(0)
             )
+        );
+    }
+
+    #[test]
+    fn a_continuity_counter_keeps_only_the_low_4_bits_of_a_wider_value() {
+        assert_eq!(
+            [
+                ContinuityCounter::from_bits_truncate(0x0f),
+                ContinuityCounter::from_bits_truncate(0xf3)
+            ],
+            [ContinuityCounter(15), ContinuityCounter(3)]
         );
     }
 }

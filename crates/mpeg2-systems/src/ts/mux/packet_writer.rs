@@ -80,7 +80,7 @@ impl PacketWriter {
             .continuity_counters
             .get(&pid)
             .copied()
-            .unwrap_or(ContinuityCounter(0))
+            .unwrap_or(ContinuityCounter::from_bits_truncate(0))
             .previous();
         let mut adaptation_field = AdaptationField::new();
         adaptation_field.program_clock_reference = Some(program_clock_reference);
@@ -317,7 +317,7 @@ impl PacketWriter {
             .continuity_counters
             .get(&pid)
             .copied()
-            .unwrap_or(ContinuityCounter(0));
+            .unwrap_or(ContinuityCounter::from_bits_truncate(0));
         let mut written: usize = 0;
         let start = out.len();
         write_or_truncate(out, |out| {

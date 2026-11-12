@@ -1131,7 +1131,7 @@ mod tests {
             &mut streams,
         )
         .unwrap();
-        let mut map = ProgramStreamMap::new(VersionNumber(0));
+        let mut map = ProgramStreamMap::new(VersionNumber::from_bits_truncate(0));
         map.elementary_streams = ElementaryStreamLoop::from(streams.as_slice());
         let mut header = OptionalHeader::new();
         header.pts = Some(timestamp(90_000));
@@ -2653,7 +2653,7 @@ mod tests {
                 &mut streams,
             )
             .unwrap();
-            let mut map = ProgramStreamMap::new(VersionNumber(version));
+            let mut map = ProgramStreamMap::new(VersionNumber::from_bits_truncate(version));
             map.program_stream_info = DescriptorLoop::from(program_stream_info);
             map.elementary_streams = ElementaryStreamLoop::from(streams.as_slice());
             let mut bytes = Vec::new();

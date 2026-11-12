@@ -238,7 +238,7 @@ impl ProgramDefinition {
         )
         .map_err(|error| Error::TsProgramMapSection { error })?;
         let (pat_body, pmt_body) = bodies.split_at(pat_body_length);
-        let version_number = VersionNumber(0);
+        let version_number = VersionNumber::from_bits_truncate(0);
         Ok((
             ProgramAssociationSection::new(transport_stream_id, version_number).section(pat_body),
             TsProgramMapSection::new(self.program_number.get(), version_number).section(pmt_body),
@@ -266,7 +266,7 @@ impl ProgramDefinition {
         ProgramAssociationSection<'loops>,
         TsProgramMapSection<'loops>,
     ) {
-        let version_number = VersionNumber(0);
+        let version_number = VersionNumber::from_bits_truncate(0);
         let mut pat = ProgramAssociationSection::new(transport_stream_id, version_number);
         pat.programs = ProgramLoop::from(pat_loop);
         let mut pmt = TsProgramMapSection::new(self.program_number.get(), version_number);

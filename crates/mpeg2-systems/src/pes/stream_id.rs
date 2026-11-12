@@ -11,7 +11,7 @@
 /// [`is_video`](Self::is_video) test.
 #[doc(alias = "stream_id")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StreamId(pub(crate) u8);
+pub struct StreamId(u8);
 
 impl StreamId {
     /// `program_stream_map`
@@ -57,6 +57,11 @@ impl StreamId {
     #[must_use]
     pub const fn get(self) -> u8 {
         self.0
+    }
+
+    /// Takes the 8 bits of a `stream_id` field
+    pub(crate) const fn from_bits_truncate(value: u8) -> Self {
+        Self(value)
     }
 
     /// Returns whether the `stream_id` is that of a PES packet: 0xBC
@@ -106,7 +111,7 @@ impl StreamId {
 
 impl From<u8> for StreamId {
     fn from(value: u8) -> Self {
-        Self(value)
+        Self::from_bits_truncate(value)
     }
 }
 

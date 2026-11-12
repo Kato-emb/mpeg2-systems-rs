@@ -151,7 +151,7 @@ impl Timestamp {
     }
 
     /// Takes the 33 bits of a time stamp field, keeping only those bits
-    pub(crate) const fn from_33_bits(value: u64) -> Self {
+    pub(crate) const fn from_bits_truncate(value: u64) -> Self {
         Self(value & Self::MODULUS.wrapping_sub(1))
     }
 
@@ -210,14 +210,16 @@ impl SystemTimeClock {
         let reference = self.0 / Self::TICKS_PER_TIMESTAMP_TICK;
         Self(
             reference
-                .saturating_add_signed(timestamp.distance_from(Timestamp::from_33_bits(reference)))
+                .saturating_add_signed(
+                    timestamp.distance_from(Timestamp::from_bits_truncate(reference)),
+                )
                 .saturating_mul(Self::TICKS_PER_TIMESTAMP_TICK),
         )
     }
 
     /// Returns the PTS or the DTS that samples the time
     pub(crate) const fn to_timestamp(self) -> Timestamp {
-        Timestamp::from_33_bits(self.0 / Self::TICKS_PER_TIMESTAMP_TICK)
+        Timestamp::from_bits_truncate(self.0 / Self::TICKS_PER_TIMESTAMP_TICK)
     }
 
     /// Returns the PCR or the SCR that samples the time `delay` before it

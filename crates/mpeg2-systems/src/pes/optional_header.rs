@@ -276,7 +276,7 @@ impl<'input> OptionalHeader<'input> {
         if bits != 0b10 {
             return Err(Error::OptionalHeaderStart { bits });
         }
-        header.pes_scrambling_control = PesScramblingControl(
+        header.pes_scrambling_control = PesScramblingControl::from_bits_truncate(
             reader
                 .read_u8::<2>()
                 .map_err(field_error("PES_scrambling_control"))?,
@@ -507,7 +507,7 @@ fn read_timestamp(reader: &mut FieldReader<'_>, field: &'static str) -> Result<T
         read_marked_33_bits(reader)
     };
     read()
-        .map(Timestamp::from_33_bits)
+        .map(Timestamp::from_bits_truncate)
         .map_err(field_error(field))
 }
 

@@ -482,7 +482,7 @@ impl<'input> TryFrom<&Section<'input>> for TsProgramMapSection<'input> {
             current_next_indicator: syntax.current_next_indicator,
             section_number: syntax.section_number,
             last_section_number: syntax.last_section_number,
-            pcr_pid: Some(Pid(pcr_pid)).filter(|pid| *pid != Pid::NULL),
+            pcr_pid: Some(Pid::from_bits_truncate(pcr_pid)).filter(|pid| *pid != Pid::NULL),
             program_info: DescriptorLoop::from(program_info),
             // Why not an error: the fields before end on a byte boundary.
             elementary_streams: ElementaryStreamLoop::from(
