@@ -11,26 +11,21 @@ use alloc::collections::VecDeque;
 use core::mem;
 use core::ops::Range;
 
-use super::{Error, Event, Lent, Pending};
-use crate::psi::TableId;
-use crate::psi::cat::CaSection;
-use crate::psi::pat::ProgramAssociationSection;
-use crate::psi::pmt::TsProgramMapSection;
+use super::pending::{Lent, Pending};
+use super::{Error, Event};
 use crate::psi::section::{PREFIX_LENGTH, SYNTAX_LENGTH, Section};
 use crate::ts::Pid;
 use crate::ts::packet::TransportPacket;
 
 mod continuity;
 mod pes_reassembly;
-mod program_map_routes;
 mod section_reassembly;
-mod version_gate;
+mod tables;
 
 use continuity::{ContinuityTracker, Verdict};
 use pes_reassembly::{PesReassembly, Sequence};
-use program_map_routes::ProgramMapRoutes;
 use section_reassembly::{Completed, SectionReassembler, SectionReassembly};
-use version_gate::{Admission, TableSection, VersionGate};
+use tables::{Followed, Tables};
 
 /// Continuity, section reassembly and table version state of the PIDs a
 /// demuxer follows
@@ -46,50 +41,12 @@ pub(super) struct PacketAnalyzer {
     pes: PesReassembly,
 }
 
-/// What the analyzer knows of the PAT, PMTs and CAT on air
-#[derive(Debug, Clone)]
-struct Tables {
-    routes: ProgramMapRoutes,
-    gate: VersionGate,
-}
-
-/// A table whose sections are reported typed
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Typed {
-    ProgramAssociation,
-    TsProgramMap,
-    ConditionalAccess,
-}
-
-impl Tables {
-    /// Returns the table a section read on `pid` is reported as, if typed
-    fn typed(&self, pid: Pid, section: &Section<'_>) -> Option<Typed> {
-        match (pid, section.table_id) {
-            (Pid::PAT, TableId::PROGRAM_ASSOCIATION) => Some(Typed::ProgramAssociation),
-            (Pid::CAT, TableId::CONDITIONAL_ACCESS) => Some(Typed::ConditionalAccess),
-            (Pid::PAT | Pid::CAT, _) => None,
-            // Why type a PMT section that lacks the syntax on a program map
-            // PID: it then fails as a PMT section and is reported as an
-            // error, rather than passing as a section of another table.
-            (_, TableId::TS_PROGRAM_MAP) => (self.routes.follows(pid)
-                && section
-                    .syntax
-                    .is_none_or(|syntax| self.routes.names(pid, syntax.table_id_extension)))
-            .then_some(Typed::TsProgramMap),
-            _ => None,
-        }
-    }
-}
-
 impl PacketAnalyzer {
     pub(super) const fn new(pes_buffer_limit: usize) -> Self {
         Self {
             continuity: ContinuityTracker::new(),
             sections: SectionReassembly::new(),
-            tables: Tables {
-                routes: ProgramMapRoutes::new(),
-                gate: VersionGate::new(),
-            },
+            tables: Tables::new(),
             pes: PesReassembly::new(pes_buffer_limit),
         }
     }
@@ -108,7 +65,7 @@ impl PacketAnalyzer {
 
     pub(super) fn unsubscribe_sections(&mut self, pid: Pid, pending: &mut VecDeque<Pending>) {
         self.sections
-            .unsubscribe(pid, self.tables.routes.carries_psi(pid), pending);
+            .unsubscribe(pid, self.tables.carries_psi(pid), pending);
     }
 
     /// Returns the bytes of a [`Lent::Reassembled`] range of a PES packet on
@@ -144,7 +101,7 @@ impl PacketAnalyzer {
     /// Returns the event of a section read whole on `pid`, typed as it was
     /// when analyzed
     pub(super) fn section_event<'a>(&self, pid: Pid, section: &Section<'a>) -> Event<'a> {
-        event_of(pid, section, self.tables.typed(pid, section))
+        self.tables.event(pid, section)
     }
 
     /// Returns the bytes of a [`Lent::Reassembled`] range of `pid`
@@ -209,7 +166,7 @@ impl PacketAnalyzer {
                 // Why not keep the PAT's reassembler in place while it
                 // pushes: the program maps a PAT names are added to the
                 // sections reassembled as its sections are read. Putting it
-                // back in the entry, which the routes always keep, allocates
+                // back in the entry, which the PAT PID always keeps, allocates
                 // nothing.
                 let mut reassembler =
                     mem::replace(self.sections.for_psi(pid), SectionReassembler::new());
@@ -252,8 +209,8 @@ impl PacketAnalyzer {
 /// buffer, to the reassembler of its PID, and queues the sections it
 /// completes
 ///
-/// With `program_maps`, the packet is on the PAT PID, and the routes follow
-/// the program maps its sections name in the sections reassembled.
+/// With `program_maps`, the packet is on the PAT PID: the tables follow the
+/// program maps its sections name, and so do the sections reassembled.
 fn reassemble(
     reassembler: &mut SectionReassembler,
     tables: &mut Tables,
@@ -264,22 +221,10 @@ fn reassemble(
     pending: &mut VecDeque<Pending>,
 ) {
     let pid = packet.pid;
-    match verdict {
-        Verdict::InOrder => {}
-        // Why not reassemble a duplicate: its payload repeats bytes already
-        // gathered, so the same section would complete twice.
-        Verdict::Duplicate => return,
-        // Why drop the section in flight, on a packet without payload too:
-        // after lost bytes or a splice, the bytes gathered and those that
-        // follow belong to different sections.
-        Verdict::Broken { .. } | Verdict::Excused => reassembler.discard_in_flight(),
-    }
-    let Some(payload) = packet.payload else {
-        return;
-    };
     reassembler.push(
+        verdict,
         packet.payload_unit_start_indicator,
-        payload,
+        packet.payload,
         &mut |completed, section_bytes| {
             let section = match Section::read(section_bytes) {
                 Ok(section) => section,
@@ -288,38 +233,9 @@ fn reassemble(
                     return;
                 }
             };
-            let typed = tables.typed(pid, &section);
-            if let (Some(typed), Some(syntax)) = (typed, section.syntax) {
-                // Why not take a section with current_next_indicator '0' as a
-                // change: it announces the next table, and the table in force
-                // stays until that version comes with the indicator set
-                // (§2.4.4.5).
-                if !syntax.current_next_indicator {
-                    return;
-                }
-                let table_section = match typed {
-                    Typed::ProgramAssociation => TableSection::ProgramAssociation {
-                        transport_stream_id: syntax.table_id_extension,
-                        section_number: syntax.section_number,
-                    },
-                    Typed::TsProgramMap => TableSection::TsProgramMap {
-                        pid,
-                        program_number: syntax.table_id_extension,
-                        section_number: syntax.section_number,
-                    },
-                    Typed::ConditionalAccess => TableSection::ConditionalAccess {
-                        section_number: syntax.section_number,
-                    },
-                };
-                // Why gate on the syntax before the typed conversion: a
-                // resend, by far the most common section, then costs no
-                // conversion; a section that fails the conversion is
-                // reported once per version, like one that passes.
-                if tables.gate.admit(table_section, syntax.version_number) == Admission::Resent {
-                    return;
-                }
-            }
-            let event = event_of(pid, &section, typed);
+            let Some(event) = tables.admit(pid, &section) else {
+                return;
+            };
             if let Event::Error(error) = event {
                 pending.push_back(Pending::Ready(Event::Error(error)));
                 return;
@@ -327,7 +243,17 @@ fn reassemble(
             if let (Event::ProgramAssociationSection(pat), Some(program_maps)) =
                 (&event, program_maps.as_deref_mut())
             {
-                tables.routes.follow(pat, program_maps, &mut tables.gate);
+                let followed = tables.follow(pat);
+                if followed != Followed::Repeated {
+                    for pid in tables::program_map_pids(&pat.programs) {
+                        program_maps.for_psi(pid);
+                    }
+                }
+                // Why stop reassembling only once a version is whole: until
+                // then, the programs of the previous version stay named.
+                if followed == Followed::Whole {
+                    program_maps.retain(|pid| tables.carries_psi(pid));
+                }
             }
             let header_length = if section.syntax.is_some() {
                 PREFIX_LENGTH.saturating_add(SYNTAX_LENGTH)
@@ -355,29 +281,100 @@ fn reassemble(
     );
 }
 
-/// Returns the event of a section read whole on `pid`, typed as `typed`
-/// says, or failed if it cannot be
-fn event_of<'a>(pid: Pid, section: &Section<'a>, typed: Option<Typed>) -> Event<'a> {
-    match typed {
-        Some(Typed::ProgramAssociation) => ProgramAssociationSection::try_from(section)
-            .map_or_else(
-                |error| Event::Error(Error::ProgramAssociationSection { error }),
-                Event::ProgramAssociationSection,
-            ),
-        Some(Typed::TsProgramMap) => TsProgramMapSection::try_from(section).map_or_else(
-            |error| Event::Error(Error::TsProgramMapSection { pid, error }),
-            |section| Event::TsProgramMapSection { pid, section },
-        ),
-        Some(Typed::ConditionalAccess) => CaSection::try_from(section).map_or_else(
-            |error| Event::Error(Error::CaSection { error }),
-            Event::CaSection,
-        ),
-        None => Event::Section {
-            pid,
-            section: section.clone(),
-        },
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use crate::ts::Pid;
+    use crate::ts::demux::tests::{
+        behind_null_packets, events_of, packet, pat_section, pat_section_of, section_packet,
+    };
+    use crate::ts::demux::{Demuxer, DemuxerConfig};
+
+    // Why not test through poll_event: a section kept in the buffer changes no
+    // event, only the memory the demuxer holds, so the test reads the buffer.
+    #[test]
+    fn a_section_that_fails_to_read_does_not_grow_the_buffer_input_after_input() {
+        // A CAT section of 203 bytes whose CRC_32 fails, across two packets
+        let mut section = vec![0x01, 0xB0, 200, 0x00, 0x00, 0xC1, 0x00, 0x00];
+        section.resize(203, 0x00);
+        let (head, tail) = section.split_at(183);
+        let mut stream = Vec::new();
+        for _ in 0..5 {
+            stream.extend(packet(0x1FFF, false, 0, &[]));
+        }
+        stream.extend(packet(0x0001, true, 0, &[&[0x00][..], head].concat()));
+        stream.extend(packet(0x0001, false, 1, tail));
+
+        let mut demuxer = Demuxer::new(DemuxerConfig::default());
+        let mut lengths = Vec::new();
+        for _ in 0..4 {
+            demuxer.handle_input(&stream);
+            while demuxer.poll_event().is_some() {}
+            lengths.push(demuxer.analyzer.sections.buffer_len(Pid::CAT).unwrap());
+        }
+        let first = lengths.first().copied().unwrap();
+        assert_eq!(lengths, [first; 4]);
+    }
+
+    #[test]
+    fn a_pat_across_packets_names_its_program_maps() {
+        // A PAT of 45 programs, program_number 1 to 45 on PIDs 0x101 to 0x12D,
+        // long enough to cross two packets
+        let mut section = vec![0x00, 0xB0, 189, 0x00, 0x01, 0xC1, 0x00, 0x00];
+        let pids: Vec<u16> = (0x0101..=0x012D).collect();
+        for (program_number, pid) in (1_u16..).zip(&pids) {
+            section.extend_from_slice(&program_number.to_be_bytes());
+            section.extend_from_slice(&(0xE000 | pid).to_be_bytes());
+        }
+        section.extend_from_slice(&crate::crc::crc_32(&section).to_be_bytes());
+        let (head, tail) = section.split_at(183);
+        let mut stream = Vec::new();
+        for _ in 0..5 {
+            stream.extend(packet(0x1FFF, false, 0, &[]));
+        }
+        stream.extend(packet(0x0000, true, 0, &[&[0x00][..], head].concat()));
+        stream.extend(packet(0x0000, false, 1, tail));
+
+        let mut demuxer = Demuxer::new(DemuxerConfig::default());
+        demuxer.handle_input(&stream);
+        while demuxer.poll_event().is_some() {}
+        let analyzer = &demuxer.analyzer;
+        let followed: Vec<u16> = analyzer.sections.pids().map(Pid::get).collect();
+        assert_eq!(followed, [&[0x0000][..], &pids].concat());
+    }
+
+    #[test]
+    fn a_whole_pat_version_stops_reassembling_only_the_program_maps_it_no_longer_names() {
+        let versions = [
+            section_packet(0x0000, 0, &pat_section(0, &[(1, 0x0100), (2, 0x0200)])),
+            section_packet(0x0000, 1, &pat_section(1, &[(2, 0x0200), (3, 0x0300)])),
+            section_packet(0x0000, 2, &pat_section_of(2, (0, 1), &[(4, 0x0400)])),
+        ];
+        let mut demuxer = Demuxer::new(DemuxerConfig::default());
+        let mut stream = behind_null_packets(&[]);
+        let mut followed = Vec::new();
+        for packet in versions {
+            stream.extend(packet);
+            events_of(&mut demuxer, &stream);
+            stream.clear();
+            followed.push(
+                demuxer
+                    .analyzer
+                    .sections
+                    .pids()
+                    .map(Pid::get)
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(
+            followed,
+            [
+                vec![0x0000, 0x0100, 0x0200],
+                vec![0x0000, 0x0200, 0x0300],
+                vec![0x0000, 0x0200, 0x0300, 0x0400],
+            ]
+        );
     }
 }
-
-#[cfg(test)]
-mod tests;

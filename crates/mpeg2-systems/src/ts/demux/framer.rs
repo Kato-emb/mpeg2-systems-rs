@@ -10,12 +10,185 @@ use core::ops::Range;
 use crate::framing::{Buffer, Decoder, Skipped};
 use crate::ts::packet::{PACKET_LENGTH, SYNC_BYTE};
 
-pub(super) mod sync;
-
-use sync::{PacketSize, SearchObservation};
-
 // ETSI TR 101 290: declare loss after two consecutive missing sync bytes.
 const SYNC_LOSS_COUNT: u8 = 2;
+
+// ETSI TR 101 290: lock onto the grid after five consecutive sync bytes at a
+// fixed period.
+const SYNC_LOCK_COUNT: usize = 5;
+
+/// Bytes from one Transport Packet to the next on the wire, which stay the same
+/// through a Transport Stream
+///
+/// The 188-byte `transport_packet` of ISO/IEC 13818-1 §2.4.3.2, alone or with
+/// the bytes a carrier adds around each one. The demuxer frames the 188 bytes
+/// and does not read what the carrier added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PacketSize {
+    /// The Transport Packet alone, 188 bytes
+    Standard188,
+    /// A 4-byte timestamp before each Transport Packet, 192 bytes
+    Timestamped192,
+    /// 16 Reed-Solomon parity bytes after each Transport Packet, 204 bytes
+    ReedSolomon204,
+}
+
+impl PacketSize {
+    /// Returns the bytes from one `sync_byte` to the next
+    #[must_use]
+    pub const fn stride(self) -> usize {
+        match self {
+            Self::Standard188 => PACKET_LENGTH,
+            Self::Timestamped192 => 192,
+            Self::ReedSolomon204 => 204,
+        }
+    }
+
+    /// Bytes the carrier puts before each `sync_byte`
+    const fn prefix(self) -> usize {
+        match self {
+            Self::Timestamped192 => 4,
+            Self::Standard188 | Self::ReedSolomon204 => 0,
+        }
+    }
+}
+
+/// What the search saw at the front of the bytes it has not ruled on
+///
+/// A unit is the stride of bytes one packet takes on the wire; it starts
+/// [`PacketSize::prefix`] bytes before its `sync_byte`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchObservation {
+    /// This many bytes before the first place a unit can start
+    LeadingGarbage(usize),
+    /// A unit starts at the front, and its `sync_byte` repeats at this period
+    GridConfirmed(PacketSize),
+    /// Too few bytes to confirm or rule out every candidate period
+    Undecided,
+    /// A unit could start at the front, but no candidate period repeats it
+    NoGridAtFront,
+}
+
+/// Every packet size, smallest first
+const CANDIDATES: [PacketSize; 3] = [
+    PacketSize::Standard188,
+    PacketSize::Timestamped192,
+    PacketSize::ReedSolomon204,
+];
+
+enum GridCheck {
+    Confirmed,
+    RuledOut,
+    NeedMoreData,
+}
+
+/// Classifies the front of `bytes` against the candidate packet grids
+///
+/// A fixed packet size restricts the search to that period; `None` tries all
+/// three smallest-first. [`SearchObservation::LeadingGarbage`] counts at most
+/// `garbage_limit` bytes.
+fn observe(bytes: &[u8], fixed: Option<PacketSize>, garbage_limit: usize) -> SearchObservation {
+    let candidates = fixed
+        .as_ref()
+        .map_or(&CANDIDATES[..], core::slice::from_ref);
+    let longest_prefix = candidates
+        .iter()
+        .map(|packet_size| packet_size.prefix())
+        .max()
+        .unwrap_or_default();
+    // Why stop short of the end by the longest prefix when no unit start is
+    // found: a sync_byte past the end can still start a unit that many bytes
+    // before it.
+    let horizon = garbage_limit.min(bytes.len().saturating_sub(longest_prefix));
+    let mut leading_garbage = horizon;
+    let scanned = bytes
+        .get(..horizon.saturating_add(longest_prefix))
+        .unwrap_or(bytes);
+    for (index, _) in scanned
+        .iter()
+        .enumerate()
+        .filter(|&(_, &byte)| byte == SYNC_BYTE)
+    {
+        // Why stop here: a later sync_byte starts a unit at most the longest
+        // prefix before it, so none can start one earlier than found.
+        if index >= leading_garbage.saturating_add(longest_prefix) {
+            break;
+        }
+        for packet_size in candidates {
+            if let Some(start) = index.checked_sub(packet_size.prefix()) {
+                leading_garbage = leading_garbage.min(start);
+            }
+        }
+    }
+    if leading_garbage > 0 {
+        return SearchObservation::LeadingGarbage(leading_garbage);
+    }
+    let mut undecided = false;
+    for &packet_size in candidates {
+        match check_grid(bytes, packet_size) {
+            // Why not tie-break against a larger period confirming first:
+            // candidates run smallest-first, and a smaller period being
+            // undecided means the bytes are too few for any larger one to
+            // confirm (188 undecided => len <= 4 * 188, but 192 needs
+            // 4 + 4 * 192 + 1), so the first Confirmed is always the smallest
+            // matching period.
+            GridCheck::Confirmed => return SearchObservation::GridConfirmed(packet_size),
+            GridCheck::RuledOut => {}
+            GridCheck::NeedMoreData => undecided = true,
+        }
+    }
+    if undecided {
+        SearchObservation::Undecided
+    } else {
+        SearchObservation::NoGridAtFront
+    }
+}
+
+/// Checks the `sync_byte` cadence of units starting at the front
+fn check_grid(bytes: &[u8], packet_size: PacketSize) -> GridCheck {
+    let sampled = bytes
+        .get(packet_size.prefix()..)
+        .unwrap_or_default()
+        .iter()
+        .step_by(packet_size.stride())
+        .take(SYNC_LOCK_COUNT);
+    if sampled.clone().any(|&byte| byte != SYNC_BYTE) {
+        GridCheck::RuledOut
+    } else if sampled.count() < SYNC_LOCK_COUNT {
+        GridCheck::NeedMoreData
+    } else {
+        GridCheck::Confirmed
+    }
+}
+
+/// What the unit at the front of the bytes holds on the locked grid
+enum FrameObservation {
+    OnGrid,
+    SyncByteMissing {
+        found: u8,
+    },
+    /// Fewer bytes than a unit, but a packet on the grid without the carrier
+    /// bytes after it
+    PacketWithoutCarrier,
+    /// Fewer bytes than a unit, and no packet on the grid among them
+    Short,
+}
+
+/// Classifies the unit at the front of `bytes` against the locked grid
+fn observe_on_grid(bytes: &[u8], packet_size: PacketSize) -> FrameObservation {
+    let prefix = packet_size.prefix();
+    match (bytes.get(prefix), bytes.len()) {
+        (Some(&SYNC_BYTE), length) if length >= packet_size.stride() => FrameObservation::OnGrid,
+        (Some(&found), length) if length >= packet_size.stride() => {
+            FrameObservation::SyncByteMissing { found }
+        }
+        (Some(&SYNC_BYTE), length) if length >= prefix.saturating_add(PACKET_LENGTH) => {
+            FrameObservation::PacketWithoutCarrier
+        }
+        _ => FrameObservation::Short,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -31,20 +204,6 @@ enum State {
         packet_size: PacketSize,
         consecutive_misses: u8,
     },
-}
-
-/// What the framer saw in the unit at the front of the buffer on the locked
-/// grid
-enum FrameObservation {
-    OnGrid,
-    SyncByteMissing {
-        found: u8,
-    },
-    /// Fewer bytes than a unit, but a packet on the grid without the carrier
-    /// bytes after it
-    PacketWithoutCarrier,
-    /// Fewer bytes than a unit, and no packet on the grid among them
-    Short,
 }
 
 /// A unit [`TransportPackets`] cut
@@ -144,7 +303,7 @@ impl TransportPackets {
                 // counting past the cap would scan bytes only to scan them
                 // again after the report.
                 match (
-                    sync::observe(searched, self.fixed_packet_size, skipped.room()),
+                    observe(searched, self.fixed_packet_size, skipped.room()),
                     eof,
                 ) {
                     (SearchObservation::LeadingGarbage(count), _) => {
@@ -199,7 +358,7 @@ impl TransportPackets {
             State::Synced {
                 packet_size,
                 consecutive_misses,
-            } => match (observe(rest, packet_size), eof) {
+            } => match (observe_on_grid(rest, packet_size), eof) {
                 (FrameObservation::OnGrid, _) => (
                     State::Synced {
                         packet_size,
@@ -299,25 +458,396 @@ impl Decoder for TransportPackets {
     }
 }
 
-/// Classifies the unit at the front of `bytes` against the locked grid
-fn observe(bytes: &[u8], packet_size: PacketSize) -> FrameObservation {
-    let prefix = packet_size.prefix();
-    match (bytes.get(prefix), bytes.len()) {
-        (Some(&SYNC_BYTE), length) if length >= packet_size.stride() => FrameObservation::OnGrid,
-        (Some(&found), length) if length >= packet_size.stride() => {
-            FrameObservation::SyncByteMissing { found }
-        }
-        (Some(&SYNC_BYTE), length) if length >= prefix.saturating_add(PACKET_LENGTH) => {
-            FrameObservation::PacketWithoutCarrier
-        }
-        _ => FrameObservation::Short,
-    }
-}
-
 #[cfg(test)]
 #[expect(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
     reason = "fixtures are built at constant offsets well inside their length"
 )]
-mod tests;
+mod tests {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use super::*;
+    use crate::framing::tests::{Reported, check};
+    use crate::framing::{Framer, Next};
+
+    const STANDARD_188: &[u8] = include_bytes!("../../../tests/fixtures/188.ts");
+    const TIMESTAMPED_192: &[u8] = include_bytes!("../../../tests/fixtures/192.ts");
+    const REED_SOLOMON_204: &[u8] = include_bytes!("../../../tests/fixtures/204.ts");
+
+    /// Chunk lengths a stream is handed over in, the whole stream among them
+    const CHUNK_LENGTHS: [usize; 5] = [1, 7, 188, 1000, usize::MAX];
+
+    /// An [`Output`] with its bytes copied out of the framer
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Seen {
+        SyncAcquired(PacketSize),
+        Packet { bytes: Vec<u8>, offset: u64 },
+        SyncByteMissing { found: u8 },
+        SyncLost,
+        Unsynchronized(Vec<u8>),
+        EndOfInput,
+    }
+
+    fn drain(framer: &mut Framer<TransportPackets>, seen: &mut Vec<Seen>) {
+        loop {
+            seen.push(match framer.next() {
+                Next::NeedMoreData => return,
+                Next::EndOfInput => Seen::EndOfInput,
+                Next::Item(Output::SyncAcquired(packet_size)) => Seen::SyncAcquired(packet_size),
+                Next::Item(Output::Packet { range, offset }) => Seen::Packet {
+                    bytes: framer.bytes(range).to_vec(),
+                    offset,
+                },
+                Next::Item(Output::SyncByteMissing { found, .. }) => {
+                    Seen::SyncByteMissing { found }
+                }
+                Next::Item(Output::SyncLost) => Seen::SyncLost,
+                Next::Item(Output::Unsynchronized(range)) => {
+                    Seen::Unsynchronized(framer.bytes(range).to_vec())
+                }
+            });
+        }
+    }
+
+    /// Hands `stream` over in chunks of `chunk_length`, then ends the input, and
+    /// returns what came before the end of input
+    fn frame(stream: &[u8], chunk_length: usize, fixed: Option<PacketSize>) -> Vec<Seen> {
+        let mut framer = Framer::new(TransportPackets::new(fixed));
+        let mut seen = Vec::new();
+        for chunk in stream.chunks(chunk_length) {
+            framer.compact();
+            framer.extend(chunk);
+            drain(&mut framer, &mut seen);
+        }
+        framer.finish();
+        drain(&mut framer, &mut seen);
+        assert_eq!(seen.pop(), Some(Seen::EndOfInput));
+        seen
+    }
+
+    /// The packets of the units from `first_unit` on that hold a whole packet
+    fn packets_of(stream: &[u8], packet_size: PacketSize, first_unit: usize) -> Vec<Seen> {
+        let prefix = packet_size.prefix();
+        (first_unit..)
+            .step_by(packet_size.stride())
+            .take_while(|unit| unit + prefix + PACKET_LENGTH <= stream.len())
+            .map(|unit| Seen::Packet {
+                bytes: stream[unit + prefix..unit + prefix + PACKET_LENGTH].to_vec(),
+                offset: u64::try_from(unit).unwrap(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_fixture_is_cut_into_the_same_packets_whatever_the_chunk_length() {
+        for (stream, packet_size) in [
+            (STANDARD_188, PacketSize::Standard188),
+            (TIMESTAMPED_192, PacketSize::Timestamped192),
+            (REED_SOLOMON_204, PacketSize::ReedSolomon204),
+        ] {
+            let mut expected = vec![Seen::SyncAcquired(packet_size)];
+            expected.extend(packets_of(stream, packet_size, 0));
+            for chunk_length in CHUNK_LENGTHS {
+                assert_eq!(
+                    frame(stream, chunk_length, None),
+                    expected,
+                    "{packet_size:?} in chunks of {chunk_length}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_192_byte_stream_cut_inside_a_timestamp_is_unsynchronized_up_to_its_next_unit() {
+        let stream = &TIMESTAMPED_192[2..];
+        let mut expected = vec![
+            Seen::Unsynchronized(stream[..190].to_vec()),
+            Seen::SyncAcquired(PacketSize::Timestamped192),
+        ];
+        expected.extend(packets_of(stream, PacketSize::Timestamped192, 190));
+        for chunk_length in CHUNK_LENGTHS {
+            assert_eq!(
+                frame(stream, chunk_length, None),
+                expected,
+                "in chunks of {chunk_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_end_salvages_a_last_packet_that_lacks_only_the_carrier_bytes_after_it() {
+        for (stream, packet_size, cut) in [
+            (TIMESTAMPED_192, PacketSize::Timestamped192, 192),
+            (REED_SOLOMON_204, PacketSize::ReedSolomon204, 16),
+        ] {
+            let stream = &stream[..stream.len() - cut];
+            let mut expected = vec![Seen::SyncAcquired(packet_size)];
+            expected.extend(packets_of(stream, packet_size, 0));
+            assert_eq!(frame(stream, 1000, None), expected, "{packet_size:?}");
+        }
+    }
+
+    #[test]
+    fn fewer_sync_bytes_than_the_lock_count_do_not_synchronize() {
+        let stream = grid(188, SYNC_LOCK_COUNT - 1, 0);
+        assert_eq!(
+            frame(&stream, usize::MAX, None),
+            [Seen::Unsynchronized(stream.clone())]
+        );
+    }
+
+    #[test]
+    fn a_single_missing_sync_byte_keeps_the_grid() {
+        let mut stream = grid(188, 8, 0);
+        stream[188 * 5] = 0x00;
+        let mut expected = vec![Seen::SyncAcquired(PacketSize::Standard188)];
+        expected.extend(packets_of(&stream[..188 * 5], PacketSize::Standard188, 0));
+        expected.push(Seen::SyncByteMissing { found: 0x00 });
+        expected.extend(packets_of(&stream, PacketSize::Standard188, 188 * 6));
+        assert_eq!(frame(&stream, usize::MAX, None), expected);
+    }
+
+    #[test]
+    fn two_missing_sync_bytes_in_a_row_lose_the_grid_until_it_is_found_again() {
+        let mut stream = grid(188, 8, 0);
+        stream[188 * 5] = 0x00;
+        stream[188 * 6] = 0x00;
+        stream.extend(grid(188, SYNC_LOCK_COUNT, 0));
+        let mut expected = vec![Seen::SyncAcquired(PacketSize::Standard188)];
+        expected.extend(packets_of(&stream[..188 * 5], PacketSize::Standard188, 0));
+        expected.extend([
+            Seen::SyncByteMissing { found: 0x00 },
+            Seen::SyncLost,
+            Seen::Unsynchronized(stream[188 * 6..188 * 7].to_vec()),
+            Seen::SyncAcquired(PacketSize::Standard188),
+        ]);
+        expected.extend(packets_of(&stream, PacketSize::Standard188, 188 * 7));
+        assert_eq!(frame(&stream, usize::MAX, None), expected);
+    }
+
+    #[test]
+    fn a_fixed_packet_size_does_not_synchronize_on_another_period() {
+        let stream = grid(188, 8, 0);
+        assert_eq!(
+            frame(&stream, usize::MAX, Some(PacketSize::ReedSolomon204)),
+            [Seen::Unsynchronized(stream.clone())]
+        );
+    }
+
+    #[test]
+    fn a_stream_that_never_synchronizes_is_handed_back_in_bounded_pieces() {
+        let stream = vec![0xFF; 200 * 1024];
+        let mut expected = vec![Seen::Unsynchronized(vec![0xFF; Skipped::LIMIT]); 3];
+        expected.push(Seen::Unsynchronized(vec![
+            0xFF;
+            stream.len() - 3 * Skipped::LIMIT
+        ]));
+        for chunk_length in [1024, usize::MAX] {
+            assert_eq!(
+                frame(&stream, chunk_length, None),
+                expected,
+                "in chunks of {chunk_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_end_reports_a_partial_packet_on_the_grid_as_unsynchronized() {
+        for (stream, packet_size) in [
+            (STANDARD_188, PacketSize::Standard188),
+            (TIMESTAMPED_192, PacketSize::Timestamped192),
+        ] {
+            let units = 10 * packet_size.stride();
+            let stream = &stream[..units + 100];
+            let mut expected = vec![Seen::SyncAcquired(packet_size)];
+            expected.extend(packets_of(&stream[..units], packet_size, 0));
+            expected.push(Seen::Unsynchronized(stream[units..].to_vec()));
+            assert_eq!(frame(stream, 1000, None), expected, "{packet_size:?}");
+        }
+    }
+
+    #[test]
+    fn input_after_a_drained_end_goes_on_at_the_next_offset_on_the_grid_kept() {
+        let mut framer = Framer::new(TransportPackets::new(None));
+        let mut seen = Vec::new();
+        framer.extend(&STANDARD_188[..188 * 5 + 100]);
+        framer.finish();
+        drain(&mut framer, &mut seen);
+        framer.extend(&STANDARD_188[188 * 6..]);
+        framer.finish();
+        drain(&mut framer, &mut seen);
+        let mut input = STANDARD_188[..188 * 5 + 100].to_vec();
+        input.extend_from_slice(&STANDARD_188[188 * 6..]);
+        let mut expected = vec![Seen::SyncAcquired(PacketSize::Standard188)];
+        expected.extend(packets_of(&input[..188 * 5], PacketSize::Standard188, 0));
+        expected.push(Seen::Unsynchronized(input[188 * 5..188 * 5 + 100].to_vec()));
+        expected.push(Seen::EndOfInput);
+        expected.extend(packets_of(&input, PacketSize::Standard188, 188 * 5 + 100));
+        expected.push(Seen::EndOfInput);
+        assert_eq!(seen, expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "after finish")]
+    fn input_before_the_end_is_drained_is_refused() {
+        let mut framer = Framer::new(TransportPackets::new(None));
+        framer.extend(&STANDARD_188[..188 * 5 + 100]);
+        framer.finish();
+        framer.extend(&STANDARD_188[188 * 6..]);
+    }
+
+    #[test]
+    fn a_candidate_the_end_leaves_unconfirmed_does_not_hide_a_grid_after_it() {
+        let mut stream = vec![0x00; 754];
+        for packet in 0..4 {
+            stream[204 * packet] = SYNC_BYTE;
+        }
+        for packet in 0..SYNC_LOCK_COUNT {
+            stream[1 + 188 * packet] = SYNC_BYTE;
+        }
+        let mut expected = vec![
+            Seen::Unsynchronized(stream[..1].to_vec()),
+            Seen::SyncAcquired(PacketSize::Standard188),
+        ];
+        expected.extend(packets_of(&stream[..753], PacketSize::Standard188, 1));
+        expected.push(Seen::Unsynchronized(stream[753..].to_vec()));
+        for chunk_length in CHUNK_LENGTHS {
+            assert_eq!(
+                frame(&stream, chunk_length, None),
+                expected,
+                "in chunks of {chunk_length}"
+            );
+        }
+    }
+
+    impl Reported for Output {
+        fn range(&self) -> Option<Range<usize>> {
+            match self {
+                Self::Packet { range, .. }
+                | Self::SyncByteMissing { range, .. }
+                | Self::Unsynchronized(range) => Some(range.clone()),
+                Self::SyncAcquired(_) | Self::SyncLost => None,
+            }
+        }
+
+        fn is_passed_over(&self) -> bool {
+            matches!(self, Self::Unsynchronized(_))
+        }
+    }
+
+    #[test]
+    fn the_framing_of_a_188_byte_stream_follows_the_rules_of_every_framing() {
+        let mut missing = grid(188, 8, 0);
+        missing[188 * 5] = 0x00;
+        let mut lost = grid(188, 8, 0);
+        lost[188 * 5] = 0x00;
+        lost[188 * 6] = 0x00;
+        lost.extend(grid(188, SYNC_LOCK_COUNT, 0));
+        let mut behind_garbage = vec![0xFF; Skipped::LIMIT + 100];
+        behind_garbage.extend_from_slice(&STANDARD_188[..188 * 6 + 100]);
+        for stream in [
+            STANDARD_188,
+            &missing,
+            &lost,
+            &behind_garbage,
+            &[0xFF; 3 * 1024],
+        ] {
+            check(&TransportPackets::new(None), stream);
+        }
+    }
+
+    /// A `sync_byte` at `lead + k * stride` for each of `sync_count` packets,
+    /// and no other 0x47
+    fn grid(stride: usize, sync_count: usize, lead: usize) -> Vec<u8> {
+        let mut bytes = vec![0x00; lead + stride * sync_count];
+        for packet in 0..sync_count {
+            bytes[lead + stride * packet] = SYNC_BYTE;
+        }
+        bytes
+    }
+
+    #[test]
+    fn five_sync_bytes_at_one_period_confirm_the_grid() {
+        for packet_size in CANDIDATES {
+            assert_eq!(
+                observe(
+                    &grid(packet_size.stride(), SYNC_LOCK_COUNT, packet_size.prefix()),
+                    None,
+                    usize::MAX
+                ),
+                SearchObservation::GridConfirmed(packet_size)
+            );
+        }
+    }
+
+    #[test]
+    fn four_sync_bytes_leave_the_grid_undecided() {
+        assert_eq!(
+            observe(&grid(188, SYNC_LOCK_COUNT - 1, 0), None, usize::MAX),
+            SearchObservation::Undecided
+        );
+    }
+
+    #[test]
+    fn a_192_byte_unit_starts_at_the_timestamp_before_its_sync_byte() {
+        assert_eq!(
+            observe(&grid(192, SYNC_LOCK_COUNT, 4), None, usize::MAX),
+            SearchObservation::GridConfirmed(PacketSize::Timestamped192)
+        );
+    }
+
+    #[test]
+    fn bytes_before_the_first_unit_are_leading_garbage() {
+        assert_eq!(
+            observe(
+                &grid(188, SYNC_LOCK_COUNT, 10),
+                Some(PacketSize::Standard188),
+                usize::MAX
+            ),
+            SearchObservation::LeadingGarbage(10)
+        );
+    }
+
+    #[test]
+    fn detection_keeps_the_bytes_a_timestamp_could_take_before_a_sync_byte() {
+        assert_eq!(
+            observe(&grid(188, SYNC_LOCK_COUNT, 10), None, usize::MAX),
+            SearchObservation::LeadingGarbage(10 - 4)
+        );
+    }
+
+    #[test]
+    fn a_sync_byte_with_no_room_for_a_timestamp_starts_no_192_byte_unit() {
+        assert_eq!(
+            observe(
+                &grid(192, SYNC_LOCK_COUNT, 2),
+                Some(PacketSize::Timestamped192),
+                usize::MAX
+            ),
+            SearchObservation::LeadingGarbage(2 + 192 - 4)
+        );
+    }
+
+    #[test]
+    fn a_sync_byte_no_period_repeats_is_no_grid() {
+        let mut bytes = grid(188, SYNC_LOCK_COUNT, 0);
+        bytes[188 * 3] = 0x00;
+        bytes.extend_from_slice(&[0x00; 204 * SYNC_LOCK_COUNT]);
+        assert_eq!(
+            observe(&bytes, None, usize::MAX),
+            SearchObservation::NoGridAtFront
+        );
+    }
+
+    #[test]
+    fn a_fixed_packet_size_rules_out_the_other_periods() {
+        let mut bytes = grid(188, SYNC_LOCK_COUNT, 0);
+        bytes.extend_from_slice(&[0x00; 204 * SYNC_LOCK_COUNT]);
+        assert_eq!(
+            observe(&bytes, Some(PacketSize::ReedSolomon204), usize::MAX),
+            SearchObservation::NoGridAtFront
+        );
+    }
+}
