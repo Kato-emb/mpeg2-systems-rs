@@ -386,7 +386,7 @@ impl<'input> Section<'input> {
             let reserved = reader.read_u8::<2>()?;
             let mut syntax = SectionSyntax::new(
                 table_id_extension,
-                VersionNumber(reader.read_u8::<5>()?),
+                VersionNumber::from_5_bits(reader.read_u8::<5>()?),
                 reader.read_bool()?,
                 reader.read_u8::<8>()?,
                 reader.read_u8::<8>()?,

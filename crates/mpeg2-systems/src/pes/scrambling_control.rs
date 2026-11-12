@@ -11,7 +11,7 @@ use crate::field::TwoBitFieldOutOfRange;
 /// user-defined. The PES header is never scrambled. The crate does not
 /// descramble.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PesScramblingControl(pub(super) u8);
+pub struct PesScramblingControl(u8);
 
 impl PesScramblingControl {
     /// `'00'`, the payload is not scrambled
@@ -21,6 +21,12 @@ impl PesScramblingControl {
     #[must_use]
     pub const fn get(self) -> u8 {
         self.0
+    }
+
+    /// Takes the 2 bits of a `PES_scrambling_control` field, keeping only
+    /// those bits
+    pub(super) const fn from_2_bits(value: u8) -> Self {
+        Self(value & 0b11)
     }
 }
 
@@ -34,5 +40,21 @@ impl TryFrom<u8> for PesScramblingControl {
     /// [`TwoBitFieldOutOfRange`]: `value` is 4 or more.
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         TwoBitFieldOutOfRange::check(value).map(Self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PesScramblingControl;
+
+    #[test]
+    fn a_pes_scrambling_control_from_2_bits_drops_the_bits_above_them() {
+        assert_eq!(
+            [
+                PesScramblingControl::from_2_bits(0b11),
+                PesScramblingControl::from_2_bits(0b1110)
+            ],
+            [PesScramblingControl(0b11), PesScramblingControl(0b10)]
+        );
     }
 }

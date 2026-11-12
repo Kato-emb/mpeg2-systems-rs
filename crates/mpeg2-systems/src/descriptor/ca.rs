@@ -141,7 +141,7 @@ impl<'input> TryFrom<&RawDescriptor<'input>> for CaDescriptor<'input> {
             reader.read_bits::<3>()?;
             Ok(Self {
                 ca_system_id,
-                ca_pid: Pid(reader.read_u16::<13>()?),
+                ca_pid: Pid::from_13_bits(reader.read_u16::<13>()?),
                 private_data_byte,
             })
         })()

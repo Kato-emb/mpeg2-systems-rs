@@ -20,7 +20,7 @@ use core::fmt;
 /// ```
 #[doc(alias = "PID")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Pid(pub(crate) u16);
+pub struct Pid(u16);
 
 impl Pid {
     /// PID of the program association table
@@ -38,6 +38,11 @@ impl Pid {
     #[must_use]
     pub const fn get(self) -> u16 {
         self.0
+    }
+
+    /// Takes the 13 bits of a `PID` field, keeping only those bits
+    pub(crate) const fn from_13_bits(value: u16) -> Self {
+        Self(value & Self::NULL.0)
     }
 
     /// Returns whether the PID is one Table 2-3 leaves free to assign, as a
@@ -104,6 +109,13 @@ mod tests {
         assert_eq!(
             [Pid::try_from(0x1fff), Pid::try_from(0x2000)],
             [Ok(Pid::NULL), Err(PidOutOfRange { value: 0x2000 })]
+        );
+    }
+    #[test]
+    fn a_pid_from_13_bits_drops_the_bits_above_them() {
+        assert_eq!(
+            [Pid::from_13_bits(0x1fff), Pid::from_13_bits(0xe010)],
+            [Pid::NULL, Pid(0x0010)]
         );
     }
     #[test]

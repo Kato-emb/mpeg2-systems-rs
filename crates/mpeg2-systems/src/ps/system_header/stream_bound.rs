@@ -46,11 +46,11 @@ pub struct StreamBound {
 impl StreamBound {
     /// `stream_id` 0xB7: the entry bounds the stream its
     /// `stream_id_extension` names
-    pub const WITH_STREAM_ID_EXTENSION: StreamId = StreamId(0xb7);
+    pub const WITH_STREAM_ID_EXTENSION: StreamId = StreamId::from_8_bits(0xb7);
     /// `stream_id` 0xB8: the entry bounds all audio streams
-    pub const ALL_AUDIO_STREAMS: StreamId = StreamId(0xb8);
+    pub const ALL_AUDIO_STREAMS: StreamId = StreamId::from_8_bits(0xb8);
     /// `stream_id` 0xB9: the entry bounds all video streams
-    pub const ALL_VIDEO_STREAMS: StreamId = StreamId(0xb9);
+    pub const ALL_VIDEO_STREAMS: StreamId = StreamId::from_8_bits(0xb9);
 
     /// Creates a stream bound without `stream_id_extension`
     #[must_use]

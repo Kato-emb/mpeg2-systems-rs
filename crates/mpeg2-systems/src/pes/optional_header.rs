@@ -276,7 +276,7 @@ impl<'input> OptionalHeader<'input> {
         if bits != 0b10 {
             return Err(Error::OptionalHeaderStart { bits });
         }
-        header.pes_scrambling_control = PesScramblingControl(
+        header.pes_scrambling_control = PesScramblingControl::from_2_bits(
             reader
                 .read_u8::<2>()
                 .map_err(field_error("PES_scrambling_control"))?,

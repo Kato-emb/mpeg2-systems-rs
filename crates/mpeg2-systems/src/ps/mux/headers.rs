@@ -39,7 +39,7 @@ impl Headers {
     pub(super) const fn new() -> Self {
         Self {
             sent_at: None,
-            map_version: VersionNumber(0),
+            map_version: VersionNumber::from_5_bits(0),
             bytes: Vec::new(),
             loops: Vec::new(),
         }

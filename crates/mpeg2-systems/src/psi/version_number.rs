@@ -27,7 +27,7 @@ use core::fmt;
 /// # Ok::<(), VersionNumberOutOfRange>(())
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct VersionNumber(pub(crate) u8);
+pub struct VersionNumber(u8);
 
 impl VersionNumber {
     /// Number of distinct versions, 32
@@ -37,6 +37,11 @@ impl VersionNumber {
     #[must_use]
     pub const fn get(self) -> u8 {
         self.0
+    }
+
+    /// Takes the 5 bits of a `version_number` field, keeping only those bits
+    pub(crate) const fn from_5_bits(value: u8) -> Self {
+        Self(value & (Self::MODULUS - 1))
     }
 
     /// Returns the version that follows, 31 wrapping to 0
@@ -108,6 +113,17 @@ mod tests {
                 version(5),
                 version(0)
             )
+        );
+    }
+
+    #[test]
+    fn a_version_number_from_5_bits_drops_the_bits_above_them() {
+        assert_eq!(
+            [
+                VersionNumber::from_5_bits(0x1f),
+                VersionNumber::from_5_bits(0xe4)
+            ],
+            [VersionNumber(31), VersionNumber(4)]
         );
     }
 }
