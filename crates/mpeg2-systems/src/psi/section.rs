@@ -324,7 +324,7 @@ impl<'input> Section<'input> {
         let mut reader = FieldReader::new(bytes);
         let mut prefix = || {
             Ok((
-                TableId(reader.read_u8::<8>()?),
+                TableId::from(reader.read_u8::<8>()?),
                 reader.read_bool()?,
                 reader.read_bool()?,
                 reader.read_u8::<2>()?,
