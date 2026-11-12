@@ -86,7 +86,7 @@ use crate::time::{StreamTime, SystemTimeClock, stream_time};
 use crate::ts::Pid;
 use crate::ts::adaptation_field::AdaptationField;
 use crate::ts::packet::PACKET_LENGTH;
-use packet_writer::{Stuffing, packet_count, section_packets_length};
+use packet_writer::{packet_count, section_packets_length};
 use program_definition::{ProgramDefinition, Stream};
 use schedule::{Schedule, Times};
 
@@ -700,14 +700,14 @@ impl Muxer {
                     writer.write_section(program.program_map_pid, pmt, pending)?;
                 }
             } else if let Some(at) = pcrs_at.next() {
-                writer.write_pcr_packet(
+                writer.write_program_clock_reference(
                     pcr_pid,
                     at.to_clock_reference(config.mux_delay),
                     pending,
                 )?;
             }
         }
-        writer.write_payload_unit(
+        writer.write_pes_packet_with(
             pid,
             |out| {
                 out.extend_from_slice(scratch);
@@ -715,7 +715,6 @@ impl Muxer {
             },
             adaptation_field,
             fields.transport_priority,
-            Stuffing::AdaptationField,
             pending,
         )?;
         *schedule = Some(next);
@@ -747,7 +746,7 @@ impl Muxer {
                 .max(reached);
             if self
                 .writer
-                .write_pcr_packet(
+                .write_program_clock_reference(
                     pcr_pid,
                     at.to_clock_reference(self.config.mux_delay),
                     &mut self.pending,

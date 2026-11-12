@@ -71,7 +71,24 @@ impl PacketWriter {
         if !pid.may_carry_pcr() {
             return Err(Error::Pid { pid });
         }
-        self.write_pcr_packet(pid, program_clock_reference, out)
+        // Why the counter before the next one rather than the next one: a
+        // packet without a payload does not advance the counter (§2.4.3.3),
+        // so it repeats that of the packet before it, and the next packet
+        // with a payload follows on from it. On a PID not yet written the
+        // same counter makes the first packet with a payload follow on too.
+        let previous = self
+            .continuity_counters
+            .get(&pid)
+            .copied()
+            .unwrap_or(ContinuityCounter(0))
+            .previous();
+        let mut adaptation_field = AdaptationField::new();
+        adaptation_field.program_clock_reference = Some(program_clock_reference);
+        adaptation_field.stuffing_bytes =
+            MAX_ADAPTATION_FIELD_LENGTH.saturating_sub(adaptation_field.adaptation_field_length());
+        let mut packet = TransportPacket::new(pid, previous);
+        packet.adaptation_field = Some(adaptation_field);
+        packet.write(out).map_err(|error| Error::Packet { error })
     }
 
     /// Appends `packet` to `out` as Transport Packets of `pid`, and returns
@@ -122,7 +139,7 @@ impl PacketWriter {
             adaptation_field.program_clock_reference = Some(pcr);
             adaptation_field
         });
-        self.write_payload_unit(
+        self.write_pes_packet_with(
             pid,
             |out| {
                 packet
@@ -131,7 +148,6 @@ impl PacketWriter {
             },
             adaptation_field,
             false,
-            Stuffing::AdaptationField,
             out,
         )
     }
@@ -238,79 +254,32 @@ impl PacketWriter {
             out,
         )
     }
-}
 
-/// Bytes of a Transport Packet after its header
-const PAYLOAD_CAPACITY: usize = PACKET_LENGTH - HEADER_LENGTH;
-
-/// `pointer_field` 0: the section starts right after it
-const POINTER_FIELD: u8 = 0x00;
-
-/// What fills a Transport Packet the end of a payload unit leaves short
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Stuffing {
-    /// Stuffing bytes in the adaptation field, the only stuffing allowed for
-    /// PES packets (§2.4.3.5)
-    AdaptationField,
-    /// `0xFF` in the payload after the last byte of a section (§2.4.4.1)
-    Payload,
-}
-
-/// Returns how many Transport Packets [`PacketWriter::write_payload_unit`]
-/// cuts a payload unit of `unit_length` bytes into, the first carrying an
-/// adaptation field of `adaptation_field_length` bytes
-pub(super) const fn packet_count(unit_length: usize, adaptation_field_length: usize) -> usize {
-    let first_capacity = PAYLOAD_CAPACITY.saturating_sub(adaptation_field_length);
-    unit_length
-        .saturating_sub(first_capacity)
-        .div_ceil(PAYLOAD_CAPACITY)
-        .saturating_add(1)
-}
-
-/// Returns how many bytes of Transport Packets
-/// [`PacketWriter::write_section_with`] writes a section of
-/// `section_length` bytes into
-pub(super) const fn section_packets_length(section_length: usize) -> usize {
-    packet_count(
-        section_length.saturating_add(size_of_val(&POINTER_FIELD)),
-        0,
-    )
-    .saturating_mul(PACKET_LENGTH)
-}
-
-impl PacketWriter {
-    /// Appends a Transport Packet of `pid` that carries
-    /// `program_clock_reference` in an adaptation field filling the packet,
-    /// and no payload
-    pub(super) fn write_pcr_packet(
-        &self,
+    /// Appends the PES packet `write_packet` writes as Transport Packets of
+    /// `pid`, each with `transport_priority`, the first with
+    /// `adaptation_field`, the last filled out with stuffing bytes in its
+    /// adaptation field, and returns how many it wrote
+    pub(super) fn write_pes_packet_with(
+        &mut self,
         pid: Pid,
-        program_clock_reference: ClockReference,
+        write_packet: impl FnOnce(&mut Vec<u8>) -> Result<(), Error>,
+        adaptation_field: Option<AdaptationField<'_>>,
+        transport_priority: bool,
         out: &mut Vec<u8>,
-    ) -> Result<(), Error> {
-        // Why the counter before the next one rather than the next one: a
-        // packet without a payload does not advance the counter (§2.4.3.3),
-        // so it repeats that of the packet before it, and the next packet
-        // with a payload follows on from it. On a PID not yet written the
-        // same counter makes the first packet with a payload follow on too.
-        let previous = self
-            .continuity_counters
-            .get(&pid)
-            .copied()
-            .unwrap_or(ContinuityCounter(0))
-            .previous();
-        let mut adaptation_field = AdaptationField::new();
-        adaptation_field.program_clock_reference = Some(program_clock_reference);
-        adaptation_field.stuffing_bytes =
-            MAX_ADAPTATION_FIELD_LENGTH.saturating_sub(adaptation_field.adaptation_field_length());
-        let mut packet = TransportPacket::new(pid, previous);
-        packet.adaptation_field = Some(adaptation_field);
-        packet.write(out).map_err(|error| Error::Packet { error })
+    ) -> Result<usize, Error> {
+        self.write_payload_unit(
+            pid,
+            write_packet,
+            adaptation_field,
+            transport_priority,
+            Stuffing::AdaptationField,
+            out,
+        )
     }
 
     /// Appends the section `write_section` writes as Transport Packets of
     /// `pid`, after a `pointer_field` of 0, and returns how many it wrote
-    pub(super) fn write_section_with(
+    fn write_section_with(
         &mut self,
         pid: Pid,
         write_section: impl FnOnce(&mut Vec<u8>) -> Result<(), Error>,
@@ -335,7 +304,7 @@ impl PacketWriter {
     /// Appends the payload unit `write_unit` writes as Transport Packets of
     /// `pid`, each with `transport_priority`, the first with
     /// `adaptation_field`, and returns how many it wrote
-    pub(super) fn write_payload_unit(
+    fn write_payload_unit(
         &mut self,
         pid: Pid,
         write_unit: impl FnOnce(&mut Vec<u8>) -> Result<(), Error>,
@@ -405,6 +374,44 @@ impl PacketWriter {
         self.continuity_counters.insert(pid, continuity_counter);
         Ok(written)
     }
+}
+
+/// Bytes of a Transport Packet after its header
+const PAYLOAD_CAPACITY: usize = PACKET_LENGTH - HEADER_LENGTH;
+
+/// `pointer_field` 0: the section starts right after it
+const POINTER_FIELD: u8 = 0x00;
+
+/// What fills a Transport Packet the end of a payload unit leaves short
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stuffing {
+    /// Stuffing bytes in the adaptation field, the only stuffing allowed for
+    /// PES packets (§2.4.3.5)
+    AdaptationField,
+    /// `0xFF` in the payload after the last byte of a section (§2.4.4.1)
+    Payload,
+}
+
+/// Returns how many Transport Packets [`PacketWriter::write_payload_unit`]
+/// cuts a payload unit of `unit_length` bytes into, the first carrying an
+/// adaptation field of `adaptation_field_length` bytes
+pub(super) const fn packet_count(unit_length: usize, adaptation_field_length: usize) -> usize {
+    let first_capacity = PAYLOAD_CAPACITY.saturating_sub(adaptation_field_length);
+    unit_length
+        .saturating_sub(first_capacity)
+        .div_ceil(PAYLOAD_CAPACITY)
+        .saturating_add(1)
+}
+
+/// Returns how many bytes of Transport Packets
+/// [`PacketWriter::write_section_with`] writes a section of
+/// `section_length` bytes into
+pub(super) const fn section_packets_length(section_length: usize) -> usize {
+    packet_count(
+        section_length.saturating_add(size_of_val(&POINTER_FIELD)),
+        0,
+    )
+    .saturating_mul(PACKET_LENGTH)
 }
 
 #[cfg(test)]

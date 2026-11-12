@@ -627,38 +627,6 @@ fn after_finish_poll_output_gives_what_is_held_and_a_second_finish_does_nothing(
 }
 
 #[test]
-fn the_packets_counted_are_those_a_payload_unit_is_cut_into() {
-    let mut adaptation_field = AdaptationField::new();
-    adaptation_field.program_clock_reference = Some(pcr(0));
-    let mut counted = Vec::new();
-    let mut written = Vec::new();
-    for length in 1..=600 {
-        for field in [None, Some(adaptation_field.clone())] {
-            let field_length = field.as_ref().map_or(0, AdaptationField::encoded_len);
-            counted.push(packet_count(length, field_length));
-            let mut out = Vec::new();
-            let unit = vec![0; length];
-            written.push(
-                PacketWriter::new()
-                    .write_payload_unit(
-                        pid(VIDEO_PID),
-                        |out| {
-                            out.extend_from_slice(&unit);
-                            Ok(())
-                        },
-                        field,
-                        false,
-                        Stuffing::AdaptationField,
-                        &mut out,
-                    )
-                    .unwrap(),
-            );
-        }
-    }
-    assert_eq!(counted, written);
-}
-
-#[test]
 fn the_pcr_is_the_dts_less_the_mux_delay_and_never_goes_back() {
     let mut config = MuxerConfig::new();
     config.pcr_interval = Duration::from_millis(100);

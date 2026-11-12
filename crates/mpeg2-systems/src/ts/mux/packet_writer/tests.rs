@@ -715,3 +715,35 @@ fn a_pcr_on_a_pid_that_cannot_carry_one_or_beyond_its_fields_is_refused_leaving_
     );
     assert_eq!(out, [0x47]);
 }
+
+#[test]
+fn the_packets_counted_are_those_a_payload_unit_is_cut_into() {
+    let mut adaptation_field = AdaptationField::new();
+    adaptation_field.program_clock_reference = Some(ClockReference::from_fields(0, 0));
+    let mut counted = Vec::new();
+    let mut written = Vec::new();
+    for length in 1..=600 {
+        for field in [None, Some(adaptation_field.clone())] {
+            let field_length = field.as_ref().map_or(0, AdaptationField::encoded_len);
+            counted.push(packet_count(length, field_length));
+            let mut out = Vec::new();
+            let unit = vec![0; length];
+            written.push(
+                PacketWriter::new()
+                    .write_payload_unit(
+                        pid(0x0100),
+                        |out| {
+                            out.extend_from_slice(&unit);
+                            Ok(())
+                        },
+                        field,
+                        false,
+                        Stuffing::AdaptationField,
+                        &mut out,
+                    )
+                    .unwrap(),
+            );
+        }
+    }
+    assert_eq!(counted, written);
+}
