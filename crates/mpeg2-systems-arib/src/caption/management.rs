@@ -161,9 +161,7 @@ impl<'input> CaptionManagementData<'input> {
         write_or_truncate(out, |out| {
             time::write_header(out, self.tmd, self.otm);
             out.push(num_languages);
-            for language in self.languages.iter() {
-                language?.write(out)?;
-            }
+            LanguageLoop::write_entries(self.languages, out)?;
             out.extend_from_slice(&data_unit_loop_length);
             data_unit::write_units(self.data_units, out)
         })
@@ -197,19 +195,12 @@ impl<'input> TryFrom<&DataGroup<'input>> for CaptionManagementData<'input> {
         let rest = reader
             .read_bytes(reader.remaining_bytes())
             .unwrap_or_default();
-        let mut after_languages = rest;
-        for _ in 0..num_languages {
-            let (_, next) = language::frame(after_languages)?;
-            after_languages = next;
-        }
-        let languages = rest
-            .get(..rest.len().saturating_sub(after_languages.len()))
-            .unwrap_or_default();
+        let (languages, after_languages) = language::read_loop(rest, num_languages)?;
 
         Ok(Self {
             tmd,
             otm,
-            languages: LanguageLoop::from(languages),
+            languages,
             data_units: data_unit::read_loop(after_languages)?,
         })
     }

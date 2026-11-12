@@ -52,7 +52,7 @@ impl TryFrom<u8> for LanguageTag {
 /// Table 9-6 leaves 0x01 to 0xFF to be specified elsewhere.
 #[doc(alias = "DC")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Dc(pub(super) u8);
+pub struct Dc(u8);
 
 impl Dc {
     /// 0x00: the message shown when rain attenuates the signal
