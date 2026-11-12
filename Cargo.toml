@@ -153,6 +153,12 @@ alloc_instead_of_core = "warn"
 # code out of the shipped item namespace.
 tests_outside_test_module = "warn"
 
+# Responsibility boundaries: a type's inherent methods sit in one impl in the
+# module that defines it, so a reader finds what the type does in one place;
+# a second impl elsewhere is the mechanized half of the one-responsibility,
+# one-module rule in AGENTS.md.
+multiple_inherent_impl = "warn"
+
 # Doc quality: rendered docs are the public contract — error/panic sections
 # and clean markdown are part of it, and they ship to docs.rs as written.
 missing_errors_doc = "warn"
