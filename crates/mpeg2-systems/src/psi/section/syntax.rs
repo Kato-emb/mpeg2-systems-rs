@@ -1,8 +1,11 @@
 //! Fields a section with `section_syntax_indicator` `'1'` has after its
 //! length
 
-use super::{Error, RESERVED};
+use super::Error;
 use crate::psi::VersionNumber;
+
+/// The `reserved` bits a new section has, and a PSI table requires
+pub(super) const RESERVED: u8 = 0b11;
 
 /// The fields a section with `section_syntax_indicator` `'1'` has after
 /// `section_length`

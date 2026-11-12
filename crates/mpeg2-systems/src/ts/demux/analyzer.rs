@@ -13,7 +13,7 @@ use core::ops::Range;
 
 use super::pending::{Lent, Pending};
 use super::{Error, Event};
-use crate::psi::section::{PREFIX_LENGTH, SYNTAX_LENGTH, Section};
+use crate::psi::section::Section;
 use crate::ts::Pid;
 use crate::ts::packet::TransportPacket;
 
@@ -255,13 +255,8 @@ fn reassemble(
                     program_maps.retain(|pid| tables.carries_psi(pid));
                 }
             }
-            let header_length = if section.syntax.is_some() {
-                PREFIX_LENGTH.saturating_add(SYNTAX_LENGTH)
-            } else {
-                PREFIX_LENGTH
-            };
             let body = |section_start: usize| {
-                let start = section_start.saturating_add(header_length);
+                let start = section_start.saturating_add(section.header_len());
                 start..start.saturating_add(section.body.len())
             };
             pending.push_back(Pending::Section {

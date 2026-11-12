@@ -12,19 +12,45 @@ use crate::field::{FieldWriter, write_or_truncate};
 
 mod syntax;
 
+use syntax::RESERVED;
 pub use syntax::SectionSyntax;
 
 /// Bytes from `table_id` to `section_length`
-pub(crate) const PREFIX_LENGTH: usize = 3;
+const PREFIX_LENGTH: usize = 3;
 
 /// Bytes from `table_id_extension` to `last_section_number`
-pub(crate) const SYNTAX_LENGTH: usize = 5;
+const SYNTAX_LENGTH: usize = 5;
 
 /// Bytes of `CRC_32`
-pub(super) const CRC_32_LENGTH: usize = 4;
+const CRC_32_LENGTH: usize = 4;
 
-/// The `reserved` bits a new section has, and a PSI table requires
-const RESERVED: u8 = 0b11;
+/// Bytes of a section with the fields `section_syntax_indicator` `'1'`
+/// announces, besides its body: up to `section_length`, up to
+/// `last_section_number` and `CRC_32`
+pub(super) const LONG_SECTION_OVERHEAD: usize = PREFIX_LENGTH
+    .saturating_add(SYNTAX_LENGTH)
+    .saturating_add(CRC_32_LENGTH);
+
+/// Returns `section_length`, refused where it is larger than `table_id`
+/// allows
+fn checked_section_length(table_id: TableId, section_length: usize) -> Result<u16, Error> {
+    let limit = table_id.max_section_length();
+    u16::try_from(section_length)
+        .ok()
+        .filter(|length| *length <= limit)
+        .ok_or(Error::SectionLength {
+            section_length,
+            limit,
+        })
+}
+
+/// Refuses a section of `encoded_len` bytes whose `section_length` would be
+/// larger than `table_id` allows, before its loops are walked or a buffer is
+/// sized after them
+#[cfg(feature = "alloc")]
+pub(crate) fn check_encoded_len(table_id: TableId, encoded_len: usize) -> Result<(), Error> {
+    checked_section_length(table_id, encoded_len.saturating_sub(PREFIX_LENGTH)).map(drop)
+}
 
 /// Failure to read or write a section
 #[non_exhaustive]
@@ -324,7 +350,7 @@ impl<'input> Section<'input> {
         let mut reader = FieldReader::new(bytes);
         let mut prefix = || {
             Ok((
-                TableId(reader.read_u8::<8>()?),
+                TableId::from(reader.read_u8::<8>()?),
                 reader.read_bool()?,
                 reader.read_bool()?,
                 reader.read_u8::<2>()?,
@@ -339,13 +365,7 @@ impl<'input> Section<'input> {
         if table_id == TableId::FORBIDDEN {
             return Err(Error::ForbiddenTableId);
         }
-        let limit = table_id.max_section_length();
-        if section_length > limit {
-            return Err(Error::SectionLength {
-                section_length: usize::from(section_length),
-                limit,
-            });
-        }
+        checked_section_length(table_id, usize::from(section_length))?;
         let rest = bytes.get(PREFIX_LENGTH..).unwrap_or_default();
         if rest.len() != usize::from(section_length) {
             return Err(Error::Length {
@@ -413,6 +433,17 @@ impl<'input> Section<'input> {
         PREFIX_LENGTH.saturating_add(self.section_length())
     }
 
+    /// Returns the number of bytes before `body` in the encoded section: up
+    /// to `section_length`, and up to `last_section_number` when it has them
+    #[cfg(feature = "alloc")]
+    pub(crate) const fn header_len(&self) -> usize {
+        if self.syntax.is_some() {
+            PREFIX_LENGTH.saturating_add(SYNTAX_LENGTH)
+        } else {
+            PREFIX_LENGTH
+        }
+    }
+
     /// Appends the section to `out`, with its `CRC_32` when it has the
     /// fields `section_syntax_indicator` `'1'` announces
     ///
@@ -451,15 +482,7 @@ impl<'input> Section<'input> {
                 return Err(Error::Reserved { table_id });
             }
         }
-        let section_length = self.section_length();
-        let limit = table_id.max_section_length();
-        let length = u16::try_from(section_length)
-            .ok()
-            .filter(|length| *length <= limit)
-            .ok_or(Error::SectionLength {
-                section_length,
-                limit,
-            })?;
+        let length = checked_section_length(table_id, self.section_length())?;
         let syntax = self
             .syntax
             .map(SectionSyntax::check_section_number)

@@ -250,3 +250,76 @@ impl Iterator for ProgramIter<'_> {
         Some(entry)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[cfg(feature = "alloc")]
+    use alloc::vec::Vec;
+    use core::array;
+    use core::num::NonZeroU16;
+
+    use super::{Error, Program, ProgramLoop};
+    use crate::field;
+    use crate::ts::Pid;
+
+    fn program(program_number: u16, pid: u16) -> Program {
+        let pid = Pid::try_from(pid).unwrap();
+        NonZeroU16::new(program_number).map_or(
+            Program::Network { network_pid: pid },
+            |program_number| Program::ProgramMap {
+                program_number,
+                program_map_pid: pid,
+            },
+        )
+    }
+
+    #[test]
+    fn a_program_loop_ending_inside_an_entry_yields_the_entries_before_then_an_error() {
+        let mut programs =
+            ProgramLoop::from([0x00, 0x01, 0xf0, 0x00, 0x00, 0x02, 0xf0].as_slice()).iter();
+
+        assert_eq!(
+            array::from_fn(|_| programs.next()),
+            [
+                Some(Ok(program(1, 0x1000))),
+                Some(Err(Error::Field {
+                    field: "program_map_PID",
+                    error: field::Error::Truncated {
+                        required_bits: 13,
+                        remaining_bits: 5
+                    }
+                })),
+                None,
+            ]
+        );
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_program_on_a_pid_not_free_to_assign_is_refused_before_a_byte_is_written() {
+        let mut written = Vec::new();
+
+        assert_eq!(
+            (
+                [
+                    ProgramLoop::write_from([program(0, 0x000f)], &mut written),
+                    ProgramLoop::write_from([program(1, 0x1fff)], &mut written),
+                ],
+                written
+            ),
+            (
+                [
+                    Err(Error::Pid {
+                        field: "network_PID",
+                        pid: Pid::try_from(0x000f).unwrap()
+                    }),
+                    Err(Error::Pid {
+                        field: "program_map_PID",
+                        pid: Pid::NULL
+                    }),
+                ],
+                Vec::new()
+            )
+        );
+    }
+}

@@ -212,7 +212,7 @@ impl<'input> ProgramAssociationSection<'input> {
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
-        super::LONG_SECTION_OVERHEAD.saturating_add(self.programs.0.len())
+        section::LONG_SECTION_OVERHEAD.saturating_add(self.programs.0.len())
     }
 
     /// Appends the section to `out`, with its `CRC_32`
@@ -233,7 +233,7 @@ impl<'input> ProgramAssociationSection<'input> {
     ///   `last_section_number`.
     #[cfg(feature = "alloc")]
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
-        super::check_section_length(TableId::PROGRAM_ASSOCIATION, self.encoded_len())?;
+        section::check_encoded_len(TableId::PROGRAM_ASSOCIATION, self.encoded_len())?;
         let mut entries = self.programs.iter();
         while let Some(program) = entries.next() {
             let program = program?.check()?;
@@ -254,7 +254,7 @@ impl<'input> ProgramAssociationSection<'input> {
     /// Appends the bytes of the program loop to `body`, for a section
     /// [`write`](Self::write) accepts
     #[cfg(feature = "alloc")]
-    pub(crate) fn write_body(&self, body: &mut Vec<u8>) -> Result<(), Error> {
+    fn write_body(&self, body: &mut Vec<u8>) -> Result<(), Error> {
         program::write_entries(self.programs, body)
     }
 
@@ -313,7 +313,10 @@ mod tests {
     use core::array;
     use core::num::NonZeroU16;
 
-    use super::{Error, Program, ProgramAssociationSection, ProgramLoop};
+    #[cfg(feature = "alloc")]
+    use super::ProgramLoop;
+    use super::{Error, Program, ProgramAssociationSection};
+    #[cfg(feature = "alloc")]
     use crate::field;
     use crate::psi::TableId;
     #[cfg(feature = "alloc")]
@@ -410,27 +413,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_program_loop_ending_inside_an_entry_yields_the_entries_before_then_an_error() {
-        let mut programs =
-            ProgramLoop::from([0x00, 0x01, 0xf0, 0x00, 0x00, 0x02, 0xf0].as_slice()).iter();
-
-        assert_eq!(
-            array::from_fn(|_| programs.next()),
-            [
-                Some(Ok(program(1, 0x1000))),
-                Some(Err(Error::Field {
-                    field: "program_map_PID",
-                    error: field::Error::Truncated {
-                        required_bits: 13,
-                        remaining_bits: 5
-                    }
-                })),
-                None,
-            ]
-        );
-    }
-
     #[cfg(feature = "alloc")]
     #[test]
     fn reserved_bits_read_as_0_are_written_as_1() {
@@ -461,9 +443,6 @@ mod tests {
     #[test]
     fn sections_the_specification_does_not_allow_are_refused_before_a_byte_is_written() {
         let version = VersionNumber::try_from(0).unwrap();
-        let mut reserved_pid = Vec::new();
-        let reserved_pid = ProgramLoop::write_from([program(0, 0x000f)], &mut reserved_pid);
-        let null_pid = ProgramLoop::write_from([program(1, 0x1fff)], &mut Vec::new());
         let mut repeated_bytes = Vec::new();
         ProgramLoop::write_from(
             [program(1, 0x1000), program(2, 0x1001), program(1, 0x1002)],
@@ -491,8 +470,6 @@ mod tests {
 
         assert_eq!(
             [
-                reserved_pid,
-                null_pid,
                 repeated.write(&mut written),
                 too_many.write(&mut written),
                 reversed.write(&mut written),
@@ -500,14 +477,6 @@ mod tests {
                 too_long_loop.write(&mut written),
             ],
             [
-                Err(Error::Pid {
-                    field: "network_PID",
-                    pid: Pid::try_from(0x000f).unwrap()
-                }),
-                Err(Error::Pid {
-                    field: "program_map_PID",
-                    pid: Pid::NULL
-                }),
                 Err(Error::ProgramNumber { program_number: 1 }),
                 Err(Error::Section(section::Error::SectionLength {
                     section_length: 1025,

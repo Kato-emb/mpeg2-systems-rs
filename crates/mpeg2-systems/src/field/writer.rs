@@ -159,6 +159,20 @@ impl<'output> FieldWriter<'output> {
     }
 }
 
+/// Runs `write` on `out`, leaving `out` as it was if `write` fails
+pub(crate) fn write_or_truncate<E>(
+    out: &mut Vec<u8>,
+    write: impl FnOnce(&mut Vec<u8>) -> Result<(), E>,
+) -> Result<(), E> {
+    let start = out.len();
+    let written = write(out);
+    if written.is_err() {
+        out.truncate(start);
+    }
+
+    written
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::vec::Vec;

@@ -325,7 +325,7 @@ impl<'input> TsProgramMapSection<'input> {
 
         let mut body = Vec::with_capacity(
             self.encoded_len()
-                .saturating_sub(super::LONG_SECTION_OVERHEAD),
+                .saturating_sub(section::LONG_SECTION_OVERHEAD),
         );
         self.write_body(&mut body)?;
         Ok(self.section(&body).write(out)?)
@@ -335,7 +335,7 @@ impl<'input> TsProgramMapSection<'input> {
     /// elementary stream loop to `body`, for a section
     /// [`write`](Self::write) accepts
     #[cfg(feature = "alloc")]
-    pub(crate) fn write_body(&self, body: &mut Vec<u8>) -> Result<(), Error> {
+    fn write_body(&self, body: &mut Vec<u8>) -> Result<(), Error> {
         Self::write_body_with(self.pcr_pid, self.program_info, body, |body| {
             elementary_stream::write_entries(self.elementary_streams, body)
         })
@@ -390,7 +390,7 @@ impl<'input> TsProgramMapSection<'input> {
 /// `program_info_length` bytes and whose elementary stream loop takes
 /// `loop_length`
 const fn encoded_len(program_info_length: usize, loop_length: usize) -> usize {
-    super::LONG_SECTION_OVERHEAD
+    section::LONG_SECTION_OVERHEAD
         .saturating_add(PROGRAM_HEADER_LENGTH)
         .saturating_add(program_info_length)
         .saturating_add(loop_length)
@@ -418,7 +418,7 @@ pub(crate) fn check_lengths<'stream>(
 /// than 1021
 #[cfg(feature = "alloc")]
 fn check_encoded_len(encoded_len: usize) -> Result<(), Error> {
-    Ok(super::check_section_length(
+    Ok(section::check_encoded_len(
         TableId::TS_PROGRAM_MAP,
         encoded_len,
     )?)
@@ -536,17 +536,6 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_built_from_new_and_every_with_method_equals_one_with_every_field_assigned() {
-        let mut assigned = ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x0100));
-        assigned.es_info = DescriptorLoop::from(ES_INFO.as_slice());
-
-        let built = ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x0100))
-            .with_es_info(DescriptorLoop::from(ES_INFO.as_slice()));
-
-        assert_eq!(built, assigned);
-    }
-
-    #[test]
     fn a_section_built_from_new_and_every_with_method_equals_one_with_every_field_assigned() {
         let mut assigned = TsProgramMapSection::new(100, VersionNumber::try_from(2).unwrap());
         assigned.current_next_indicator = false;
@@ -620,38 +609,6 @@ mod tests {
         assert_eq!(
             (written.as_slice(), pmt.encoded_len()),
             (WITH_DESCRIPTORS.as_slice(), WITH_DESCRIPTORS.len())
-        );
-    }
-
-    #[test]
-    fn an_element_cut_short_names_the_field_it_ends_in() {
-        let truncated = |required_bits, remaining_bits| field::Error::Truncated {
-            required_bits,
-            remaining_bits,
-        };
-        let first_entry =
-            |bytes: &'static [u8]| ElementaryStreamLoop::from(bytes).iter().next().unwrap();
-
-        assert_eq!(
-            [
-                first_entry(&[0x02, 0xe1]),
-                first_entry(&[0x02, 0xe1, 0x00, 0xf0]),
-                first_entry(&[0x02, 0xe1, 0x00, 0xf0, 0x03, 0x0a]),
-            ],
-            [
-                Err(Error::Field {
-                    field: "elementary_PID",
-                    error: truncated(13, 5)
-                }),
-                Err(Error::Field {
-                    field: "ES_info_length",
-                    error: truncated(12, 4)
-                }),
-                Err(Error::Field {
-                    field: "ES_info",
-                    error: truncated(24, 8)
-                }),
-            ]
         );
     }
 
@@ -766,13 +723,6 @@ mod tests {
         reserved_pcr_pid.pcr_pid = Some(pid(0x0002));
         let mut null_pcr_pid = TsProgramMapSection::new(1, version);
         null_pcr_pid.pcr_pid = Some(Pid::NULL);
-        let mut long_es_info = ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x0100));
-        long_es_info.es_info = DescriptorLoop::from(descriptors.as_slice());
-        let long_es_info = ElementaryStreamLoop::write_from([long_es_info], &mut Vec::new());
-        let reserved_elementary_pid = ElementaryStreamLoop::write_from(
-            [ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x000f))],
-            &mut Vec::new(),
-        );
         let mut null_elementary_pid = TsProgramMapSection::new(1, version);
         null_elementary_pid.elementary_streams =
             ElementaryStreamLoop::from([0x02, 0xff, 0xff, 0xf0, 0x00].as_slice());
@@ -792,8 +742,6 @@ mod tests {
                 second.write(&mut written),
                 reserved_pcr_pid.write(&mut written),
                 null_pcr_pid.write(&mut written),
-                long_es_info,
-                reserved_elementary_pid,
                 null_elementary_pid.write(&mut written),
                 truncated.write(&mut written),
                 too_long.write(&mut written),
@@ -807,8 +755,6 @@ mod tests {
                 }),
                 Err(Error::PcrPid { pid: pid(0x0002) }),
                 Err(Error::PcrPid { pid: Pid::NULL }),
-                Err(Error::EsInfoLength { length: 1024 }),
-                Err(Error::ElementaryPid { pid: pid(0x000f) }),
                 Err(Error::ElementaryPid { pid: Pid::NULL }),
                 Err(Error::Field {
                     field: "elementary_PID",

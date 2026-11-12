@@ -7,7 +7,7 @@ use core::ops::Range;
 
 use super::continuity::Verdict;
 use crate::psi::TableId;
-use crate::psi::section::PREFIX_LENGTH;
+use crate::psi::section;
 use crate::ts::Pid;
 use crate::ts::demux::pending::Pending;
 use crate::ts::demux::{Error, Event};
@@ -359,16 +359,16 @@ fn observe<'payload>(in_flight: &[u8], remaining: &'payload [u8]) -> Observation
     else {
         return Observation::Fragment;
     };
-    let section_length = u16::from_be_bytes([high & 0x0F, low]);
+    let Some(encoded_len) = section::encoded_len(&[table_id, high, low]) else {
+        return Observation::Fragment;
+    };
     // Why bound by the table, not by a setting: the syntax caps every
     // section_length (§2.4.4.5, §2.4.4.11), so a larger one is broken
     // framing, and the buffer never grows past the largest section.
-    if section_length > TableId::from(table_id).max_section_length() {
+    if section::check_encoded_len(TableId::from(table_id), encoded_len).is_err() {
         return Observation::Oversized;
     }
-    let needed = PREFIX_LENGTH
-        .saturating_add(usize::from(section_length))
-        .saturating_sub(in_flight.len());
+    let needed = encoded_len.saturating_sub(in_flight.len());
     remaining
         .split_at_checked(needed)
         .map_or(Observation::Fragment, |(end, rest)| Observation::Complete {
