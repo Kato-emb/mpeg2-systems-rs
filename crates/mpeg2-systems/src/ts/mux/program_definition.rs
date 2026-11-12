@@ -290,3 +290,57 @@ impl ProgramDefinition {
             .map_err(|error| Error::TsProgramMapSection { error })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pid(value: u16) -> Pid {
+        Pid::try_from(value).unwrap()
+    }
+
+    #[test]
+    fn without_a_pcr_pid_the_pcr_goes_on_the_first_stream_of_a_video_stream_type_or_else_the_first_stream()
+     {
+        let first_pcr_pid = |stream_types: &[StreamType]| {
+            let mut program = ProgramDefinition::new(1, pid(0x1000)).unwrap();
+            for (pid_value, stream_type) in (0x0100..).zip(stream_types) {
+                program
+                    .add_stream(ElementaryStream::new(*stream_type, pid(pid_value)), 1)
+                    .unwrap();
+            }
+            program.pcr_pid().map(Pid::get)
+        };
+        assert_eq!(
+            [
+                first_pcr_pid(&[StreamType::ISO_IEC_13818_7_AUDIO, StreamType::HEVC_VIDEO]),
+                first_pcr_pid(&[
+                    StreamType::ISO_IEC_13818_7_AUDIO,
+                    StreamType::ISO_IEC_13818_2_VIDEO
+                ]),
+                first_pcr_pid(&[StreamType::ISO_IEC_13818_7_AUDIO, StreamType::AVC_VIDEO]),
+                first_pcr_pid(&[
+                    StreamType::ISO_IEC_13818_7_AUDIO,
+                    StreamType::SVC_VIDEO_SUB_BITSTREAM
+                ]),
+                first_pcr_pid(&[
+                    StreamType::SVC_VIDEO_SUB_BITSTREAM,
+                    StreamType::ISO_IEC_13818_7_AUDIO
+                ]),
+                first_pcr_pid(&[
+                    StreamType::ISO_IEC_13818_7_AUDIO,
+                    StreamType::LCEVC_VIDEO,
+                    StreamType::ISO_IEC_13818_3_AUDIO
+                ]),
+            ],
+            [
+                Some(0x0101),
+                Some(0x0101),
+                Some(0x0101),
+                Some(0x0100),
+                Some(0x0100),
+                Some(0x0100)
+            ]
+        );
+    }
+}
