@@ -216,7 +216,8 @@ impl<'input> TryFrom<&PesPacket<'input>> for SynchronizedPesData<'input> {
     ///   packet header or its private data.
     fn try_from(packet: &PesPacket<'input>) -> Result<Self, Self::Error> {
         let (pes_data_private_data_byte, synchronized_pes_data_byte) = read(
-            packet,
+            packet.stream_id,
+            packet.payload,
             StreamId::PRIVATE_STREAM_1,
             SYNCHRONIZED_DATA_IDENTIFIER,
         )?;
@@ -334,7 +335,8 @@ impl<'input> TryFrom<&PesPacket<'input>> for AsynchronousPesData<'input> {
     ///   packet header or its private data.
     fn try_from(packet: &PesPacket<'input>) -> Result<Self, Self::Error> {
         let (pes_data_private_data_byte, asynchronous_pes_data_byte) = read(
-            packet,
+            packet.stream_id,
+            packet.payload,
             StreamId::PRIVATE_STREAM_2,
             ASYNCHRONOUS_DATA_IDENTIFIER,
         )?;
@@ -346,19 +348,19 @@ impl<'input> TryFrom<&PesPacket<'input>> for AsynchronousPesData<'input> {
     }
 }
 
-/// Splits the payload of `packet` into its private data and its data, after
-/// checking that `stream_id` and `data_identifier` are those of the kind
-fn read<'input>(
-    packet: &PesPacket<'input>,
+/// Splits `payload`, that of a PES packet of `stream_id`, into its private
+/// data and its data, after checking that `stream_id` is `expected_stream_id`
+/// and that `data_identifier` is the one of the kind
+fn read(
     stream_id: StreamId,
+    payload: &[u8],
+    expected_stream_id: StreamId,
     data_identifier: u8,
-) -> Result<(&'input [u8], &'input [u8]), Error> {
-    if packet.stream_id != stream_id {
-        return Err(Error::StreamId {
-            found: packet.stream_id,
-        });
+) -> Result<(&[u8], &[u8]), Error> {
+    if stream_id != expected_stream_id {
+        return Err(Error::StreamId { found: stream_id });
     }
-    let mut reader = FieldReader::new(packet.payload);
+    let mut reader = FieldReader::new(payload);
     let field = |field| move |error| Error::Field { field, error };
     let found = reader.read_u8::<8>().map_err(field("data_identifier"))?;
     if found != data_identifier {
