@@ -27,6 +27,7 @@ mod mux_support;
 #[cfg(feature = "alloc")]
 mod tests {
     use std::collections::BTreeMap;
+    use std::time::Duration;
 
     use mpeg2_systems::time::Timestamp;
     use mpeg2_systems::ts::demux::{Demuxer, DemuxerConfig, Event};
@@ -34,6 +35,9 @@ mod tests {
 
     use crate::mux_support::{AUDIO_PID, Input, PMT_PID, VIDEO_PID, inputs, multiplex, pid};
     use crate::support::{Seen, pat, seen_event, version};
+
+    /// The `mux_delay` of the tests, 0.7 s
+    const MUX_DELAY: Duration = Duration::from_millis(700);
 
     /// What the demuxer reads back: the tables, the PES packets of each PID,
     /// and every other event but `SyncAcquired` and the PCRs
@@ -81,7 +85,7 @@ mod tests {
 
     #[test]
     fn the_program_registered_and_the_pes_packets_given_read_back_as_given() {
-        let stream = multiplex(MuxerConfig::new());
+        let stream = multiplex(MuxerConfig::new(MUX_DELAY));
 
         let mut given = BTreeMap::new();
         for input in inputs() {
@@ -103,6 +107,9 @@ mod tests {
 
     #[test]
     fn the_same_input_gives_the_same_stream() {
-        assert_eq!(multiplex(MuxerConfig::new()), multiplex(MuxerConfig::new()));
+        assert_eq!(
+            multiplex(MuxerConfig::new(MUX_DELAY)),
+            multiplex(MuxerConfig::new(MUX_DELAY))
+        );
     }
 }

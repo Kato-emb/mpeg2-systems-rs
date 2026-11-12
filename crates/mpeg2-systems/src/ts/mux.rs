@@ -79,7 +79,7 @@ use alloc::vec::Vec;
 use crate::descriptor::DescriptorLoop;
 use crate::pes::{PesPacket, StreamId};
 use crate::psi::pmt;
-use crate::time::{StreamTime, SystemTimeClock, stream_time};
+use crate::time::{StreamTime, SystemTimeClock, is_mux_delay_allowed, stream_time};
 use crate::ts::Pid;
 use crate::ts::adaptation_field::AdaptationField;
 use crate::ts::packet::PACKET_LENGTH;
@@ -141,6 +141,7 @@ pub use transport_packet_fields::TransportPacketFields;
 /// caller gives them in the order of their DTS.
 ///
 /// ```
+/// use core::time::Duration;
 /// use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
 /// use mpeg2_systems::psi::pmt::ElementaryStream;
 /// use mpeg2_systems::stream_type::StreamType;
@@ -150,7 +151,7 @@ pub use transport_packet_fields::TransportPacketFields;
 /// use mpeg2_systems::ts::mux::{Muxer, MuxerConfig};
 ///
 /// let (pmt_pid, video_pid) = (Pid::try_from(0x1000)?, Pid::try_from(0x0100)?);
-/// let mut muxer = Muxer::new(MuxerConfig::new())?;
+/// let mut muxer = Muxer::new(MuxerConfig::new(Duration::from_millis(700)))?;
 /// let mut stream = Vec::new();
 ///
 /// // Register the program and its stream
@@ -219,8 +220,14 @@ impl Muxer {
     /// * [`PcrInterval`](Error::PcrInterval):
     ///   [`MuxerConfig::pcr_interval`] is shorter than a tick of the 27 MHz
     ///   system clock, or longer than 0.1 s (§2.7.2, §2.4.2.3 equation 2-5).
+    /// * [`MuxDelay`](Error::MuxDelay): [`MuxerConfig::mux_delay`] is longer
+    ///   than 1 s (§2.4.2.6).
     pub fn new(config: MuxerConfig) -> Result<Self, Error> {
         schedule::check_pcr_interval(config.pcr_interval)?;
+        let mux_delay = config.mux_delay;
+        if !is_mux_delay_allowed(mux_delay) {
+            return Err(Error::MuxDelay { mux_delay });
+        }
         Ok(Self {
             config,
             writer: PacketWriter::new(),
@@ -426,6 +433,7 @@ impl Muxer {
     /// `handle_pes_packet`.
     ///
     /// ```
+    /// use core::time::Duration;
     /// use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
     /// use mpeg2_systems::psi::pmt::ElementaryStream;
     /// use mpeg2_systems::stream_type::StreamType;
@@ -435,7 +443,7 @@ impl Muxer {
     /// use mpeg2_systems::ts::packet::TransportPacket;
     ///
     /// let (pmt_pid, video_pid) = (Pid::try_from(0x1000)?, Pid::try_from(0x0100)?);
-    /// let mut muxer = Muxer::new(MuxerConfig::new())?;
+    /// let mut muxer = Muxer::new(MuxerConfig::new(Duration::from_millis(700)))?;
     /// muxer.add_program(1, pmt_pid)?;
     /// muxer.add_stream(1, ElementaryStream::new(StreamType::ISO_IEC_13818_2_VIDEO, video_pid))?;
     ///
@@ -731,7 +739,10 @@ mod tests {
         muxer
     }
 
-    /// The 90 kHz ticks the default `mux_delay` comes to
+    /// The `mux_delay` of the tests
+    const MUX_DELAY: Duration = Duration::from_millis(700);
+
+    /// The 90 kHz ticks `MUX_DELAY` comes to
     const DELAY: u64 = 63_000;
 
     /// The PAT and the PMT [`muxer_of`] sends, written with `writer`
@@ -787,7 +798,7 @@ mod tests {
     #[test]
     fn the_first_pes_packet_on_the_pcr_pid_follows_the_pat_and_the_pmt_with_the_pcr_in_its_first_packet()
      {
-        let mut muxer = muxer_of(MuxerConfig::new());
+        let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
         let payload = vec![0xaa; 500];
         let packet = pes_packet(0xe0, &payload, Some(90_000));
         muxer.handle_pes_packet(pid(VIDEO_PID), &packet).unwrap();
@@ -810,7 +821,7 @@ mod tests {
 
     #[test]
     fn the_first_pes_packet_off_the_pcr_pid_follows_a_packet_of_the_pcr_alone() {
-        let mut muxer = muxer_of(MuxerConfig::new());
+        let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
         let payload = vec![0xbb; 100];
         let packet = pes_packet(0xc0, &payload, Some(90_000));
         muxer.handle_pes_packet(pid(AUDIO_PID), &packet).unwrap();
@@ -835,7 +846,7 @@ mod tests {
 
     #[test]
     fn the_pat_and_the_pmt_and_the_pcr_are_sent_again_once_their_interval_has_passed() {
-        let mut muxer = muxer_of(MuxerConfig::new());
+        let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
         let payload = [0xcc; 10];
         let mut inputs = Vec::new();
         for index in 0..8 {
@@ -889,7 +900,7 @@ mod tests {
 
     #[test]
     fn without_a_stream_on_the_pcr_pid_the_pcr_goes_alone() {
-        let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
+        let mut muxer = Muxer::new(MuxerConfig::new(MUX_DELAY)).unwrap();
         muxer.add_program(1, pid(PMT_PID)).unwrap();
         muxer.set_pcr_pid(1, pid(0x01ff)).unwrap();
         muxer
@@ -919,12 +930,12 @@ mod tests {
         let payload = vec![0xdd; 1_000];
         let first = pes_packet(0xe0, &payload, Some(90_000));
         let second = pes_packet(0xe0, &payload, Some(93_600));
-        let mut unbounded = muxer_of(MuxerConfig::new());
+        let mut unbounded = muxer_of(MuxerConfig::new(MUX_DELAY));
         unbounded.handle_pes_packet(pid(VIDEO_PID), &first).unwrap();
         let mut first_output = Vec::new();
         unbounded.poll_output(&mut first_output);
 
-        let mut config = MuxerConfig::new();
+        let mut config = MuxerConfig::new(MUX_DELAY);
         config.buffer_limit = first_output.len();
         let mut bounded = muxer_of(config);
         bounded.handle_pes_packet(pid(VIDEO_PID), &first).unwrap();
@@ -952,7 +963,7 @@ mod tests {
 
     #[test]
     fn an_input_alone_past_the_buffer_limit_is_refused() {
-        let mut config = MuxerConfig::new();
+        let mut config = MuxerConfig::new(MUX_DELAY);
         config.buffer_limit = 3 * 188;
         let mut muxer = muxer_of(config);
         let payload = vec![0xee; 200];
@@ -968,7 +979,7 @@ mod tests {
 
     #[test]
     fn a_padding_byte_other_than_0xff_is_refused_as_the_pes_packet_refuses_it() {
-        let mut muxer = muxer_of(MuxerConfig::new());
+        let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
         muxer
             .handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &[], Some(90_000)))
             .unwrap();
@@ -988,7 +999,7 @@ mod tests {
 
     #[test]
     fn a_refused_pes_packet_leaves_the_muxer_as_it_was() {
-        let mut muxer = muxer_of(MuxerConfig::new());
+        let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
         let payload = vec![0x11; 70_000];
         let too_long = pes_packet(0xc0, &payload, Some(90_000));
         let too_long_error = too_long.write(&mut Vec::new()).unwrap_err();
@@ -1000,7 +1011,7 @@ mod tests {
         ];
         let mut out = Vec::new();
         muxer.poll_output(&mut out);
-        let mut fresh = muxer_of(MuxerConfig::new());
+        let mut fresh = muxer_of(MuxerConfig::new(MUX_DELAY));
         let packet = pes_packet(0xe0, &[], Some(90_000));
         muxer.handle_pes_packet(pid(VIDEO_PID), &packet).unwrap();
         fresh.handle_pes_packet(pid(VIDEO_PID), &packet).unwrap();
@@ -1030,7 +1041,7 @@ mod tests {
 
     #[test]
     fn a_program_is_refused_for_program_number_0_or_a_pid_not_free_to_assign() {
-        let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
+        let mut muxer = Muxer::new(MuxerConfig::new(MUX_DELAY)).unwrap();
         let results = [
             muxer.add_program(0, pid(PMT_PID)),
             muxer.add_program(1, pid(0x000f)),
@@ -1048,7 +1059,7 @@ mod tests {
 
     #[test]
     fn the_pcr_pid_is_refused_for_a_program_not_registered_or_a_pid_not_free_to_assign() {
-        let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
+        let mut muxer = Muxer::new(MuxerConfig::new(MUX_DELAY)).unwrap();
         let before_program = muxer.set_pcr_pid(1, pid(VIDEO_PID));
         muxer.add_program(1, pid(PMT_PID)).unwrap();
         assert_eq!(
@@ -1068,7 +1079,7 @@ mod tests {
     #[test]
     fn the_pcr_pid_set_last_is_the_one_the_pcr_goes_on() {
         let output = |pcr_pids: &[u16]| {
-            let mut muxer = muxer_of(MuxerConfig::new());
+            let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
             for &pcr_pid in pcr_pids {
                 muxer.set_pcr_pid(1, pid(pcr_pid)).unwrap();
             }
@@ -1085,7 +1096,7 @@ mod tests {
     #[test]
     fn program_info_is_written_in_the_pmt() {
         let descriptors = [0x05, 0x04, 0x48, 0x44, 0x4d, 0x56];
-        let mut muxer = muxer_of(MuxerConfig::new());
+        let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
         muxer
             .set_program_info(1, DescriptorLoop::from(&[0x05, 0x00][..]))
             .unwrap();
@@ -1117,7 +1128,7 @@ mod tests {
         let broken_error = pmt.write(&mut Vec::new()).unwrap_err();
         let past_the_limit = descriptors(1_009);
         let output = |refused: &[&[u8]]| {
-            let mut muxer = muxer_of(MuxerConfig::new());
+            let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
             let errors: Vec<_> = refused
                 .iter()
                 .map(|program_info| muxer.set_program_info(1, DescriptorLoop::from(*program_info)))
@@ -1133,7 +1144,7 @@ mod tests {
         assert_eq!(
             (
                 errors,
-                Muxer::new(MuxerConfig::new())
+                Muxer::new(MuxerConfig::new(MUX_DELAY))
                     .unwrap()
                     .set_program_info(1, DescriptorLoop::from(&[][..])),
                 out
@@ -1158,7 +1169,7 @@ mod tests {
 
     #[test]
     fn a_stream_is_refused_off_the_program_on_a_pid_in_use_or_for_its_descriptors() {
-        let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
+        let mut muxer = Muxer::new(MuxerConfig::new(MUX_DELAY)).unwrap();
         let before_the_program = muxer.add_stream(
             1,
             ElementaryStream::new(StreamType::AVC_VIDEO, pid(VIDEO_PID)),
@@ -1220,14 +1231,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "a program is registered already")]
     fn a_second_program_panics() {
-        let mut muxer = muxer_of(MuxerConfig::new());
+        let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
         let _ = muxer.add_program(2, pid(0x1001));
     }
 
     #[test]
     #[should_panic(expected = "a stream is registered after the first PES packet")]
     fn a_stream_after_the_first_pes_packet_panics() {
-        let mut muxer = muxer_of(MuxerConfig::new());
+        let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
         muxer
             .handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &[], Some(90_000)))
             .unwrap();
@@ -1237,7 +1248,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "the PCR PID is set after the first PES packet")]
     fn the_pcr_pid_after_the_first_pes_packet_panics() {
-        let mut muxer = muxer_of(MuxerConfig::new());
+        let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
         muxer
             .handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &[], Some(90_000)))
             .unwrap();
@@ -1247,7 +1258,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "the program info is set after the first PES packet")]
     fn program_info_after_the_first_pes_packet_panics() {
-        let mut muxer = muxer_of(MuxerConfig::new());
+        let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
         muxer
             .handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &[], Some(90_000)))
             .unwrap();
@@ -1257,21 +1268,21 @@ mod tests {
     #[test]
     #[should_panic(expected = "a PES packet is given after finish")]
     fn a_pes_packet_after_finish_panics() {
-        let mut muxer = muxer_of(MuxerConfig::new());
+        let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
         muxer.finish();
         let _ = muxer.handle_pes_packet(pid(VIDEO_PID), &pes_packet(0xe0, &[], Some(90_000)));
     }
 
     #[test]
     fn after_finish_poll_output_gives_what_is_held_and_a_second_finish_does_nothing() {
-        let mut muxer = muxer_of(MuxerConfig::new());
+        let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
         let packet = pes_packet(0xe0, &[1], Some(90_000));
         muxer.handle_pes_packet(pid(VIDEO_PID), &packet).unwrap();
         muxer.finish();
         muxer.finish();
         let mut out = Vec::new();
         muxer.poll_output(&mut out);
-        let mut fresh = muxer_of(MuxerConfig::new());
+        let mut fresh = muxer_of(MuxerConfig::new(MUX_DELAY));
         fresh.handle_pes_packet(pid(VIDEO_PID), &packet).unwrap();
         fresh.finish();
         let mut expected = Vec::new();
@@ -1281,7 +1292,7 @@ mod tests {
 
     #[test]
     fn the_pcr_is_the_dts_less_the_mux_delay_and_never_goes_back() {
-        let mut config = MuxerConfig::new();
+        let mut config = MuxerConfig::new(MUX_DELAY);
         config.pcr_interval = Duration::from_millis(100);
         let mut muxer = muxer_of(config);
         let mut pcrs = Vec::new();
@@ -1356,7 +1367,7 @@ mod tests {
     /// The stream a muxer of the default settings writes of one video stream
     /// whose PTS and DTS are each of `timestamps`
     fn multiplexed(timestamps: impl IntoIterator<Item = u64>) -> Vec<u8> {
-        let mut muxer = muxer_of(MuxerConfig::new());
+        let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
         let mut out = Vec::new();
         for timestamp in timestamps {
             muxer
@@ -1385,7 +1396,7 @@ mod tests {
 
     #[test]
     fn a_pes_packet_past_the_buffer_limit_is_refused_before_it_is_copied() {
-        let mut config = MuxerConfig::new();
+        let mut config = MuxerConfig::new(MUX_DELAY);
         config.buffer_limit = 3 * 188;
         let mut muxer = muxer_of(config);
         let payload = vec![0x77; 10_000];
@@ -1402,7 +1413,7 @@ mod tests {
 
     #[test]
     fn a_leap_too_long_to_fill_within_the_buffer_limit_is_refused_however_much_is_taken() {
-        let mut config = MuxerConfig::new();
+        let mut config = MuxerConfig::new(MUX_DELAY);
         config.buffer_limit = 100 * 188;
         let mut muxer = muxer_of(config);
         muxer
@@ -1437,7 +1448,7 @@ mod tests {
 
     #[test]
     fn a_stream_whose_first_pes_packet_has_no_pts_or_whose_dts_goes_back_is_refused() {
-        let mut muxer = muxer_of(MuxerConfig::new());
+        let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
         let results = [
             muxer.handle_pes_packet(pid(VIDEO_PID), &unstamped(0xe0)),
             muxer.handle_pes_packet(pid(VIDEO_PID), &stamped(0xe0, 180_000)),
@@ -1450,7 +1461,7 @@ mod tests {
         let mut out = Vec::new();
         muxer.poll_output(&mut out);
 
-        let mut fresh = muxer_of(MuxerConfig::new());
+        let mut fresh = muxer_of(MuxerConfig::new(MUX_DELAY));
         let mut expected = Vec::new();
         for (stream_pid, packet) in [
             (VIDEO_PID, stamped(0xe0, 180_000)),
@@ -1489,7 +1500,7 @@ mod tests {
 
     #[test]
     fn a_dts_past_the_wrap_of_33_bits_does_not_go_back() {
-        let mut muxer = muxer_of(MuxerConfig::new());
+        let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
         let results = [Timestamp::MODULUS - 1_800, Timestamp::MODULUS + 1_800]
             .map(|timestamp| muxer.handle_pes_packet(pid(VIDEO_PID), &stamped(0xe0, timestamp)));
         assert_eq!(results, [Ok(()), Ok(())]);
@@ -1499,7 +1510,7 @@ mod tests {
     fn a_stream_of_one_pcr_ends_with_a_second_one_pcr_interval_on_and_a_longer_one_with_none_added()
     {
         let finished = |timestamps: &[u64]| {
-            let mut muxer = muxer_of(MuxerConfig::new());
+            let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
             let mut out = Vec::new();
             for &timestamp in timestamps {
                 muxer
@@ -1538,9 +1549,7 @@ mod tests {
 
     #[test]
     fn a_mux_delay_longer_than_the_time_stamp_gives_the_pcr_round_the_circle() {
-        let mut config = MuxerConfig::new();
-        config.mux_delay = Duration::from_secs(96_000);
-        let mut muxer = muxer_of(config);
+        let mut muxer = muxer_of(MuxerConfig::new(Duration::from_secs(1)));
         let mut header = OptionalHeader::new();
         header.pts = Some(Timestamp::try_from(0).unwrap());
         let mut packet = PesPacket::new(StreamId::from(0xe0), &[1]);
@@ -1558,8 +1567,17 @@ mod tests {
                     .map(ClockReference::ticks)
             })
             .collect();
-        let delay = 96_000 * 27_000_000 % ClockReference::MODULUS;
-        assert_eq!(pcrs, [ClockReference::MODULUS - delay]);
+        assert_eq!(pcrs, [ClockReference::MODULUS - 27_000_000]);
+    }
+
+    #[test]
+    fn a_mux_delay_is_taken_up_to_1_s() {
+        let taken = |mux_delay| Muxer::new(MuxerConfig::new(mux_delay)).map(|_| ());
+        let past = Duration::from_secs(1) + Duration::from_nanos(1);
+        assert_eq!(
+            (taken(Duration::from_secs(1)), taken(past)),
+            (Ok(()), Err(Error::MuxDelay { mux_delay: past }))
+        );
     }
 
     /// The shortest `pcr_interval` a muxer takes: one tick of the 27 MHz system
@@ -1569,7 +1587,7 @@ mod tests {
     #[test]
     fn a_pcr_interval_of_no_tick_of_the_stc_or_past_0_1_s_is_refused() {
         let with = |pcr_interval| {
-            let mut config = MuxerConfig::new();
+            let mut config = MuxerConfig::new(MUX_DELAY);
             config.pcr_interval = pcr_interval;
             Muxer::new(config).map(|_| ())
         };
@@ -1597,7 +1615,7 @@ mod tests {
 
     #[test]
     fn the_shortest_pcr_interval_never_sends_two_pcrs_of_one_value() {
-        let mut config = MuxerConfig::new();
+        let mut config = MuxerConfig::new(MUX_DELAY);
         config.pcr_interval = ONE_TICK;
         let mut muxer = muxer_of(config);
         let mut out = Vec::new();
@@ -1672,7 +1690,7 @@ mod tests {
 
     #[test]
     fn a_psi_interval_of_0_sends_the_pat_and_the_pmt_before_every_pes_packet() {
-        let mut config = MuxerConfig::new();
+        let mut config = MuxerConfig::new(MUX_DELAY);
         config.psi_interval = Duration::ZERO;
         let inputs = [
             (VIDEO_PID, 0xe0, 90_000),
@@ -1685,7 +1703,7 @@ mod tests {
 
     #[test]
     fn a_psi_interval_of_duration_max_sends_the_pat_and_the_pmt_before_the_first_pes_packet_only() {
-        let mut config = MuxerConfig::new();
+        let mut config = MuxerConfig::new(MUX_DELAY);
         config.psi_interval = Duration::MAX;
         let inputs: Vec<(u16, u8, u64)> = (0..1_000)
             .map(|index| (VIDEO_PID, 0xe0, 90_000 + index * 1_800))
@@ -1714,7 +1732,7 @@ mod tests {
     fn program_info_is_taken_that_fills_the_pmt_and_refused_one_byte_past_it() {
         // A PMT without streams: 13 bytes of `section_length` besides its
         // descriptors leave 1008 of the 1021
-        let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
+        let mut muxer = Muxer::new(MuxerConfig::new(MUX_DELAY)).unwrap();
         muxer.add_program(1, pid(PMT_PID)).unwrap();
         assert_eq!(
             [
@@ -1737,7 +1755,7 @@ mod tests {
     fn a_stream_is_taken_whose_descriptors_fill_the_pmt_and_refused_one_byte_past_it() {
         // A PMT of video and audio: 13 bytes besides its loops, two entries of
         // 5, and 5 for the stream added, leave 993 bytes of descriptors
-        let mut muxer = muxer_of(MuxerConfig::new());
+        let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
         let mut add = |es_info: &[u8]| {
             muxer.add_stream(
                 1,
@@ -1764,7 +1782,7 @@ mod tests {
     /// A muxer of the default settings with program 1, a video stream and a
     /// stream of `private_stream_2`
     fn muxer_with_private_stream_2() -> Muxer {
-        let mut muxer = Muxer::new(MuxerConfig::new()).unwrap();
+        let mut muxer = Muxer::new(MuxerConfig::new(MUX_DELAY)).unwrap();
         muxer.add_program(1, pid(PMT_PID)).unwrap();
         muxer
             .add_stream(
@@ -1878,7 +1896,7 @@ mod tests {
         fn multiplexed(
             inputs: &[(u16, u64, TransportPacketFields<'_>)],
         ) -> (Vec<Result<(), Error>>, Vec<u8>) {
-            let mut muxer = muxer_of(MuxerConfig::new());
+            let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
             let payload = vec![0xaa; 400];
             let results = inputs
                 .iter()
@@ -2236,7 +2254,7 @@ mod tests {
         fn a_pes_packet_after_an_adaptation_field_that_leaves_one_byte_of_payload_reads_back_whole()
         {
             let payload: Vec<u8> = (0..=255).collect();
-            let mut muxer = muxer_of(MuxerConfig::new());
+            let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
             let packet = pes_packet(0xc0, &payload, Some(90_000));
             muxer
                 .handle_pes_packet_with_transport_packet_fields(
@@ -2269,7 +2287,7 @@ mod tests {
 
         #[test]
         fn a_pcr_split_from_its_pes_packet_counts_with_the_pes_packet_against_the_buffer_limit() {
-            let config = MuxerConfig::new()
+            let config = MuxerConfig::new(MUX_DELAY)
                 .with_psi_interval(Duration::ZERO)
                 .with_pcr_interval(Duration::from_millis(10))
                 .with_buffer_limit(600);
@@ -2298,7 +2316,7 @@ mod tests {
         fn finished(
             inputs: &[(u16, u8, Option<u64>, TransportPacketFields<'_>)],
         ) -> (Vec<Result<(), Error>>, Pcrs) {
-            let mut muxer = muxer_of(MuxerConfig::new());
+            let mut muxer = muxer_of(MuxerConfig::new(MUX_DELAY));
             let payload = [0xaa; 100];
             let results = inputs
                 .iter()
@@ -2316,7 +2334,7 @@ mod tests {
             (results, pcrs_of(&out))
         }
 
-        /// The PCR of the time `dts` on the PCR PID, the default `mux_delay` taken off
+        /// The PCR of the time `dts` on the PCR PID, `MUX_DELAY` taken off
         fn video_pcr(dts: u64) -> (u16, ClockReference) {
             (VIDEO_PID, pcr((dts - DELAY) * 300))
         }

@@ -42,6 +42,9 @@ mod tests {
 
     use crate::tools::{Timing, ffprobe, pes_packet, pes_packets_of_program_stream};
 
+    /// The `mux_delay` of the tests, 0.7 s
+    const MUX_DELAY: Duration = Duration::from_millis(700);
+
     const VIDEO: u8 = 0xe0;
     const AUDIO: u8 = 0xc0;
 
@@ -86,7 +89,7 @@ mod tests {
     /// checks that ffprobe reads the streams registered and the PES packets
     /// given
     fn assert_read_as_given(name: &str, inputs: &[Input]) {
-        multiplex_read_as_given(name, MuxerConfig::new(25_200), inputs, |_, _| {});
+        multiplex_read_as_given(name, MuxerConfig::new(25_200, MUX_DELAY), inputs, |_, _| {});
     }
 
     /// Writes what the muxer of `config` makes of `inputs`, `before` called
@@ -188,7 +191,7 @@ mod tests {
     fn the_pes_packets_read_in_ffprobe_as_given_with_the_headers_sent_again() {
         let stream = multiplex_read_as_given(
             "ps_muxer_headers_again.mpg",
-            MuxerConfig::new(25_200).with_header_interval(Duration::from_millis(100)),
+            MuxerConfig::new(25_200, MUX_DELAY).with_header_interval(Duration::from_millis(100)),
             &inputs_at(|index| 90_000 + index * STEP),
             |_, _| {},
         );
@@ -208,7 +211,7 @@ mod tests {
         let descriptor = [0x80, 0x02, 0xaa, 0xbb];
         let stream = multiplex_read_as_given(
             "ps_muxer_map_updated.mpg",
-            MuxerConfig::new(25_200),
+            MuxerConfig::new(25_200, MUX_DELAY),
             &inputs_at(|index| 90_000 + index * STEP),
             |muxer, index| {
                 if index == 30 {
@@ -240,7 +243,7 @@ mod tests {
     fn the_pes_packets_read_in_ffprobe_as_given_at_a_fixed_rate_across_a_leap() {
         let stream = multiplex_read_as_given(
             "ps_muxer_fixed_rate.mpg",
-            MuxerConfig::new(25_200).with_fixed_rate(true),
+            MuxerConfig::new(25_200, MUX_DELAY).with_fixed_rate(true),
             &inputs_at(|index| 90_000 + index * STEP + if index >= 50 { 180_000 } else { 0 }),
             |_, _| {},
         );
@@ -258,7 +261,7 @@ mod tests {
      {
         let stream = multiplex_read_as_given(
             "ps_muxer_fixed_rate_large_packs.mpg",
-            MuxerConfig::new(25_200)
+            MuxerConfig::new(25_200, MUX_DELAY)
                 .with_fixed_rate(true)
                 .with_pack_size(200_000),
             &inputs_at(|index| 90_000 + index * STEP + if index >= 50 { 180_000 } else { 0 }),
@@ -294,7 +297,7 @@ mod tests {
     fn the_pes_packets_read_in_ffprobe_as_given_in_a_csps() {
         multiplex_read_as_given(
             "ps_muxer_csps.mpg",
-            MuxerConfig::new(3_528)
+            MuxerConfig::new(3_528, MUX_DELAY)
                 .with_pack_size(2_324)
                 .with_csps(true),
             &inputs_at(|index| 90_000 + index * STEP),
@@ -307,7 +310,7 @@ mod tests {
     fn the_pes_packets_read_in_ffprobe_as_given_in_a_csps_at_a_fixed_rate() {
         let stream = multiplex_read_as_given(
             "ps_muxer_csps_fixed_rate.mpg",
-            MuxerConfig::new(3_528)
+            MuxerConfig::new(3_528, MUX_DELAY)
                 .with_pack_size(2_324)
                 .with_fixed_rate(true)
                 .with_csps(true),
