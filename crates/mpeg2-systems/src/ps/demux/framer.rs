@@ -32,6 +32,20 @@ enum State {
         skipped: usize,
     },
     Synced,
+    /// Synchronized, and passing over bytes that are no element, up to the
+    /// next start code the input has not brought yet
+    Passing {
+        /// Bytes after the consumed ones in which no start code begins
+        // Why not rescan from the front instead: the bytes wait for the next
+        // start code, so rescanning them on every step costs time quadratic
+        // in the run.
+        scanned: usize,
+        /// Why the bytes are passed over, when a pack header is one this
+        /// crate does not read
+        // Why not classify the front again on each step instead: the verdict
+        // is known when passing starts, and the bytes after it do not change it.
+        error: Option<Error>,
+    },
 }
 
 /// What the search saw where it stands
@@ -245,11 +259,13 @@ impl PackFramer {
                 },
                 // Why to the next start code: a pack header this crate does
                 // not read states no length it can trust.
-                (Synced::Broken(error), _) => unframable(rest, consumed, Some(error)),
+                (Synced::Broken(error), _) => pass_over(rest, consumed, Some(error), input, 1),
                 // Why not read to the next start code: PES_packet_length 0 is
                 // allowed only for video in a Transport Stream (§2.4.3.7), so
                 // in a Program Stream the packet is broken.
-                (Synced::UnboundedPes | Synced::Unknown, _) => unframable(rest, consumed, None),
+                (Synced::UnboundedPes | Synced::Unknown, _) => {
+                    pass_over(rest, consumed, None, input, 1)
+                }
                 // Why back to searching: the end code ends the Program
                 // Stream, so a stream after it synchronizes on its own first
                 // pack header.
@@ -272,6 +288,7 @@ impl PackFramer {
                     output: Some(Output::Truncated(consumed..self.input.len())),
                 },
             },
+            State::Passing { scanned, error } => pass_over(rest, consumed, error, input, scanned),
         }
     }
 }
@@ -287,13 +304,47 @@ fn report_skipped(consumed: usize, skipped: usize) -> Transition {
     }
 }
 
-/// Passes over `rest`, which starts at `consumed`, up to its next start code
-fn unframable(rest: &[u8], consumed: usize, error: Option<Error>) -> Transition {
-    // Why scan from the second byte: the front is the start code that could
-    // not be cut, so the scan always passes over at least one byte.
-    let length = match scan_start_code(rest, 1) {
-        Scan::Found(index) | Scan::Partial(index) => index,
-        Scan::NotFound => rest.len(),
+/// Passes over `rest`, which starts at `consumed`, up to its next start code,
+/// scanning from `scanned`, at least 1
+///
+/// Waits while no start code has come within the report limit and more input
+/// may follow, so where the input is cut does not change what is reported.
+fn pass_over(
+    rest: &[u8],
+    consumed: usize,
+    error: Option<Error>,
+    input: Input,
+    scanned: usize,
+) -> Transition {
+    // Why a start code may begin this many bytes before the last held: it
+    // completes with the bytes the next input brings.
+    let incomplete = START_CODE_PREFIX.len().saturating_sub(1);
+    // Why look no further than the report limit: a run is reported in pieces
+    // no longer than it, as the search reports what it walks past.
+    let held = rest
+        .len()
+        .min(UNSYNCHRONIZED_REPORT_LIMIT.saturating_add(incomplete));
+    let region = rest.get(..held).unwrap_or_default();
+    let length = match (scan_start_code(region, scanned), input) {
+        (Scan::Found(index), _) => Some(index.min(UNSYNCHRONIZED_REPORT_LIMIT)),
+        // Why the limit once held past it: no start code begins within it, as
+        // a prefix starting there would have been found whole.
+        _ if held > UNSYNCHRONIZED_REPORT_LIMIT => Some(UNSYNCHRONIZED_REPORT_LIMIT),
+        (Scan::Partial(index), Input::Ends) => Some(index),
+        (Scan::NotFound, Input::Ends) => Some(held),
+        (Scan::Partial(_) | Scan::NotFound, Input::Continues) => None,
+    };
+    let Some(length) = length else {
+        return Transition {
+            next_state: State::Passing {
+                // Why at least 1: the front is the start code that could not
+                // be cut, so the scan always passes over at least one byte.
+                scanned: held.saturating_sub(incomplete).max(1),
+                error,
+            },
+            consume: 0,
+            output: Some(Output::NeedMoreData),
+        };
     };
     Transition {
         next_state: State::Synced,
