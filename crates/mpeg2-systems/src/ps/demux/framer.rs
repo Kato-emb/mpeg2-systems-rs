@@ -5,12 +5,12 @@
 //! off the input by its declared length, until an `MPEG_program_end_code`
 //! drops the stream. What it cannot cut is passed over to the next start
 //! code. It reads no element: the demuxer reads what is cut. Every byte is
-//! reported in some output, as a range of the input buffer.
+//! cut into some output, as a range of the buffer.
 
 use core::ops::Range;
 
 use super::Error;
-use crate::input_buffer::{End, Input, InputBuffer};
+use crate::framing::{Buffer, Decoder, Skipped};
 use crate::pes::{self, EncodedLen, StreamId};
 use crate::ps::start_code::{
     PACK_STREAM_ID, PROGRAM_END_STREAM_ID, PROGRAM_STREAM_MAP_STREAM_ID, START_CODE_PREFIX,
@@ -18,24 +18,18 @@ use crate::ps::start_code::{
 };
 use crate::ps::{MPEG_PROGRAM_END_CODE, PACK_START_CODE, pack_header, psm, system_header};
 
-/// Bytes walked past that force an [`Output::Unsynchronized`] out
-///
-/// A longer run is reported in several outputs, which bounds what a stream
-/// that never synchronizes holds while still handing every byte back.
-const UNSYNCHRONIZED_REPORT_LIMIT: usize = 64 * 1024;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Searching {
-        /// Bytes after the consumed ones that the search walked past and has
-        /// not reported yet
-        skipped: usize,
+        /// Bytes after the cut ones that the search walked past and has not
+        /// reported yet
+        skipped: Skipped,
     },
     Synced,
     /// Synchronized, and passing over bytes that are no element, up to the
     /// next start code the input has not brought yet
     Passing {
-        /// Bytes after the consumed ones in which no start code begins
+        /// Bytes after the cut ones in which no start code begins
         // Why not rescan from the front instead: the bytes wait for the next
         // start code, so rescanning them on every step costs time quadratic
         // in the run.
@@ -87,21 +81,17 @@ pub(super) enum Element {
     PesPacket,
 }
 
-/// Output of one [`PackFramer::step`]
-///
-/// A range indexes the input through [`PackFramer::bytes`] and stays valid
-/// until the next [`PackFramer::compact`].
+/// A unit [`ProgramStreamElements`] cut, with the range of the buffer it lies
+/// in
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Output {
-    /// The input holds too few bytes to decide
-    NeedMoreData,
     /// The first pack header whose length the framer can tell, which
     /// synchronizes it
     SyncAcquired(Range<usize>),
     /// An element cut by its declared length
     Element(Element, Range<usize>),
     /// `MPEG_program_end_code`, which drops synchronization
-    ProgramEnd,
+    ProgramEnd(Range<usize>),
     /// Bytes the search walked past
     Unsynchronized(Range<usize>),
     /// Bytes that could not be cut while synchronized, up to the next start
@@ -109,230 +99,224 @@ pub(super) enum Output {
     Unframable(Range<usize>, Option<Error>),
     /// At the end of input, the bytes of an element short of its length
     Truncated(Range<usize>),
-    /// Every byte before the end [`PackFramer::finish`] marked is reported
-    EndOfInput,
+}
+
+/// What a cut yields, before the bytes it takes are known as a range
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cut {
+    SyncAcquired,
+    Element(Element),
+    ProgramEnd,
+    Unsynchronized,
+    Unframable(Option<Error>),
+    Truncated,
 }
 
 struct Transition {
     next_state: State,
+    /// Bytes cut off the front, which the output lends
     consume: usize,
-    /// `None` keeps [`PackFramer::step`] stepping
-    output: Option<Output>,
+    then: Then,
 }
 
-/// Start code state machine over the input buffer
+/// What follows a transition
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Then {
+    /// The cut goes on, observing again
+    Continue,
+    /// The cut ends with no output: the input holds too few bytes
+    NeedMoreData,
+    /// The cut ends with this output, over the bytes cut
+    Output(Cut),
+}
+
+/// The elements of a Program Stream, cut by their start codes
 #[derive(Debug, Clone)]
-pub(super) struct PackFramer {
+pub(super) struct ProgramStreamElements {
     state: State,
-    input: InputBuffer,
 }
 
-impl PackFramer {
+impl ProgramStreamElements {
     pub(super) const fn new() -> Self {
         Self {
-            state: State::Searching { skipped: 0 },
-            input: InputBuffer::new(),
+            state: State::Searching {
+                skipped: Skipped::new(),
+            },
         }
     }
 
-    /// Appends input
-    ///
-    /// # Panics
-    /// Panics if called after [`PackFramer::finish`] before
-    /// [`PackFramer::step`] has returned [`Output::EndOfInput`].
-    pub(super) fn extend(&mut self, bytes: &[u8]) {
-        self.input.extend(bytes);
-    }
-
-    /// Drops the bytes reported or cut, once no output's range points at
-    /// them, if they are no fewer than the bytes left
-    pub(super) fn compact(&mut self) {
-        self.input.compact();
-    }
-
-    /// Ends the input at the bytes handed over so far
-    ///
-    /// The steps that follow report what is left: an element short of its
-    /// length as [`Output::Truncated`], or what the search walked past as
-    /// [`Output::Unsynchronized`]. The state stays, so input extended once
-    /// the end is reported goes on synchronized.
-    pub(super) fn finish(&mut self) {
-        self.input.finish();
-    }
-
-    /// Returns the bytes of a range an [`Output`] carries
-    pub(super) fn bytes(&self, range: Range<usize>) -> &[u8] {
-        self.input.get(range)
-    }
-
-    /// Steps the state machine until it has something to report
-    pub(super) fn step(&mut self) -> Output {
+    /// Cuts the next unit; `eof` tells that no input follows the bytes held
+    fn cut(&mut self, buffer: &mut Buffer, eof: bool) -> Option<Output> {
         loop {
-            if self.input.reach_end() == End::Reached {
-                return Output::EndOfInput;
-            }
-            let transition = self.transition();
+            let transition = self.transition(buffer.unconsumed(), eof);
             self.state = transition.next_state;
-            self.input.consume(transition.consume);
-            if let Some(output) = transition.output {
-                return output;
-            }
+            let range = buffer.split_to(transition.consume);
+            let cut = match transition.then {
+                Then::Continue => continue,
+                Then::NeedMoreData => return None,
+                Then::Output(cut) => cut,
+            };
+            return Some(match cut {
+                Cut::SyncAcquired => Output::SyncAcquired(range),
+                Cut::Element(element) => Output::Element(element, range),
+                Cut::ProgramEnd => Output::ProgramEnd(range),
+                Cut::Unsynchronized => Output::Unsynchronized(range),
+                Cut::Unframable(error) => Output::Unframable(range, error),
+                Cut::Truncated => Output::Truncated(range),
+            });
         }
     }
 
-    fn transition(&self) -> Transition {
-        let consumed = self.input.consumed();
-        let rest = self.input.from(consumed);
-        let input = self.input.input();
+    fn transition(&self, rest: &[u8], eof: bool) -> Transition {
         match self.state {
             // Why report before observing again: the report is capped, so a
             // stream that never synchronizes hands its bytes back in bounded
             // pieces instead of holding all of them.
-            State::Searching { skipped } if skipped >= UNSYNCHRONIZED_REPORT_LIMIT => {
-                report_skipped(consumed, skipped)
-            }
-            State::Searching { skipped } => {
-                let searched = rest.get(skipped..).unwrap_or_default();
-                match (observe_search(searched), input) {
+            State::Searching { mut skipped } if skipped.is_full() => report_skipped(&mut skipped),
+            State::Searching { mut skipped } => {
+                let searched = rest.get(skipped.count()..).unwrap_or_default();
+                match (observe_search(searched), eof) {
                     // Why cap the garbage taken at what the report has room
                     // for: one chunk can carry far more garbage than the
                     // limit, and taking it all would make one report exceed
                     // the bound.
-                    (Search::Garbage(length), _) => Transition {
-                        next_state: State::Searching {
-                            skipped: skipped.saturating_add(
-                                length.min(UNSYNCHRONIZED_REPORT_LIMIT.saturating_sub(skipped)),
-                            ),
-                        },
-                        consume: 0,
-                        output: None,
-                    },
+                    (Search::Garbage(length), _) => {
+                        skipped.skip(length);
+                        Transition {
+                            next_state: State::Searching { skipped },
+                            consume: 0,
+                            then: Then::Continue,
+                        }
+                    }
                     // Why report the run walked past before acquiring: one
-                    // step carries one output, so the run goes out here and
-                    // the next step acquires on the same bytes.
-                    (Search::Pack(..), _) if skipped > 0 => report_skipped(consumed, skipped),
+                    // cut carries one output, so the run goes out here and the
+                    // next cut acquires on the same bytes.
+                    (Search::Pack(..), _) if skipped.count() > 0 => report_skipped(&mut skipped),
                     (Search::Pack(length), _) => Transition {
                         next_state: State::Synced,
                         consume: length,
-                        output: Some(Output::SyncAcquired(
-                            consumed..consumed.saturating_add(length),
-                        )),
+                        then: Then::Output(Cut::SyncAcquired),
                     },
                     // Why one byte, not the whole start code: a real pack
                     // start code may overlap the bytes of the false one.
-                    (Search::FalseStart, _) => Transition {
-                        next_state: State::Searching {
-                            skipped: skipped.saturating_add(1),
-                        },
-                        consume: 0,
-                        output: None,
-                    },
+                    (Search::FalseStart, _) => {
+                        skipped.skip(1);
+                        Transition {
+                            next_state: State::Searching { skipped },
+                            consume: 0,
+                            then: Then::Continue,
+                        }
+                    }
                     // Why keep the run rather than report it on waiting: the
                     // events would then depend on where the input was cut.
-                    (Search::NeedMoreData, Input::Continues) => Transition {
+                    (Search::NeedMoreData, false) => Transition {
                         next_state: State::Searching { skipped },
                         consume: 0,
-                        output: Some(Output::NeedMoreData),
+                        then: Then::NeedMoreData,
                     },
-                    // Why no more than the report limit at the end too: the
-                    // bound on a report holds wherever the input ends.
-                    (Search::NeedMoreData, Input::Ends) => {
-                        let length = rest.len().min(UNSYNCHRONIZED_REPORT_LIMIT);
+                    (Search::NeedMoreData, true) => {
+                        let length = skipped.report_rest(rest.len());
                         Transition {
-                            next_state: State::Searching { skipped: 0 },
+                            next_state: State::Searching { skipped },
                             consume: length,
-                            output: Some(Output::Unsynchronized(
-                                consumed..consumed.saturating_add(length),
-                            )),
+                            then: if length > 0 {
+                                Then::Output(Cut::Unsynchronized)
+                            } else {
+                                Then::NeedMoreData
+                            },
                         }
                     }
                 }
             }
-            State::Synced => match (observe_synced(rest), input) {
+            State::Synced => match (observe_synced(rest), eof) {
                 (Synced::Element(element, length), _) => Transition {
                     next_state: State::Synced,
                     consume: length,
-                    output: Some(Output::Element(
-                        element,
-                        consumed..consumed.saturating_add(length),
-                    )),
+                    then: Then::Output(Cut::Element(element)),
                 },
                 // Why to the next start code: a pack header this crate does
                 // not read states no length it can trust.
-                (Synced::Broken(error), _) => pass_over(rest, consumed, Some(error), input, 1),
+                (Synced::Broken(error), _) => pass_over(rest, Some(error), eof, 1),
                 // Why not read to the next start code: PES_packet_length 0 is
                 // allowed only for video in a Transport Stream (§2.4.3.7), so
                 // in a Program Stream the packet is broken.
-                (Synced::UnboundedPes | Synced::Unknown, _) => {
-                    pass_over(rest, consumed, None, input, 1)
-                }
+                (Synced::UnboundedPes | Synced::Unknown, _) => pass_over(rest, None, eof, 1),
                 // Why back to searching: the end code ends the Program
                 // Stream, so a stream after it synchronizes on its own first
                 // pack header.
                 (Synced::ProgramEnd, _) => Transition {
-                    next_state: State::Searching { skipped: 0 },
+                    next_state: State::Searching {
+                        skipped: Skipped::new(),
+                    },
                     consume: MPEG_PROGRAM_END_CODE.len(),
-                    output: Some(Output::ProgramEnd),
+                    then: Then::Output(Cut::ProgramEnd),
                 },
-                (Synced::NeedMoreData, Input::Continues) => Transition {
+                (Synced::NeedMoreData, false) => Transition {
                     next_state: State::Synced,
                     consume: 0,
-                    output: Some(Output::NeedMoreData),
+                    then: Then::NeedMoreData,
                 },
                 // Why keep the state, unlike the end code: the end of input
                 // is not the end of the Program Stream, so a caller that goes
                 // on hands over bytes on the same footing.
-                (Synced::NeedMoreData, Input::Ends) => Transition {
+                (Synced::NeedMoreData, true) if rest.is_empty() => Transition {
+                    next_state: State::Synced,
+                    consume: 0,
+                    then: Then::NeedMoreData,
+                },
+                (Synced::NeedMoreData, true) => Transition {
                     next_state: State::Synced,
                     consume: rest.len(),
-                    output: Some(Output::Truncated(consumed..self.input.len())),
+                    then: Then::Output(Cut::Truncated),
                 },
             },
-            State::Passing { scanned, error } => pass_over(rest, consumed, error, input, scanned),
+            State::Passing { scanned, error } => pass_over(rest, error, eof, scanned),
         }
     }
 }
 
-/// Reports the run the search walked past, which starts at `consumed`
-fn report_skipped(consumed: usize, skipped: usize) -> Transition {
-    Transition {
-        next_state: State::Searching { skipped: 0 },
-        consume: skipped,
-        output: Some(Output::Unsynchronized(
-            consumed..consumed.saturating_add(skipped),
-        )),
+impl Decoder for ProgramStreamElements {
+    type Item = Output;
+
+    fn decode(&mut self, buffer: &mut Buffer) -> Option<Output> {
+        self.cut(buffer, false)
+    }
+
+    fn decode_eof(&mut self, buffer: &mut Buffer) -> Option<Output> {
+        self.cut(buffer, true)
     }
 }
 
-/// Passes over `rest`, which starts at `consumed`, up to its next start code,
-/// scanning from `scanned`, at least 1
+/// Reports the run the search walked past, from the front
+fn report_skipped(skipped: &mut Skipped) -> Transition {
+    Transition {
+        consume: skipped.report(),
+        next_state: State::Searching { skipped: *skipped },
+        then: Then::Output(Cut::Unsynchronized),
+    }
+}
+
+/// Passes over `rest` up to its next start code, scanning from `scanned`, at
+/// least 1; `eof` tells that no input follows the bytes held
 ///
 /// Waits while no start code has come within the report limit and more input
 /// may follow, so where the input is cut does not change what is reported.
-fn pass_over(
-    rest: &[u8],
-    consumed: usize,
-    error: Option<Error>,
-    input: Input,
-    scanned: usize,
-) -> Transition {
+fn pass_over(rest: &[u8], error: Option<Error>, eof: bool, scanned: usize) -> Transition {
     // Why a start code may begin this many bytes before the last held: it
     // completes with the bytes the next input brings.
     let incomplete = START_CODE_PREFIX.len().saturating_sub(1);
     // Why look no further than the report limit: a run is reported in pieces
     // no longer than it, as the search reports what it walks past.
-    let held = rest
-        .len()
-        .min(UNSYNCHRONIZED_REPORT_LIMIT.saturating_add(incomplete));
+    let held = rest.len().min(Skipped::LIMIT.saturating_add(incomplete));
     let region = rest.get(..held).unwrap_or_default();
-    let length = match (scan_start_code(region, scanned), input) {
-        (Scan::Found(index), _) => Some(index.min(UNSYNCHRONIZED_REPORT_LIMIT)),
+    let length = match (scan_start_code(region, scanned), eof) {
+        (Scan::Found(index), _) => Some(index.min(Skipped::LIMIT)),
         // Why the limit once held past it: no start code begins within it, as
         // a prefix starting there would have been found whole.
-        _ if held > UNSYNCHRONIZED_REPORT_LIMIT => Some(UNSYNCHRONIZED_REPORT_LIMIT),
-        (Scan::Partial(index), Input::Ends) => Some(index),
-        (Scan::NotFound, Input::Ends) => Some(held),
-        (Scan::Partial(_) | Scan::NotFound, Input::Continues) => None,
+        _ if held > Skipped::LIMIT => Some(Skipped::LIMIT),
+        (Scan::Partial(index), true) => Some(index),
+        (Scan::NotFound, true) => Some(held),
+        (Scan::Partial(_) | Scan::NotFound, false) => None,
     };
     let Some(length) = length else {
         return Transition {
@@ -343,16 +327,13 @@ fn pass_over(
                 error,
             },
             consume: 0,
-            output: Some(Output::NeedMoreData),
+            then: Then::NeedMoreData,
         };
     };
     Transition {
         next_state: State::Synced,
         consume: length,
-        output: Some(Output::Unframable(
-            consumed..consumed.saturating_add(length),
-            error,
-        )),
+        then: Then::Output(Cut::Unframable(error)),
     }
 }
 
@@ -471,74 +452,48 @@ mod tests {
     use alloc::vec::Vec;
 
     use super::*;
+    use crate::framing::tests::{Reported, check};
 
-    /// A chunk short enough that many come before the report limit
-    const CHUNK_LENGTH: usize = 1024;
-
-    #[test]
-    fn a_search_that_never_synchronizes_hands_every_byte_back_in_bounded_pieces() {
-        let chunks = UNSYNCHRONIZED_REPORT_LIMIT / CHUNK_LENGTH * 3;
-        let mut framer = PackFramer::new();
-        let (mut pieces, mut others) = (Vec::new(), Vec::new());
-        let mut take = |framer: &mut PackFramer| loop {
-            match framer.step() {
-                Output::NeedMoreData | Output::EndOfInput => break,
-                Output::Unsynchronized(range) => pieces.push(range.len()),
-                other @ (Output::SyncAcquired(_)
-                | Output::Element(..)
-                | Output::ProgramEnd
-                | Output::Unframable(..)
-                | Output::Truncated(_)) => others.push(other),
+    impl Reported for Output {
+        fn range(&self) -> Option<Range<usize>> {
+            match self {
+                Self::SyncAcquired(range)
+                | Self::Element(_, range)
+                | Self::ProgramEnd(range)
+                | Self::Unsynchronized(range)
+                | Self::Unframable(range, _)
+                | Self::Truncated(range) => Some(range.clone()),
             }
-        };
-        for _ in 0..chunks {
-            framer.extend(&vec![0xFF; CHUNK_LENGTH]);
-            take(&mut framer);
         }
-        framer.finish();
-        take(&mut framer);
-        assert_eq!(
-            (
-                others,
-                pieces.len() > 1,
-                pieces
-                    .iter()
-                    .all(|&length| length <= UNSYNCHRONIZED_REPORT_LIMIT),
-                pieces.iter().sum::<usize>(),
-            ),
-            (vec![], true, true, chunks * CHUNK_LENGTH)
-        );
+
+        fn is_passed_over(&self) -> bool {
+            matches!(self, Self::Unsynchronized(_) | Self::Unframable(..))
+        }
     }
 
+    const PACK_HEADER: [u8; 14] = [
+        0x00, 0x00, 0x01, 0xBA, 0x44, 0x00, 0x04, 0x00, 0x04, 0x01, 0x00, 0x00, 0x03, 0xF8,
+    ];
+    const PES_PACKET: [u8; 12] = [
+        0x00, 0x00, 0x01, 0xE0, 0x00, 0x06, 0x80, 0x00, 0x00, 0xAA, 0xBB, 0xCC,
+    ];
+
     #[test]
-    fn a_search_the_end_cuts_short_hands_what_is_left_back_in_bounded_pieces() {
-        let part_of_a_pack_header = [0x00, 0x00, 0x01, 0xBA, 0x44, 0x00, 0x04, 0x00, 0x04, 0x01];
-        let garbage = vec![0xFF; UNSYNCHRONIZED_REPORT_LIMIT - 1];
-        let mut framer = PackFramer::new();
-        framer.extend(&garbage);
-        framer.extend(&part_of_a_pack_header);
-        framer.finish();
-        let (mut pieces, mut others) = (Vec::new(), Vec::new());
-        loop {
-            match framer.step() {
-                Output::NeedMoreData | Output::EndOfInput => break,
-                Output::Unsynchronized(range) => pieces.push(range.len()),
-                other @ (Output::SyncAcquired(_)
-                | Output::Element(..)
-                | Output::ProgramEnd
-                | Output::Unframable(..)
-                | Output::Truncated(_)) => others.push(other),
-            }
+    fn the_framing_of_a_program_stream_follows_the_rules_of_every_framing() {
+        let synced = |middle: &[u8]| [&PACK_HEADER[..], &PES_PACKET, middle, &PACK_HEADER].concat();
+        let mut iso_11172_pack = PACK_HEADER;
+        iso_11172_pack[4] = 0x21;
+        let streams: [Vec<u8>; 7] = [
+            synced(&[]),
+            vec![0xFF; 3 * Skipped::LIMIT + 100],
+            [&vec![0xFF; Skipped::LIMIT - 1][..], &PACK_HEADER[..10]].concat(),
+            synced(&vec![0xFF; 2 * Skipped::LIMIT + 7]),
+            synced(&[&iso_11172_pack[..], &[0x00, 0x00, 0x02, 0x99]].concat()),
+            synced(&[0x00, 0x00, 0x01, 0xB9]),
+            [&PACK_HEADER[..], &PES_PACKET[..7]].concat(),
+        ];
+        for stream in &streams {
+            check(&ProgramStreamElements::new(), stream);
         }
-        assert_eq!(
-            (
-                others,
-                pieces
-                    .iter()
-                    .all(|&length| length <= UNSYNCHRONIZED_REPORT_LIMIT),
-                pieces.iter().sum::<usize>(),
-            ),
-            (vec![], true, garbage.len() + part_of_a_pack_header.len())
-        );
     }
 }

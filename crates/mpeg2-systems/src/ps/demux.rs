@@ -4,6 +4,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use crate::framing::{Framer, Next};
 use crate::pes::PesPacket;
 use crate::ps::{PackHeader, ProgramStreamMap, SystemHeader};
 use crate::psi::VersionNumber;
@@ -12,7 +13,7 @@ mod event;
 mod framer;
 
 pub use event::{Error, Event};
-use framer::{Element, Output, PackFramer};
+use framer::{Element, Output, ProgramStreamElements};
 
 /// An event queued for [`Demuxer::poll_event`], holding the range of the
 /// bytes it lends rather than the bytes
@@ -71,7 +72,7 @@ enum Pending {
 /// ```
 #[derive(Debug, Clone)]
 pub struct Demuxer {
-    framer: PackFramer,
+    framer: Framer<ProgramStreamElements>,
     /// The bytes of the system header last reported, or none
     // Why the bytes rather than an Option of them: a system header is never
     // empty, so an empty Vec states "none reported", and it keeps the
@@ -92,7 +93,7 @@ impl Demuxer {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            framer: PackFramer::new(),
+            framer: Framer::new(ProgramStreamElements::new()),
             system_header: Vec::new(),
             program_stream_map_version: None,
             pending: VecDeque::new(),
@@ -121,9 +122,12 @@ impl Demuxer {
         // is empty, so the bytes the queued ranges point at stay put.
         while self.pending.is_empty() {
             self.framer.compact();
-            match self.framer.step() {
-                Output::NeedMoreData => return None,
-                Output::EndOfInput => {}
+            let output = match self.framer.next() {
+                Next::NeedMoreData => return None,
+                Next::EndOfInput => continue,
+                Next::Item(output) => output,
+            };
+            match output {
                 Output::SyncAcquired(range) => {
                     self.pending.push_back(Pending::Ready(Event::SyncAcquired));
                     self.pending
@@ -172,7 +176,7 @@ impl Demuxer {
                 // Why forget the system header and map reported: the end code
                 // closes the Program Stream, so those of a stream after it
                 // are new there, though they repeat the ones before.
-                Output::ProgramEnd => {
+                Output::ProgramEnd(_) => {
                     self.system_header.clear();
                     self.program_stream_map_version = None;
                     self.pending.push_back(Pending::Ready(Event::ProgramEnd));

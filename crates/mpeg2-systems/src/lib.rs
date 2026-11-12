@@ -304,7 +304,7 @@ pub mod crc;
 pub mod descriptor;
 pub mod field;
 #[cfg(feature = "alloc")]
-mod input_buffer;
+mod framing;
 pub mod pes;
 pub mod ps;
 pub mod psi;

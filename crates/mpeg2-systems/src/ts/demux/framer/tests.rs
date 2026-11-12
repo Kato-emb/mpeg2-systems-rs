@@ -4,6 +4,8 @@ use alloc::vec::Vec;
 use super::sync::SYNC_LOCK_COUNT;
 use super::sync::tests::grid;
 use super::*;
+use crate::framing::tests::{Reported, check};
+use crate::framing::{Framer, Next};
 
 const STANDARD_188: &[u8] = include_bytes!("../../../../tests/fixtures/188.ts");
 const TIMESTAMPED_192: &[u8] = include_bytes!("../../../../tests/fixtures/192.ts");
@@ -23,19 +25,21 @@ enum Seen {
     EndOfInput,
 }
 
-fn drain(framer: &mut PacketFramer, seen: &mut Vec<Seen>) {
+fn drain(framer: &mut Framer<TransportPackets>, seen: &mut Vec<Seen>) {
     loop {
-        seen.push(match framer.step() {
-            Output::NeedMoreData => return,
-            Output::SyncAcquired(packet_size) => Seen::SyncAcquired(packet_size),
-            Output::Packet { range, offset } => Seen::Packet {
+        seen.push(match framer.next() {
+            Next::NeedMoreData => return,
+            Next::EndOfInput => Seen::EndOfInput,
+            Next::Item(Output::SyncAcquired(packet_size)) => Seen::SyncAcquired(packet_size),
+            Next::Item(Output::Packet { range, offset }) => Seen::Packet {
                 bytes: framer.bytes(range).to_vec(),
                 offset,
             },
-            Output::SyncByteMissing { found } => Seen::SyncByteMissing { found },
-            Output::SyncLost => Seen::SyncLost,
-            Output::Unsynchronized(range) => Seen::Unsynchronized(framer.bytes(range).to_vec()),
-            Output::EndOfInput => Seen::EndOfInput,
+            Next::Item(Output::SyncByteMissing { found, .. }) => Seen::SyncByteMissing { found },
+            Next::Item(Output::SyncLost) => Seen::SyncLost,
+            Next::Item(Output::Unsynchronized(range)) => {
+                Seen::Unsynchronized(framer.bytes(range).to_vec())
+            }
         });
     }
 }
@@ -43,7 +47,7 @@ fn drain(framer: &mut PacketFramer, seen: &mut Vec<Seen>) {
 /// Hands `stream` over in chunks of `chunk_length`, then ends the input, and
 /// returns what came before the end of input
 fn frame(stream: &[u8], chunk_length: usize, fixed: Option<PacketSize>) -> Vec<Seen> {
-    let mut framer = PacketFramer::new(fixed);
+    let mut framer = Framer::new(TransportPackets::new(fixed));
     let mut seen = Vec::new();
     for chunk in stream.chunks(chunk_length) {
         framer.compact();
@@ -168,10 +172,11 @@ fn a_fixed_packet_size_does_not_synchronize_on_another_period() {
 #[test]
 fn a_stream_that_never_synchronizes_is_handed_back_in_bounded_pieces() {
     let stream = vec![0xFF; 200 * 1024];
-    let mut expected = vec![Seen::Unsynchronized(vec![0xFF; UNSYNCHRONIZED_REPORT_LIMIT]); 3];
-    expected.push(Seen::Unsynchronized(
-        vec![0xFF; stream.len() - 3 * UNSYNCHRONIZED_REPORT_LIMIT],
-    ));
+    let mut expected = vec![Seen::Unsynchronized(vec![0xFF; Skipped::LIMIT]); 3];
+    expected.push(Seen::Unsynchronized(vec![
+        0xFF;
+        stream.len() - 3 * Skipped::LIMIT
+    ]));
     for chunk_length in [1024, usize::MAX] {
         assert_eq!(
             frame(&stream, chunk_length, None),
@@ -198,7 +203,7 @@ fn the_end_reports_a_partial_packet_on_the_grid_as_unsynchronized() {
 
 #[test]
 fn input_after_a_drained_end_goes_on_at_the_next_offset_on_the_grid_kept() {
-    let mut framer = PacketFramer::new(None);
+    let mut framer = Framer::new(TransportPackets::new(None));
     let mut seen = Vec::new();
     framer.extend(&STANDARD_188[..188 * 5 + 100]);
     framer.finish();
@@ -220,7 +225,7 @@ fn input_after_a_drained_end_goes_on_at_the_next_offset_on_the_grid_kept() {
 #[test]
 #[should_panic(expected = "after finish")]
 fn input_before_the_end_is_drained_is_refused() {
-    let mut framer = PacketFramer::new(None);
+    let mut framer = Framer::new(TransportPackets::new(None));
     framer.extend(&STANDARD_188[..188 * 5 + 100]);
     framer.finish();
     framer.extend(&STANDARD_188[188 * 6..]);
@@ -247,5 +252,41 @@ fn a_candidate_the_end_leaves_unconfirmed_does_not_hide_a_grid_after_it() {
             expected,
             "in chunks of {chunk_length}"
         );
+    }
+}
+
+impl Reported for Output {
+    fn range(&self) -> Option<Range<usize>> {
+        match self {
+            Self::Packet { range, .. }
+            | Self::SyncByteMissing { range, .. }
+            | Self::Unsynchronized(range) => Some(range.clone()),
+            Self::SyncAcquired(_) | Self::SyncLost => None,
+        }
+    }
+
+    fn is_passed_over(&self) -> bool {
+        matches!(self, Self::Unsynchronized(_))
+    }
+}
+
+#[test]
+fn the_framing_of_a_188_byte_stream_follows_the_rules_of_every_framing() {
+    let mut missing = grid(188, 8, 0);
+    missing[188 * 5] = 0x00;
+    let mut lost = grid(188, 8, 0);
+    lost[188 * 5] = 0x00;
+    lost[188 * 6] = 0x00;
+    lost.extend(grid(188, SYNC_LOCK_COUNT, 0));
+    let mut behind_garbage = vec![0xFF; Skipped::LIMIT + 100];
+    behind_garbage.extend_from_slice(&STANDARD_188[..188 * 6 + 100]);
+    for stream in [
+        STANDARD_188,
+        &missing,
+        &lost,
+        &behind_garbage,
+        &[0xFF; 3 * 1024],
+    ] {
+        check(&TransportPackets::new(None), stream);
     }
 }
