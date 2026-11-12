@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use mpeg2_systems::field::{self, FieldReader, TwoBitFieldOutOfRange};
 
-use super::{Error, SixBitFieldOutOfRange, crc_16};
+use super::{Error, SixBitFieldOutOfRange};
 
 /// Bytes from `data_group_id` to `data_group_size`
 const HEADER_LENGTH: usize = 5;
@@ -282,6 +282,22 @@ impl TryFrom<u8> for DataGroupVersion {
     }
 }
 
+/// Returns the `CRC_16` of `bytes`, ARIB STD-B24 Volume 1 Part 3 §9.2
+///
+/// The division by G(X) = X^16 + X^12 + X^5 + 1 that §9.2 describes, from 0
+/// and with nothing inverted: CRC-16/XMODEM of the CRC catalog.
+fn crc_16(bytes: &[u8]) -> u16 {
+    bytes.iter().fold(0, |crc, &byte| {
+        (0..8).fold(crc ^ u16::from(byte) << 8, |crc, _| {
+            if crc & 0x8000 == 0 {
+                crc << 1
+            } else {
+                crc << 1 ^ 0x1021
+            }
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "alloc")]
@@ -289,7 +305,7 @@ mod tests {
 
     use mpeg2_systems::field;
 
-    use super::{DataGroup, DataGroupId, DataGroupVersion};
+    use super::{DataGroup, DataGroupId, DataGroupVersion, crc_16};
     use crate::caption::Error;
 
     /// The data group of caption management data (DGI 0, one language
@@ -400,5 +416,10 @@ mod tests {
             Err(Error::DataGroupDataLength { length: 65536 })
         );
         assert_eq!(written, [0x47]);
+    }
+
+    #[test]
+    fn crc_16_is_the_crc_16_xmodem_of_the_crc_catalog() {
+        assert_eq!(crc_16(b"123456789"), 0x31c3);
     }
 }
