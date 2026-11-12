@@ -420,8 +420,12 @@ impl Demuxer {
                 Output::SyncAcquired(packet_size) => {
                     Pending::Ready(Event::SyncAcquired { packet_size })
                 }
-                Output::SyncByteMissing { found, .. } => {
-                    Pending::Ready(Event::Error(Error::SyncByteMissing { found }))
+                Output::SyncByteMissing { found, range } => {
+                    self.pending
+                        .push_back(Pending::Ready(Event::Error(Error::SyncByteMissing {
+                            found,
+                        })));
+                    Pending::Unsynchronized(range)
                 }
                 Output::Unsynchronized(range) => Pending::Unsynchronized(range),
             };

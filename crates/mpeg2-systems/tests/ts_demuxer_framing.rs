@@ -88,6 +88,7 @@ mod tests {
         let mut expected = acquired_then(PacketSize::Standard188, vec![pat(), pmt(), pcr(63_000)]);
         expected.extend([
             Seen::Error(Error::SyncByteMissing { found: 0x00 }),
+            Seen::Unsynchronized(stream[188 * 10..188 * 11].to_vec()),
             Seen::Error(Error::SyncLost),
             Seen::Unsynchronized(stream[188 * 11..188 * 12].to_vec()),
             Seen::SyncAcquired(PacketSize::Standard188),

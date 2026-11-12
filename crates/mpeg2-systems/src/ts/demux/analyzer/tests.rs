@@ -439,6 +439,9 @@ fn a_reported_pat_version_survives_sync_loss_and_the_end_of_input() {
             acquired(),
             pat_event(&pat),
             described(&Event::Error(Error::SyncByteMissing { found: 0x00 })),
+            described(&Event::Unsynchronized {
+                bytes: &unsynchronized
+            }),
             described(&Event::Error(Error::SyncLost)),
             described(&Event::Unsynchronized {
                 bytes: &unsynchronized
@@ -708,6 +711,9 @@ fn losing_sync_drops_the_pes_packet_in_flight_without_a_word() {
         [
             acquired(),
             described(&Event::Error(Error::SyncByteMissing { found: 0x00 })),
+            described(&Event::Unsynchronized {
+                bytes: &unsynchronized
+            }),
             described(&Event::Error(Error::SyncLost)),
             described(&Event::Unsynchronized {
                 bytes: &unsynchronized
