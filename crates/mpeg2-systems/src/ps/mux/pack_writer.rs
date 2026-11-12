@@ -245,6 +245,15 @@ impl Fill {
         }
     }
 
+    /// Returns the bytes of the fill after what the pack carries: those of
+    /// its PES packets of padding, none for stuffing in the pack header
+    pub(super) const fn trailing(self) -> usize {
+        match self.0 {
+            FillKind::Stuffing(_) => 0,
+            FillKind::Padding(bytes) => bytes,
+        }
+    }
+
     /// Returns how many PES packets of padding there are
     pub(super) fn packets(self) -> usize {
         match self.0 {

@@ -174,11 +174,16 @@ impl Rate {
         }
     }
 
-    /// Returns the time of the STC the last byte of `pack` arrives at, its
-    /// SCR `mux_delay` before [`Pack::at`] (§2.5.2.2 equation 2-21), rounded
-    /// up to a tick
-    pub(super) fn last_byte_arrival(self, pack: Pack, mux_delay: Duration) -> SystemTimeClock {
-        let after_scr = as_u64(pack.length().saturating_sub(SCR_BYTE.saturating_add(1)));
+    /// Returns the time of the STC the last of the first `length` bytes of
+    /// `pack` arrives at, its SCR `mux_delay` before [`Pack::at`] (§2.5.2.2
+    /// equation 2-21), rounded up to a tick
+    pub(super) fn last_byte_arrival(
+        self,
+        pack: Pack,
+        length: usize,
+        mux_delay: Duration,
+    ) -> SystemTimeClock {
+        let after_scr = as_u64(length.saturating_sub(SCR_BYTE.saturating_add(1)));
         pack.scr(mux_delay)
             .add_ticks(arrival_ticks_rounded_up(after_scr, self.program_mux_rate()))
     }

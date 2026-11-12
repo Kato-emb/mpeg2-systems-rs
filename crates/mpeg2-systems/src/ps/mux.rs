@@ -537,6 +537,10 @@ impl Muxer {
 
         let writer = PackWriter::new();
         let mut written = *last_pack;
+        // Why not the end of the last pack written: at a fixed rate the
+        // padding after the PES packet may arrive after its time while the
+        // PES packet does not (§2.5.2.3 asks it of the access unit).
+        let mut carried_to = None;
         write_or_truncate(pending, |out| {
             let write = |planned: PlannedPack, piece: Option<&PesPacket<'_>>, out: &mut Vec<u8>| {
                 writer
@@ -563,10 +567,15 @@ impl Muxer {
                         stream_id_extension,
                     });
                 };
+                let length = planned
+                    .pack
+                    .length()
+                    .saturating_sub(planned.fill.trailing());
+                carried_to = Some((planned.pack, length));
                 written = Some(write(planned, Some(&piece), out)?);
             }
-            if let (Some(time), Some(last)) = (time, written)
-                && rate.last_byte_arrival(last, mux_delay) > time
+            if let (Some(time), Some((last, length))) = (time, carried_to)
+                && rate.last_byte_arrival(last, length, mux_delay) > time
             {
                 return Err(Error::PStdBufferUnderflow {
                     stream_id,
@@ -1827,6 +1836,27 @@ mod tests {
                 }),
                 multiplexed_by(muxer_of(config), &packets)
             )
+        );
+    }
+
+    #[test]
+    fn a_pes_packet_that_arrives_in_time_is_taken_though_the_padding_after_it_arrives_later() {
+        // 50 000 bytes a second in a CSPS at a fixed rate: the pack of a
+        // byte of payload is filled to over 300 bytes, past the PES packet
+        let mut config = MuxerConfig::new(1_000)
+            .with_fixed_rate(true)
+            .with_csps(true);
+        config.mux_delay = Duration::from_millis(15);
+        let mut muxer = Muxer::new(config).unwrap();
+        muxer
+            .add_stream(
+                ElementaryStream::new(StreamType::ISO_IEC_11172_3_AUDIO, StreamId::from(AUDIO)),
+                AUDIO_BUFFER,
+            )
+            .unwrap();
+        assert_eq!(
+            muxer.handle_pes_packet(&pes_packet(AUDIO, &[0xbb], Some(90_000))),
+            Ok(())
         );
     }
 
