@@ -13,7 +13,9 @@
 //!   several, and holds no state. Where a pack starts, its SCR and the
 //!   bounds of a system header are up to the caller.
 //!
-//! The crate does not write a program stream directory. [`PackWriter`]
+//! [`Muxer`] does not write a program stream directory; a
+//! [`ProgramStreamDirectory`](crate::ps::ProgramStreamDirectory) the caller
+//! builds is written through [`PackWriter`] as a PES packet. [`PackWriter`]
 //! writes padding and pack stuffing as the caller gives them, and [`Muxer`]
 //! writes them at a fixed rate alone. The example writes through
 //! [`PackWriter`]; [`Muxer`] has its own.

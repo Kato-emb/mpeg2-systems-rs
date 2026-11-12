@@ -190,6 +190,19 @@ impl<'input> FieldReader<'input> {
         Ok(self.read_bits::<1>()? == 1)
     }
 
+    /// Reads the next `HIGH` + 30 bits, laid out as `HIGH` bits, a
+    /// `marker_bit`, 15 bits, a `marker_bit`, 15 bits and a `marker_bit`,
+    /// ignoring the markers
+    pub(crate) fn read_marked<const HIGH: u32>(&mut self) -> Result<u64, Error> {
+        let mut value = self.read_bits::<HIGH>()?;
+        self.read_bits::<1>()?;
+        for _ in 0..2 {
+            value = value.wrapping_shl(15) | self.read_bits::<15>()?;
+            self.read_bits::<1>()?;
+        }
+        Ok(value)
+    }
+
     /// Borrows the next field, a run of `length` whole bytes
     ///
     /// # Errors

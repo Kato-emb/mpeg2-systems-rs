@@ -104,6 +104,7 @@ of `ts::mux` and `ps::mux` carry an example of each writer.
 | Section, PAT, PMT, CAT (§2.4.4) | yes | yes |
 | Descriptors 0x02–0x12, AVC video, MPEG-2 AAC audio, HEVC video (§2.6) | yes | yes |
 | Pack header, system header, program stream map (§2.5.3) | yes | yes |
+| Program stream directory (§2.5.5), read from and written as a PES packet | yes | yes |
 | Transport Stream: framing in 188, 192 and 204 bytes, PSI, sections of the PIDs subscribed to, PES reassembly, PCR | `ts::demux` | `ts::mux`: `Muxer` (one program at a variable bit rate, the PAT, the PMT and the PCRs sent at intervals, the random access, priorities and private data the caller sets on each PES packet's Transport Packets) and `PacketWriter` (PES packets, sections, PCRs on their own) |
 | Program Stream: packs, system headers, maps, PES packets | `ps::demux` | `ps::mux`: `Muxer` (packs, their SCRs, the system header and the program stream map, at the start, at an interval set and after the map changes, and on request a fixed bitrate filled with padding, or a constrained system parameter stream (CSPS) of §2.7.9) and `PackWriter` (pack headers with pack stuffing, system headers, maps, PES packets split to fit, padding) |
 
@@ -117,11 +118,11 @@ of `ts::mux` and `ps::mux` carry an example of each writer.
 
 Out of scope: null packets for a constant bit rate; more than one program in
 a Transport Stream; checking the T-STD or the P-STD, whose buffer bounds the
-Program Stream `Muxer` takes from the caller; writing a program stream
-directory; pacing the output in real time; and, in
-`mpeg2-systems-arib`, the SI tables of ARIB STD-B10, decoding the 8-unit code
-of ARIB STD-B24, and checking the operational rules of ARIB TR-B14 and
-TR-B15.
+Program Stream `Muxer` takes from the caller; choosing the access units of a
+program stream directory, which the `Muxer` does not write; pacing the
+output in real time; and, in `mpeg2-systems-arib`, the SI tables of ARIB
+STD-B10, decoding the 8-unit code of ARIB STD-B24, and checking the
+operational rules of ARIB TR-B14 and TR-B15.
 
 ## `no_std` and features
 

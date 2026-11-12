@@ -11,9 +11,9 @@ use super::{Error, field_error};
 use crate::field::FieldReader;
 #[cfg(feature = "alloc")]
 use crate::field::{FieldWriter, write_or_truncate};
-use crate::time::{ClockReference, Timestamp, read_marked_33_bits, read_marked_clock_reference};
 #[cfg(feature = "alloc")]
-use crate::time::{write_marked_33_bits, write_marked_clock_reference};
+use crate::time::write_marked_clock_reference;
+use crate::time::{ClockReference, Timestamp, read_marked_clock_reference};
 
 /// Bytes from the `'10'` bits to `PES_header_data_length`
 const FIXED_LENGTH: usize = 3;
@@ -504,7 +504,7 @@ impl<'input> OptionalHeader<'input> {
 fn read_timestamp(reader: &mut FieldReader<'_>, field: &'static str) -> Result<Timestamp, Error> {
     let mut read = || {
         reader.read_bits::<4>()?;
-        read_marked_33_bits(reader)
+        reader.read_marked::<3>()
     };
     read()
         .map(Timestamp::from_bits_truncate)
@@ -521,7 +521,7 @@ fn write_timestamp(
 ) -> Result<(), Error> {
     let mut write = || {
         writer.write_bits::<4>(prefix)?;
-        write_marked_33_bits(writer, timestamp.get())
+        writer.write_marked::<3>(timestamp.get())
     };
     write().map_err(field_error(field))
 }
