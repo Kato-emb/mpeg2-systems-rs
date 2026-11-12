@@ -51,7 +51,7 @@ impl<'input> ElementaryStream<'input> {
             stream_type,
             elementary_stream_id,
             elementary_stream_id_extension: None,
-            elementary_stream_info: DescriptorLoop(&[]),
+            elementary_stream_info: DescriptorLoop::EMPTY,
         }
     }
 
@@ -81,7 +81,7 @@ impl<'input> ElementaryStream<'input> {
     fn elementary_stream_info_length(&self) -> usize {
         self.elementary_stream_id_extension
             .map_or(0, |_| PSEUDO_DESCRIPTOR.len().saturating_add(1))
-            .saturating_add(self.elementary_stream_info.0.len())
+            .saturating_add(self.elementary_stream_info.as_bytes().len())
     }
 
     /// Returns the bytes the entry takes in the elementary stream loop
@@ -286,7 +286,7 @@ impl<'input> Iterator for ElementaryStreamIter<'input> {
                 stream_type,
                 elementary_stream_id,
                 elementary_stream_id_extension,
-                elementary_stream_info: DescriptorLoop(descriptors),
+                elementary_stream_info: DescriptorLoop::from(descriptors),
             })
         })();
         // Why not an error: the entry ends on a byte boundary, or the

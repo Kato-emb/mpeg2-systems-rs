@@ -264,7 +264,7 @@ impl<'input> ProgramStreamMap<'input> {
             current_next_indicator: true,
             single_extension_stream_flag: false,
             program_stream_map_version,
-            program_stream_info: DescriptorLoop(&[]),
+            program_stream_info: DescriptorLoop::EMPTY,
             elementary_streams: ElementaryStreamLoop(&[]),
         }
     }
@@ -310,7 +310,7 @@ impl<'input> ProgramStreamMap<'input> {
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
         OVERHEAD
-            .saturating_add(self.program_stream_info.0.len())
+            .saturating_add(self.program_stream_info.as_bytes().len())
             .saturating_add(self.elementary_streams.0.len())
     }
 
@@ -414,7 +414,7 @@ impl<'input> ProgramStreamMap<'input> {
             current_next_indicator,
             single_extension_stream_flag,
             program_stream_map_version: VersionNumber(version),
-            program_stream_info: DescriptorLoop(program_stream_info),
+            program_stream_info: DescriptorLoop::from(program_stream_info),
             elementary_streams: ElementaryStreamLoop(elementary_streams),
         })
     }
@@ -481,7 +481,7 @@ impl<'input> ProgramStreamMap<'input> {
             elementary_stream_map_length,
         ] = [
             length,
-            self.program_stream_info.0.len(),
+            self.program_stream_info.as_bytes().len(),
             self.elementary_streams.0.len(),
         ]
         .map(|length| u16::try_from(length).unwrap_or(u16::MAX).to_be_bytes());
@@ -540,7 +540,7 @@ pub(super) fn check_lengths<'stream>(
     elementary_streams: impl IntoIterator<Item = ElementaryStream<'stream>>,
 ) -> Result<(), Error> {
     check_encoded_len(elementary_streams.into_iter().fold(
-        OVERHEAD.saturating_add(program_stream_info.0.len()),
+        OVERHEAD.saturating_add(program_stream_info.as_bytes().len()),
         |length, stream| length.saturating_add(stream.encoded_len()),
     ))
 }

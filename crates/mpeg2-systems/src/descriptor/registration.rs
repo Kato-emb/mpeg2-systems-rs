@@ -3,9 +3,10 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use super::{DescriptorTag, Error, RawDescriptor, prefix_body};
+use super::typed::prefix_body;
 #[cfg(feature = "alloc")]
-use super::{field_error, write_descriptor};
+use super::typed::{field_error, write_descriptor};
+use super::{DescriptorTag, Error, RawDescriptor};
 
 /// Bytes of `format_identifier`
 const FORMAT_IDENTIFIER_LENGTH: usize = 4;
@@ -72,7 +73,7 @@ impl<'input> RegistrationDescriptor<'input> {
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
-        super::HEADER_LENGTH
+        super::raw::HEADER_LENGTH
             .saturating_add(FORMAT_IDENTIFIER_LENGTH)
             .saturating_add(self.additional_identification_info.len())
     }

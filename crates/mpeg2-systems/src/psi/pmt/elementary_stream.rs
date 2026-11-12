@@ -41,7 +41,7 @@ impl<'input> ElementaryStream<'input> {
         Self {
             stream_type,
             elementary_pid,
-            es_info: DescriptorLoop(&[]),
+            es_info: DescriptorLoop::EMPTY,
         }
     }
 
@@ -55,7 +55,7 @@ impl<'input> ElementaryStream<'input> {
     /// Returns the bytes the entry takes in the elementary stream loop
     #[cfg(feature = "alloc")]
     pub(super) const fn encoded_len(&self) -> usize {
-        ENTRY_PREFIX_LENGTH.saturating_add(self.es_info.0.len())
+        ENTRY_PREFIX_LENGTH.saturating_add(self.es_info.as_bytes().len())
     }
 }
 
@@ -154,7 +154,7 @@ pub(super) fn write_entries<'stream>(
                 return Err(Error::ElementaryPid { pid });
             }
             check_es_info_length(stream.es_info)?;
-            let es_info_length = stream.es_info.0.len();
+            let es_info_length = stream.es_info.as_bytes().len();
             let mut writer = FieldWriter::new(out);
             // Why not an error per field: every value fits its field's width.
             (|| {
@@ -179,7 +179,7 @@ pub(super) fn write_entries<'stream>(
 /// Refuses `es_info` longer than `ES_info_length` counts
 #[cfg(feature = "alloc")]
 pub(super) const fn check_es_info_length(es_info: DescriptorLoop<'_>) -> Result<(), Error> {
-    let length = es_info.0.len();
+    let length = es_info.as_bytes().len();
     if length > MAX_ES_INFO_LENGTH {
         return Err(Error::EsInfoLength { length });
     }
@@ -242,7 +242,7 @@ impl<'input> Iterator for ElementaryStreamIter<'input> {
                 })?;
             let es_info = reader
                 .read_bytes(usize::from(es_info_length))
-                .map(DescriptorLoop)
+                .map(DescriptorLoop::from)
                 .map_err(|error| Error::Field {
                     field: "ES_info",
                     error,

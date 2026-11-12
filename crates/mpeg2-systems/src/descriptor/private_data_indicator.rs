@@ -4,9 +4,10 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use super::{DescriptorTag, Error, RawDescriptor, fixed_body};
+use super::typed::fixed_body;
 #[cfg(feature = "alloc")]
-use super::{field_error, write_descriptor};
+use super::typed::{field_error, write_descriptor};
+use super::{DescriptorTag, Error, RawDescriptor};
 
 /// Bytes of the body
 const BODY_LENGTH: usize = 4;
@@ -60,7 +61,7 @@ impl PrivateDataIndicatorDescriptor {
         reason = "every syntax element writes from a reference"
     )]
     pub const fn encoded_len(&self) -> usize {
-        super::HEADER_LENGTH.saturating_add(BODY_LENGTH)
+        super::raw::HEADER_LENGTH.saturating_add(BODY_LENGTH)
     }
 
     /// Appends the descriptor to `out`

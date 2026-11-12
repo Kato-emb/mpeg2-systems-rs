@@ -5,8 +5,9 @@
 use alloc::vec::Vec;
 
 #[cfg(feature = "alloc")]
-use super::write_descriptor;
-use super::{DescriptorTag, Error, RawDescriptor, body_of, field_error};
+use super::typed::write_descriptor;
+use super::typed::{body_of, field_error};
+use super::{DescriptorTag, Error, RawDescriptor};
 use crate::field::FieldReader;
 
 /// Bytes of the body without the temporal layer subset
@@ -167,7 +168,7 @@ impl HevcVideoDescriptor {
     /// Returns the number of bytes [`write`](Self::write) appends
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
-        super::HEADER_LENGTH.saturating_add(body_length(self.temporal_layer_subset_flag()))
+        super::raw::HEADER_LENGTH.saturating_add(body_length(self.temporal_layer_subset_flag()))
     }
 
     /// Appends the descriptor to `out`, its `reserved` bits all `'1'`
