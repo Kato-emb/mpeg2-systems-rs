@@ -24,7 +24,9 @@ mod tests {
     const VIDEO: u8 = 0xe0;
     const AUDIO: u8 = 0xc0;
     const VIDEO_BUFFER: PStdBuffer = PStdBuffer::new(true, 224);
-    const AUDIO_BUFFER: PStdBuffer = PStdBuffer::new(false, 32);
+    /// 16 KiB, room for the audio the default `mux_delay` sends ahead, so
+    /// that the SCRs follow the time stamps and the bytes alone
+    const AUDIO_BUFFER: PStdBuffer = PStdBuffer::new(false, 128);
 
     /// 1 260 000 bytes a second
     const RATE: u32 = 25_200;
@@ -326,9 +328,11 @@ mod tests {
 
     #[test]
     fn a_leap_at_the_longest_pack_size_for_the_rate_keeps_the_scrs_within_0_7_s() {
-        // 5 000 bytes a second, and packs of 3 500 bytes, which take 0.7 s
+        // 5 000 bytes a second, and packs of 3 500 bytes, which take 0.7 s;
+        // the two full packs arrive within the 2 s before their DTS
         let mut config = MuxerConfig::new(100);
         config.pack_size = 3_500;
+        config.mux_delay = core::time::Duration::from_secs(2);
         let mut inputs = stepped(90_000, 900_000);
         for input in &mut inputs {
             input.payload.truncate(10);
@@ -349,8 +353,25 @@ mod tests {
     #[test]
     fn at_a_low_rate_every_pack_arrives_within_0_7_s_whatever_pack_size() {
         // 500 bytes a second: 350 bytes arrive in 0.7 s, less than the
-        // default pack_size of 2048
-        let (packs, _) = packs(&multiplex(MuxerConfig::new(10), &stepped(90_000, 180_000)));
+        // default pack_size of 2048. 1 000 bytes of video take some 2.2 s
+        // with their headers, within the 3 s before their DTS.
+        let mut config = MuxerConfig::new(10);
+        config.mux_delay = core::time::Duration::from_secs(3);
+        let inputs = [
+            Input {
+                stream_id: VIDEO,
+                pts: 360_000,
+                dts: Some(360_000),
+                payload: vec![0xaa; 1_000],
+            },
+            Input {
+                stream_id: AUDIO,
+                pts: 450_000,
+                dts: None,
+                payload: vec![0xbb; 10],
+            },
+        ];
+        let (packs, _) = packs(&multiplex(config, &inputs));
         let (kept, _) = scr_steps(&packs, 10);
         assert_eq!(
             (packs.iter().all(|pack| pack.length <= 350), kept),

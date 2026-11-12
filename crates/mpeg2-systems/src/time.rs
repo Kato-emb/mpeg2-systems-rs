@@ -238,6 +238,12 @@ impl SystemTimeClock {
         Self(self.0.saturating_add(ticks))
     }
 
+    /// Returns the time `ticks` ticks of the STC before it, or the earliest
+    /// time
+    pub(crate) const fn sub_ticks(self, ticks: u64) -> Self {
+        Self(self.0.saturating_sub(ticks))
+    }
+
     /// Returns the ticks of the STC from `earlier` to it, 0 if `earlier` is
     /// not before it
     pub(crate) const fn ticks_since(self, earlier: Self) -> u64 {

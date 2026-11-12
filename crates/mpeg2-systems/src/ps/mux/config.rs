@@ -30,12 +30,14 @@ pub struct MuxerConfig {
     /// rate ISO/IEC 13818-1 §2.5.2.2 equation 2-21 gives, within the 0.7 s
     /// §2.7.1 allows from one SCR to the next, whatever `pack_size`.
     pub pack_size: usize,
-    /// Offset subtracted from a PES packet's DTS, or its PTS when it has no
-    /// DTS, to obtain the desired SCR (0.7 s by default)
+    /// The longest time the first pack of a PES packet arrives before its
+    /// DTS, or its PTS when it has no DTS (0.7 s by default)
     ///
-    /// Delivery of preceding packs may require a later SCR. Any value is
-    /// taken, 0 included: the SCR of the first pack is then the DTS of its
-    /// PES packet.
+    /// The SCR of the pack is that time less `mux_delay`, or later where the
+    /// packs before it are still arriving or the input buffer of its stream
+    /// in the P-STD has no room for it yet. Any value is taken; a PES packet
+    /// that would not arrive in full within it is refused, as every PES
+    /// packet with a payload is at 0.
     pub mux_delay: Duration,
     /// The most bytes the output held for
     /// [`Muxer::poll_output`](super::Muxer::poll_output) may grow to (4 MiB by

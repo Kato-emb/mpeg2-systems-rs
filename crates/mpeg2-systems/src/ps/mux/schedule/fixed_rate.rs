@@ -2,7 +2,8 @@
 //! 2-23, and the packs of padding that bring the line to a PES packet
 
 use super::pack::{
-    PES_PACKETS, Pack, PlannedPack, arrival_ticks, as_u64, as_usize, bytes_per_second,
+    PES_PACKETS, Pack, PlannedPack, arrival_ticks, arrival_ticks_rounded_up, as_u64, as_usize,
+    bytes_per_second,
 };
 use crate::ps::mux::csps::Constraints;
 use crate::ps::mux::pack_writer::Fill;
@@ -32,6 +33,23 @@ impl FixedRate {
             Some(pack) => Some(self.following(pack)),
             None => time,
         }
+    }
+
+    /// Returns the time to plan a PES packet for so that its first pack is
+    /// at `earliest` or later: later than `earliest` by the most bytes of
+    /// padding [`padding_layout`] leaves out, fewer than a pack header or
+    /// those past the stuffing of a last pack too short to carry padding,
+    /// rounded up to a tick
+    pub(super) fn time_for(self, earliest: SystemTimeClock) -> SystemTimeClock {
+        let left_out = as_u64(pack_header::FIXED_LENGTH.saturating_sub(1)).max(
+            shortest_padded_pack(as_u64(self.shortest(1)))
+                .saturating_sub(stuffed_pack_header())
+                .saturating_sub(1),
+        );
+        earliest.add_ticks(arrival_ticks_rounded_up(
+            left_out,
+            self.line.program_mux_rate(),
+        ))
     }
 
     /// Returns the SCR of the pack after `pack`, on the line through it
@@ -205,7 +223,7 @@ struct PaddingLayout {
 /// padding in fewer than `shortest_padded` bytes, it takes the pack header
 /// and its stuffing alone, and the rest is left out.
 fn padding_layout(missing: u64, longest: u64, shortest_padded: u64) -> Option<PaddingLayout> {
-    let shortest_padded = shortest_padded.max(stuffed_pack_header().saturating_add(1));
+    let shortest_padded = shortest_padded_pack(shortest_padded);
     let layout = |total| PaddingLayout {
         longest,
         total,
@@ -233,6 +251,13 @@ fn padding_layout(missing: u64, longest: u64, shortest_padded: u64) -> Option<Pa
         missing.saturating_sub(rest)
     };
     (total > 0).then_some(layout(total))
+}
+
+/// Returns the fewest bytes of a pack that carries a PES packet of padding,
+/// a pack of `shortest_padded` bytes at the least and of more than the
+/// stuffing
+fn shortest_padded_pack(shortest_padded: u64) -> u64 {
+    shortest_padded.max(stuffed_pack_header().saturating_add(1))
 }
 
 impl PaddingLayout {
