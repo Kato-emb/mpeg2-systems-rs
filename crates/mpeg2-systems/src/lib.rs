@@ -268,10 +268,10 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! The programs `examples/` holds dump a stream event by event, write one
+//! The programs `examples/` holds count the PES packets of a stream, write one
 //! back through the packetizing layer, and multiplex the PES packets of a
 //! Program Stream into a Transport Stream through the multiplexing layer:
-//! `cargo run -p examples --example ts_dump -- <file>`.
+//! `cargo run --example ts_demux -- <file>`.
 //!
 //! # Modules
 //!

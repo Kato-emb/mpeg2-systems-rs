@@ -134,12 +134,13 @@ default, brings its writers and the `alloc` feature of `mpeg2-systems`.
 
 ## Examples and tests
 
-- `cargo run -p examples --example ts_dump -- <file>` prints every event of a
-  Transport Stream; `ps_dump` does the same for a Program Stream.
-- `cargo run -p examples --example ts_remux -- <in> <out>` reads a Transport
+- `cargo run --example ts_demux -- <file>` counts the PES packets of each
+  elementary stream of a Transport Stream; `ps_demux` does the same for a
+  Program Stream.
+- `cargo run --example ts_remux -- <in> <out>` reads a Transport
   Stream and writes it back through the packetizing layer (`PacketWriter`);
   `ps_remux` does the same for a Program Stream (`PackWriter`).
-- `cargo run -p examples --example ps_to_ts -- <in> <out>` reads a Program
+- `cargo run --example ps_to_ts -- <in> <out>` reads a Program
   Stream and multiplexes its PES packets into a Transport Stream through the
   multiplexing layer (`Muxer`).
 - Fixtures: streams FFmpeg wrote, under `crates/mpeg2-systems/tests/fixtures/`,

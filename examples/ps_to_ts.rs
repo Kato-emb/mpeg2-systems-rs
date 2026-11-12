@@ -2,7 +2,7 @@
 //! Stream of one program
 //!
 //! ```text
-//! cargo run -p examples --example ps_to_ts -- <in.ps> <out.ts>
+//! cargo run --example ps_to_ts -- <in.ps> <out.ts>
 //! ```
 //!
 //! Each event lends what it reports from the demuxer: the streams of a
@@ -124,7 +124,7 @@ fn convert(mut reader: impl BufRead, mut writer: impl Write) -> Result<usize, Bo
                         muxer.handle_pes_packet(pid, packet)?;
                         muxer.poll_output(&mut out);
                     }
-                    None => left_out = left_out.saturating_add(1),
+                    None => left_out += 1,
                 }
             }
         }
