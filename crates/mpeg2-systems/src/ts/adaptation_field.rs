@@ -524,7 +524,7 @@ fn write_clock_reference(
     reference: ClockReference,
     field: &'static str,
 ) -> Result<(), Error> {
-    if reference.extension() >= ClockReference::EXTENSION_MODULUS {
+    if !reference.has_valid_extension() {
         return Err(Error::ClockReferenceExtension {
             field,
             extension: reference.extension(),

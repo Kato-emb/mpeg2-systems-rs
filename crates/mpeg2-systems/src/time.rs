@@ -377,7 +377,7 @@ impl ClockReference {
 
     /// Number of values the specification lets the extension take, 0 to 299
     #[cfg(feature = "alloc")]
-    pub(crate) const EXTENSION_MODULUS: u16 = 300;
+    const EXTENSION_MODULUS: u16 = 300;
 
     /// Creates a clock reference from its base and extension fields
     ///
@@ -412,6 +412,13 @@ impl ClockReference {
     #[must_use]
     pub const fn extension(self) -> u16 {
         self.extension
+    }
+
+    /// Returns whether the extension is one the specification lets a clock
+    /// reference written take, 0 to 299 (§2.4.3.5, §2.4.3.7, §2.5.3.4)
+    #[cfg(feature = "alloc")]
+    pub(crate) const fn has_valid_extension(self) -> bool {
+        self.extension < Self::EXTENSION_MODULUS
     }
 
     /// Returns the count of 27 MHz ticks, `base` × 300 + `extension`

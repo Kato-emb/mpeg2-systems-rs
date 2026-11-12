@@ -344,9 +344,10 @@ impl PackHeader {
                 value: 0,
             });
         }
-        let extension = self.system_clock_reference.extension();
-        if extension >= ClockReference::EXTENSION_MODULUS {
-            return Err(Error::ScrExtension { extension });
+        if !self.system_clock_reference.has_valid_extension() {
+            return Err(Error::ScrExtension {
+                extension: self.system_clock_reference.extension(),
+            });
         }
 
         write_or_truncate(out, |out| {

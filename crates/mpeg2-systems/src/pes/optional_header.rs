@@ -411,12 +411,10 @@ impl<'input> OptionalHeader<'input> {
                 value: 0,
             });
         }
-        if let Some(extension) = self
-            .escr
-            .map(ClockReference::extension)
-            .filter(|value| *value >= ClockReference::EXTENSION_MODULUS)
-        {
-            return Err(Error::EscrExtension { extension });
+        if let Some(escr) = self.escr.filter(|escr| !escr.has_valid_extension()) {
+            return Err(Error::EscrExtension {
+                extension: escr.extension(),
+            });
         }
         let length = self.pes_header_data_length();
         let pes_header_data_length = u8::try_from(length).map_err(|_| Error::TooLong {
