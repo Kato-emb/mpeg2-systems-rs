@@ -394,19 +394,7 @@ impl<'input> PesPacket<'input> {
         }
 
         let (optional_header, payload) = if stream_id.carries_optional_header() {
-            let pes_header_data_length = body
-                .get(optional_header::FIXED_LENGTH.wrapping_sub(1))
-                .copied()
-                .unwrap_or(0);
-            let (header, payload) = body
-                .split_at_checked(
-                    usize::from(pes_header_data_length)
-                        .saturating_add(optional_header::FIXED_LENGTH),
-                )
-                .ok_or(Error::PesHeaderDataLength {
-                    pes_header_data_length,
-                    available_bytes: body.len().saturating_sub(optional_header::FIXED_LENGTH),
-                })?;
+            let (header, payload) = optional_header::split(body)?;
             (Some(OptionalHeader::read(header)?), payload)
         } else {
             (None, body)

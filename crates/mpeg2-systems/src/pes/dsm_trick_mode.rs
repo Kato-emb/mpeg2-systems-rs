@@ -12,7 +12,7 @@ use core::fmt;
 /// `reserved` bits; the accessors read a field only under the modes that
 /// have it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DsmTrickMode(pub(super) u8);
+pub struct DsmTrickMode(u8);
 
 impl DsmTrickMode {
     /// Returns the byte, `trick_mode_control` in its three high bits

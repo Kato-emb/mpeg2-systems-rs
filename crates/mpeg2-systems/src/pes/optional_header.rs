@@ -16,7 +16,7 @@ use crate::time::{ClockReference, Timestamp, read_marked_33_bits, read_marked_cl
 use crate::time::{write_marked_33_bits, write_marked_clock_reference};
 
 /// Bytes from the `'10'` bits to `PES_header_data_length`
-pub(super) const FIXED_LENGTH: usize = 3;
+const FIXED_LENGTH: usize = 3;
 
 /// Most `stuffing_byte`s a PES packet header may hold
 #[cfg(feature = "alloc")]
@@ -526,6 +526,23 @@ fn write_timestamp(
         write_marked_33_bits(writer, timestamp.get())
     };
     write().map_err(field_error(field))
+}
+
+/// Splits `body`, the bytes of a PES packet after `PES_packet_length`, into
+/// its optional header, as long as `PES_header_data_length` gives, and the
+/// bytes after it
+///
+/// # Errors
+///
+/// * [`PesHeaderDataLength`](Error::PesHeaderDataLength):
+///   `PES_header_data_length` counts bytes past the end of `body`.
+pub(super) fn split(body: &[u8]) -> Result<(&[u8], &[u8]), Error> {
+    let pes_header_data_length = body.get(FIXED_LENGTH.wrapping_sub(1)).copied().unwrap_or(0);
+    body.split_at_checked(usize::from(pes_header_data_length).saturating_add(FIXED_LENGTH))
+        .ok_or(Error::PesHeaderDataLength {
+            pes_header_data_length,
+            available_bytes: body.len().saturating_sub(FIXED_LENGTH),
+        })
 }
 
 #[cfg(test)]
