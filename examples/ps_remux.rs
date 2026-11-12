@@ -2,7 +2,7 @@
 //! of its own
 //!
 //! ```text
-//! cargo run -p examples --example ps_remux -- <in.ps> <out.ps>
+//! cargo run --example ps_remux -- <in.ps> <out.ps>
 //! ```
 //!
 //! Each event lends what it reports from the demuxer: the pack writer takes
@@ -30,51 +30,54 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (Some(input), Some(output)) = (arguments.next(), arguments.next()) else {
         return Err("usage: ps_remux <in.ps> <out.ps>".into());
     };
-    let mut reader = BufReader::with_capacity(CHUNK_LENGTH, File::open(input)?);
+    let reader = BufReader::with_capacity(CHUNK_LENGTH, File::open(input)?);
     let mut writer = BufWriter::new(File::create(output)?);
+    remux(reader, &mut writer)?;
+    writer.flush()?;
+    Ok(())
+}
+
+/// Writes the packs of the Program Stream `reader` holds into `writer` as a
+/// Program Stream
+fn remux(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), Box<dyn Error>> {
     let mut demuxer = Demuxer::new();
     let pack_writer = PackWriter::new();
     let mut out = Vec::new();
 
     loop {
         let chunk = reader.fill_buf()?;
-        if chunk.is_empty() {
+        let length = chunk.len();
+        if length == 0 {
+            demuxer.finish();
+        } else {
+            demuxer.handle_input(chunk);
+        }
+        reader.consume(length);
+        while let Some(event) = demuxer.poll_event() {
+            match event {
+                Event::PackHeader(header) => {
+                    pack_writer.write_pack_header(&header, &mut out)?;
+                }
+                Event::SystemHeader(header) => {
+                    pack_writer.write_system_header(&header, &mut out)?;
+                }
+                Event::ProgramStreamMap(map) => {
+                    pack_writer.write_program_stream_map(&map, &mut out)?;
+                }
+                Event::PesPacket(packet) => {
+                    pack_writer.write_pes_packets(&packet, &mut out)?;
+                }
+                _ => {}
+            }
+        }
+        if length == 0 {
             break;
         }
-        let length = chunk.len();
-        demuxer.handle_input(chunk);
-        reader.consume(length);
-        remux_events(&mut demuxer, &pack_writer, &mut out)?;
         writer.write_all(&out)?;
         out.clear();
     }
 
-    demuxer.finish();
-    remux_events(&mut demuxer, &pack_writer, &mut out)?;
-    // Why not write MPEG_program_end_code where the input has one: the
-    // output is one Program Stream, ended once after the last pack.
     pack_writer.write_program_end_code(&mut out);
     writer.write_all(&out)?;
-    writer.flush()?;
-    Ok(())
-}
-
-/// Writes what each event the demuxer has reports into `out`
-fn remux_events(
-    demuxer: &mut Demuxer,
-    pack_writer: &PackWriter,
-    out: &mut Vec<u8>,
-) -> Result<(), Box<dyn Error>> {
-    while let Some(event) = demuxer.poll_event() {
-        if let Event::PackHeader(header) = &event {
-            pack_writer.write_pack_header(header, out)?;
-        } else if let Event::SystemHeader(header) = &event {
-            pack_writer.write_system_header(header, out)?;
-        } else if let Event::ProgramStreamMap(map) = &event {
-            pack_writer.write_program_stream_map(map, out)?;
-        } else if let Event::PesPacket(packet) = &event {
-            pack_writer.write_pes_packets(packet, out)?;
-        }
-    }
     Ok(())
 }

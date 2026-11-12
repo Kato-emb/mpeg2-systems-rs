@@ -2,7 +2,7 @@
 //! programs back out as a Transport Stream of its own
 //!
 //! ```text
-//! cargo run -p examples --example ts_remux -- <in.ts> <out.ts>
+//! cargo run --example ts_remux -- <in.ts> <out.ts>
 //! ```
 //!
 //! The demuxer subscribes itself to the elementary streams the PMTs name.
@@ -34,59 +34,66 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (Some(input), Some(output)) = (arguments.next(), arguments.next()) else {
         return Err("usage: ts_remux <in.ts> <out.ts>".into());
     };
-    let mut reader = BufReader::with_capacity(CHUNK_LENGTH, File::open(input)?);
+    let reader = BufReader::with_capacity(CHUNK_LENGTH, File::open(input)?);
     let mut writer = BufWriter::new(File::create(output)?);
+    remux(reader, &mut writer)?;
+    writer.flush()?;
+    Ok(())
+}
+
+/// Writes the tables, the PCRs and the PES packets of the Transport Stream
+/// `reader` holds into `writer` as a Transport Stream
+fn remux(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), Box<dyn Error>> {
     let mut demuxer = Demuxer::new(DemuxerConfig::default().with_subscribe_elementary_pids(true));
     let mut packet_writer = PacketWriter::new();
     let mut out = Vec::new();
 
     loop {
         let chunk = reader.fill_buf()?;
-        if chunk.is_empty() {
+        let length = chunk.len();
+        if length == 0 {
+            demuxer.finish();
+        } else {
+            demuxer.handle_input(chunk);
+        }
+        reader.consume(length);
+        while let Some(event) = demuxer.poll_event() {
+            match event {
+                Event::ProgramAssociationSection(section) => {
+                    packet_writer.write_program_association_section(&section, &mut out)?;
+                }
+                Event::TsProgramMapSection { pid, section } => {
+                    packet_writer.write_ts_program_map_section(pid, &section, &mut out)?;
+                }
+                Event::CaSection(section) => {
+                    packet_writer.write_ca_section(&section, &mut out)?;
+                }
+                Event::Section { pid, section } => {
+                    packet_writer.write_section(pid, &section, &mut out)?;
+                }
+                Event::ProgramClockReference {
+                    pid,
+                    program_clock_reference,
+                } => {
+                    packet_writer.write_program_clock_reference(
+                        pid,
+                        program_clock_reference,
+                        &mut out,
+                    )?;
+                }
+                Event::PesPacket { pid, packet, .. } => {
+                    packet_writer.write_pes_packet(pid, &packet, None, &mut out)?;
+                }
+                _ => {}
+            }
+        }
+        if length == 0 {
             break;
         }
-        let length = chunk.len();
-        demuxer.handle_input(chunk);
-        reader.consume(length);
-        remux_events(&mut demuxer, &mut packet_writer, &mut out)?;
-        // Why clear rather than collect the whole output: the buffer keeps
-        // its capacity, so the packet writer writes each chunk without
-        // allocating.
         writer.write_all(&out)?;
         out.clear();
     }
 
-    demuxer.finish();
-    remux_events(&mut demuxer, &mut packet_writer, &mut out)?;
     writer.write_all(&out)?;
-    writer.flush()?;
-    Ok(())
-}
-
-/// Writes what each event the demuxer has reports into `out`
-fn remux_events(
-    demuxer: &mut Demuxer,
-    packet_writer: &mut PacketWriter,
-    out: &mut Vec<u8>,
-) -> Result<(), Box<dyn Error>> {
-    while let Some(event) = demuxer.poll_event() {
-        if let Event::ProgramAssociationSection(section) = &event {
-            packet_writer.write_program_association_section(section, out)?;
-        } else if let Event::CaSection(section) = &event {
-            packet_writer.write_ca_section(section, out)?;
-        } else if let Event::Section { pid, section } = &event {
-            packet_writer.write_section(*pid, section, out)?;
-        } else if let Event::ProgramClockReference {
-            pid,
-            program_clock_reference,
-        } = &event
-        {
-            packet_writer.write_program_clock_reference(*pid, *program_clock_reference, out)?;
-        } else if let Event::PesPacket { pid, packet, .. } = &event {
-            packet_writer.write_pes_packet(*pid, packet, None, out)?;
-        } else if let Event::TsProgramMapSection { pid, section } = &event {
-            packet_writer.write_ts_program_map_section(*pid, section, out)?;
-        }
-    }
     Ok(())
 }
