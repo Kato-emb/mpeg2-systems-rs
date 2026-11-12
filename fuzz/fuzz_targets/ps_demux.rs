@@ -4,7 +4,9 @@
 //! Program Stream after a few bytes of them reads as one, and the seeds are
 //! the fixtures as they lie. One run hands the stream over in chunks of the
 //! lengths chosen, in turn, takes every event after each, then ends the input
-//! and takes the events it leaves. It checks that:
+//! and takes the events it leaves. Each PES packet of `stream_id` 0xFF is
+//! read as a program stream directory, and its entries are walked. It checks
+//! that:
 //!
 //! 1. nothing panics
 //! 2. once the end of input is drained, `poll_event` stays at `None`
@@ -13,7 +15,8 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use mpeg2_systems::ps::demux::Demuxer;
+use mpeg2_systems::ps::ProgramStreamDirectory;
+use mpeg2_systems::ps::demux::{Demuxer, Event};
 
 /// What one run takes from the fuzzer
 #[derive(Debug, Arbitrary)]
@@ -34,13 +37,24 @@ fuzz_target!(|input: Input<'_>| {
         };
         let (chunk, after) = rest.split_at(length);
         demuxer.handle_input(chunk);
-        while demuxer.poll_event().is_some() {}
+        drain(&mut demuxer);
         rest = after;
     }
     demuxer.finish();
-    while demuxer.poll_event().is_some() {}
+    drain(&mut demuxer);
     assert!(
         demuxer.poll_event().is_none(),
         "an event came after the end of input was drained"
     );
 });
+
+/// Takes every event the demuxer has, reading each program stream directory
+fn drain(demuxer: &mut Demuxer) {
+    while let Some(event) = demuxer.poll_event() {
+        if let Event::PesPacket(packet) = event
+            && let Ok(directory) = ProgramStreamDirectory::try_from(&packet)
+        {
+            directory.access_units.iter().for_each(drop);
+        }
+    }
+}

@@ -1,5 +1,6 @@
 //! Program Stream: the pack header and the system header that open a pack,
-//! the program stream map, and the code that ends the stream
+//! the program stream map, the program stream directory, and the code that
+//! ends the stream
 //!
 //! Each type reads one syntax element from bytes that start with its start
 //! code and hold nothing else. Finding where an element starts and ends in a
@@ -8,6 +9,7 @@
 
 #[cfg(feature = "alloc")]
 pub mod demux;
+pub mod directory;
 #[cfg(feature = "alloc")]
 pub mod mux;
 pub mod pack_header;
@@ -15,6 +17,7 @@ pub mod psm;
 mod start_code;
 pub mod system_header;
 
+pub use directory::ProgramStreamDirectory;
 pub use pack_header::PackHeader;
 pub use psm::ProgramStreamMap;
 pub use start_code::{
