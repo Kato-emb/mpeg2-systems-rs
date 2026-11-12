@@ -245,7 +245,7 @@ fn reassemble(
             {
                 let followed = tables.follow(pat);
                 if followed != Followed::Repeated {
-                    for pid in tables::program_map_pids(pat) {
+                    for pid in tables::program_map_pids(&pat.programs) {
                         program_maps.for_psi(pid);
                     }
                 }

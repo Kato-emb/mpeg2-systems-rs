@@ -5,7 +5,7 @@ use core::mem;
 
 use super::Followed;
 use crate::psi::VersionNumber;
-use crate::psi::pat::{Program, ProgramAssociationSection};
+use crate::psi::pat::{Program, ProgramAssociationSection, ProgramLoop};
 use crate::ts::Pid;
 
 /// The PAT sections of the latest version, and the programs the PAT names
@@ -114,7 +114,7 @@ impl ProgramMapRoutes {
         {
             *word |= 1 << (pat.section_number % 64);
         }
-        self.gathered.extend(program_maps(pat));
+        self.gathered.extend(program_maps(&pat.programs));
         // Why sort and search rather than scan the programs for each key: a
         // PAT can name tens of thousands of programs, and the scans would
         // multiply with the PIDs followed and the PMT sections looked up.
@@ -141,11 +141,11 @@ impl ProgramMapRoutes {
 }
 
 /// Returns the `program_map_PID` and `program_number` of each program map a
-/// PAT section names
+/// program loop names
 pub(super) fn program_maps<'a>(
-    pat: &'a ProgramAssociationSection<'_>,
+    programs: &'a ProgramLoop<'_>,
 ) -> impl Iterator<Item = (Pid, u16)> + 'a {
-    pat.programs.iter().filter_map(|program| match program {
+    programs.iter().filter_map(|program| match program {
         // Why skip the PAT, CAT and null PIDs: a broken PAT can name them,
         // and the PAT and CAT are reassembled anyway while null packets carry
         // stuffing, not sections.

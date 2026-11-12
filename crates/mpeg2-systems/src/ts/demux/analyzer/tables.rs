@@ -3,7 +3,7 @@
 
 use crate::psi::TableId;
 use crate::psi::cat::CaSection;
-use crate::psi::pat::ProgramAssociationSection;
+use crate::psi::pat::{ProgramAssociationSection, ProgramLoop};
 use crate::psi::pmt::TsProgramMapSection;
 use crate::psi::section::Section;
 use crate::ts::Pid;
@@ -147,11 +147,11 @@ impl Tables {
     }
 }
 
-/// Returns the `program_map_PID` of each program map a PAT section names
+/// Returns the `program_map_PID` of each program map a program loop names
 pub(super) fn program_map_pids<'a>(
-    pat: &'a ProgramAssociationSection<'_>,
+    programs: &'a ProgramLoop<'_>,
 ) -> impl Iterator<Item = Pid> + 'a {
-    program_map_routes::program_maps(pat).map(|(pid, _)| pid)
+    program_map_routes::program_maps(programs).map(|(pid, _)| pid)
 }
 
 /// Returns the event of a section read whole on `pid`, typed as `typed`
