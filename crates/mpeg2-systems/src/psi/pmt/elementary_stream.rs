@@ -264,3 +264,94 @@ impl<'input> Iterator for ElementaryStreamIter<'input> {
         Some(entry)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[cfg(feature = "alloc")]
+    use alloc::vec::Vec;
+
+    use super::{ElementaryStream, ElementaryStreamLoop, Error};
+    use crate::descriptor::DescriptorLoop;
+    use crate::field;
+    use crate::stream_type::StreamType;
+    use crate::ts::Pid;
+
+    /// `ISO_639_language_descriptor` of "jpn"
+    const ES_INFO: [u8; 6] = [0x0a, 0x04, 0x6a, 0x70, 0x6e, 0x00];
+
+    fn pid(value: u16) -> Pid {
+        Pid::try_from(value).unwrap()
+    }
+
+    #[test]
+    fn an_entry_built_from_new_and_every_with_method_equals_one_with_every_field_assigned() {
+        let mut assigned = ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x0100));
+        assigned.es_info = DescriptorLoop::from(ES_INFO.as_slice());
+
+        let built = ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x0100))
+            .with_es_info(DescriptorLoop::from(ES_INFO.as_slice()));
+
+        assert_eq!(built, assigned);
+    }
+
+    #[test]
+    fn an_element_cut_short_names_the_field_it_ends_in() {
+        let truncated = |required_bits, remaining_bits| field::Error::Truncated {
+            required_bits,
+            remaining_bits,
+        };
+        let first_entry =
+            |bytes: &'static [u8]| ElementaryStreamLoop::from(bytes).iter().next().unwrap();
+
+        assert_eq!(
+            [
+                first_entry(&[0x02, 0xe1]),
+                first_entry(&[0x02, 0xe1, 0x00, 0xf0]),
+                first_entry(&[0x02, 0xe1, 0x00, 0xf0, 0x03, 0x0a]),
+            ],
+            [
+                Err(Error::Field {
+                    field: "elementary_PID",
+                    error: truncated(13, 5)
+                }),
+                Err(Error::Field {
+                    field: "ES_info_length",
+                    error: truncated(12, 4)
+                }),
+                Err(Error::Field {
+                    field: "ES_info",
+                    error: truncated(24, 8)
+                }),
+            ]
+        );
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_entry_the_specification_does_not_allow_is_refused_before_a_byte_is_written() {
+        let descriptors = [0xff; 1024];
+        let mut long_es_info = ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x0100));
+        long_es_info.es_info = DescriptorLoop::from(descriptors.as_slice());
+        let mut written = Vec::new();
+
+        assert_eq!(
+            (
+                [
+                    ElementaryStreamLoop::write_from([long_es_info], &mut written),
+                    ElementaryStreamLoop::write_from(
+                        [ElementaryStream::new(StreamType::AVC_VIDEO, pid(0x000f))],
+                        &mut written,
+                    ),
+                ],
+                written
+            ),
+            (
+                [
+                    Err(Error::EsInfoLength { length: 1024 }),
+                    Err(Error::ElementaryPid { pid: pid(0x000f) }),
+                ],
+                Vec::new()
+            )
+        );
+    }
+}
