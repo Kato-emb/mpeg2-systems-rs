@@ -32,7 +32,7 @@ impl ContinuityCounter {
 
     /// Returns the counter of the packet of the PID before, 0 wrapping to 15
     #[cfg(feature = "alloc")]
-    pub(crate) const fn previous(self) -> Self {
+    pub(super) const fn previous(self) -> Self {
         Self(
             self.0
                 .wrapping_add(Self::MODULUS.wrapping_sub(1))

@@ -101,3 +101,29 @@ impl MuxerConfig {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use core::time::Duration;
+
+    use super::MuxerConfig;
+
+    #[test]
+    fn a_config_built_from_new_and_every_with_method_equals_one_with_every_field_assigned() {
+        let mut assigned = MuxerConfig::new();
+        assigned.transport_stream_id = 0x7fe0;
+        assigned.psi_interval = Duration::from_millis(50);
+        assigned.pcr_interval = Duration::from_millis(30);
+        assigned.mux_delay = Duration::from_millis(500);
+        assigned.buffer_limit = 1024;
+
+        let built = MuxerConfig::new()
+            .with_transport_stream_id(0x7fe0)
+            .with_psi_interval(Duration::from_millis(50))
+            .with_pcr_interval(Duration::from_millis(30))
+            .with_mux_delay(Duration::from_millis(500))
+            .with_buffer_limit(1024);
+
+        assert_eq!(built, assigned);
+    }
+}
