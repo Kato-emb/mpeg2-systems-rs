@@ -75,8 +75,6 @@
 //! ```
 
 use alloc::vec::Vec;
-use core::mem;
-use core::num::NonZeroU16;
 use core::time::Duration;
 
 use crate::descriptor::DescriptorLoop;
@@ -87,7 +85,7 @@ use crate::ts::Pid;
 use crate::ts::adaptation_field::AdaptationField;
 use crate::ts::packet::PACKET_LENGTH;
 use packet_writer::{packet_count, section_packets_length};
-use program_definition::{ProgramDefinition, Stream};
+use program_definition::ProgramDefinition;
 use schedule::{Schedule, Times};
 
 /// The longest time from one PCR to the next, ISO/IEC 13818-1 §2.7.2
@@ -263,21 +261,7 @@ impl Muxer {
     )]
     pub fn add_program(&mut self, program_number: u16, program_map_pid: Pid) -> Result<(), Error> {
         assert!(self.program.is_none(), "a program is registered already");
-        let Some(program_number) = NonZeroU16::new(program_number) else {
-            return Err(Error::ProgramNumber { program_number });
-        };
-        if !program_map_pid.is_assignable() {
-            return Err(Error::Pid {
-                pid: program_map_pid,
-            });
-        }
-        self.program = Some(ProgramDefinition {
-            program_number,
-            program_map_pid,
-            pcr_pid: None,
-            program_info: Vec::new(),
-            streams: Vec::new(),
-        });
+        self.program = Some(ProgramDefinition::new(program_number, program_map_pid)?);
         Ok(())
     }
 
@@ -304,12 +288,7 @@ impl Muxer {
             self.schedule.is_none(),
             "the PCR PID is set after the first PES packet"
         );
-        let program = self.program_mut(program_number)?;
-        if !pcr_pid.is_assignable() {
-            return Err(Error::Pid { pid: pcr_pid });
-        }
-        program.pcr_pid = Some(pcr_pid);
-        Ok(())
+        self.program_mut(program_number)?.set_pcr_pid(pcr_pid)
     }
 
     /// Sets `program_info`, the descriptors of the program `program_number`,
@@ -345,15 +324,8 @@ impl Muxer {
             "the program info is set after the first PES packet"
         );
         let transport_stream_id = self.config.transport_stream_id;
-        let program = self.program_mut(program_number)?;
-        program_definition::check_pmt_length(
-            program_info.as_bytes(),
-            program.elementary_streams(),
-        )?;
-        let previous = mem::replace(&mut program.program_info, program_info.as_bytes().to_vec());
-        program.check(transport_stream_id).inspect_err(|_| {
-            program.program_info = previous;
-        })
+        self.program_mut(program_number)?
+            .set_program_info(program_info.as_bytes(), transport_stream_id)
     }
 
     /// Registers `stream`, a stream of the program `program_number`, its PES
@@ -393,27 +365,8 @@ impl Muxer {
             "a stream is registered after the first PES packet"
         );
         let transport_stream_id = self.config.transport_stream_id;
-        let program = self.program_mut(program_number)?;
-        let pid = stream.elementary_pid;
-        if !pid.is_assignable() {
-            return Err(Error::Pid { pid });
-        }
-        if pid == program.program_map_pid || program.stream(pid).is_some() {
-            return Err(Error::PidInUse { pid });
-        }
-        program_definition::check_pmt_length(
-            &program.program_info,
-            program.elementary_streams().chain(core::iter::once(stream)),
-        )?;
-        program.streams.push(Stream {
-            pid,
-            stream_type: stream.stream_type,
-            es_info: stream.es_info.as_bytes().to_vec(),
-            last_timestamp: None,
-        });
-        program.check(transport_stream_id).inspect_err(|_| {
-            program.streams.pop();
-        })
+        self.program_mut(program_number)?
+            .add_stream(stream, transport_stream_id)
     }
 
     /// Returns the program of `program_number`, or
@@ -421,7 +374,7 @@ impl Muxer {
     fn program_mut(&mut self, program_number: u16) -> Result<&mut ProgramDefinition, Error> {
         self.program
             .as_mut()
-            .filter(|program| program.program_number.get() == program_number)
+            .filter(|program| program.program_number() == program_number)
             .ok_or(Error::UnregisteredProgram { program_number })
     }
 
@@ -542,19 +495,14 @@ impl Muxer {
         fields: &TransportPacketFields<'_>,
     ) -> Result<(), Error> {
         assert!(!self.finished, "a PES packet is given after finish");
-        let Some((program, stream_index)) = self.program.as_ref().and_then(|program| {
-            let index = program
-                .streams
-                .iter()
-                .position(|stream| stream.pid == pid)?;
-            Some((program, index))
-        }) else {
+        let Some((program, stream)) = self
+            .program
+            .as_ref()
+            .and_then(|program| Some((program, program.stream(pid)?)))
+        else {
             return Err(Error::UnregisteredPid { pid });
         };
-        let last_timestamp = program
-            .streams
-            .get(stream_index)
-            .and_then(|stream| stream.last_timestamp);
+        let last_timestamp = stream.last_timestamp();
         let stream_id = packet.stream_id;
         if !stream_id.is_pes_packet() || stream_id == StreamId::PROGRAM_STREAM_MAP {
             return Err(Error::StreamId { stream_id });
@@ -638,11 +586,8 @@ impl Muxer {
             next = next.with_pcr_sent_at(clock);
         }
 
-        section_bodies.clear();
         let sections = if psi_times.count > 0 {
-            let pat_body_length = program.write_bodies(section_bodies)?;
-            let (pat_body, pmt_body) = section_bodies.split_at(pat_body_length);
-            Some(program.sections_of(config.transport_stream_id, pat_body, pmt_body))
+            Some(program.psi_sections(config.transport_stream_id, section_bodies)?)
         } else {
             None
         };
@@ -697,7 +642,7 @@ impl Muxer {
             if psi_first {
                 if let Some((_, (pat, pmt))) = psi_at.next() {
                     writer.write_section(Pid::PAT, pat, pending)?;
-                    writer.write_section(program.program_map_pid, pmt, pending)?;
+                    writer.write_section(program.program_map_pid(), pmt, pending)?;
                 }
             } else if let Some(at) = pcrs_at.next() {
                 writer.write_program_clock_reference(
@@ -718,13 +663,8 @@ impl Muxer {
             pending,
         )?;
         *schedule = Some(next);
-        if let (Some(time), Some(stream)) = (
-            time,
-            self.program
-                .as_mut()
-                .and_then(|program| program.streams.get_mut(stream_index)),
-        ) {
-            stream.last_timestamp = Some(time);
+        if let (Some(time), Some(program)) = (time, self.program.as_mut()) {
+            program.set_last_timestamp(pid, time);
         }
         Ok(())
     }
