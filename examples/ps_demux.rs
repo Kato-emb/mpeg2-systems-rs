@@ -27,15 +27,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// many PES packets each `stream_id` has and how many bytes their payloads
 /// hold, and what the demuxer could not read
 fn demux(mut reader: impl BufRead, mut summary: impl Write) -> Result<(), Box<dyn Error>> {
-    // Why no subscribe step, unlike the Transport Stream demuxer: a Program
-    // Stream has no PIDs to choose among, and its PES packets are cut whole
-    // from the pack.
     let mut demuxer = Demuxer::new();
     let mut streams = BTreeMap::<u8, (usize, usize)>::new();
 
     loop {
-        // Why fill_buf rather than read into an array of our own: the demuxer
-        // takes a borrowed slice, so the reader's buffer goes in as it is.
         let chunk = reader.fill_buf()?;
         let length = chunk.len();
         if length == 0 {

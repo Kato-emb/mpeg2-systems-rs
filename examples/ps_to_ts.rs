@@ -66,8 +66,6 @@ fn convert(mut reader: impl BufRead, mut writer: impl Write) -> Result<usize, Bo
     let mut muxer = Muxer::new(MuxerConfig::new())?;
     let mut mapped: Option<Vec<(StreamId, StreamType)>> = None;
     let mut bounded: Option<Vec<(StreamId, StreamType)>> = None;
-    // Why not take an empty `pids` for a program not yet registered: one
-    // registered from a map or a header that names no stream is empty too.
     let mut registered = false;
     let mut pids: Vec<(StreamId, Pid)> = Vec::new();
     let mut left_out: usize = 0;
@@ -271,9 +269,6 @@ mod tests {
             })
             .collect();
         for packet in array("packets") {
-            // Why not count every packet as a PES packet: ffprobe's parser
-            // cuts a PES packet into the frames it holds, and only the first
-            // frame to start in a PES packet has a `pos`.
             if packet.get("pos").is_none() {
                 continue;
             }

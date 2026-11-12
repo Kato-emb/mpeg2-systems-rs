@@ -35,8 +35,6 @@ fn demux(mut reader: impl BufRead, mut summary: impl Write) -> Result<(), Box<dy
     let mut streams = BTreeMap::<u16, (u8, usize, usize)>::new();
 
     loop {
-        // Why fill_buf rather than read into an array of our own: the demuxer
-        // takes a borrowed slice, so the reader's buffer goes in as it is.
         let chunk = reader.fill_buf()?;
         let length = chunk.len();
         if length == 0 {

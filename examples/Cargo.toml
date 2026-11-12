@@ -31,8 +31,6 @@ path = "ts_remux.rs"
 name = "ps_remux"
 path = "ps_remux.rs"
 
-# Why not test the conversion in the crate's tests: they do not depend on
-# this package.
 [[example]]
 name = "ps_to_ts"
 path = "ps_to_ts.rs"

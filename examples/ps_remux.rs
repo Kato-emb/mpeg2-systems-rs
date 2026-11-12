@@ -45,8 +45,6 @@ fn remux(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), Box<dyn
     let mut out = Vec::new();
 
     loop {
-        // Why fill_buf rather than read into an array of our own: the demuxer
-        // takes a borrowed slice, so the reader's buffer goes in as it is.
         let chunk = reader.fill_buf()?;
         let length = chunk.len();
         if length == 0 {
@@ -79,8 +77,6 @@ fn remux(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), Box<dyn
         out.clear();
     }
 
-    // Why not write MPEG_program_end_code where the input has one: the
-    // output is one Program Stream, ended once after the last pack.
     pack_writer.write_program_end_code(&mut out);
     writer.write_all(&out)?;
     Ok(())

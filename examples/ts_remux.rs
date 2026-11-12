@@ -49,8 +49,6 @@ fn remux(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), Box<dyn
     let mut out = Vec::new();
 
     loop {
-        // Why fill_buf rather than read into an array of our own: the demuxer
-        // takes a borrowed slice, so the reader's buffer goes in as it is.
         let chunk = reader.fill_buf()?;
         let length = chunk.len();
         if length == 0 {
@@ -92,9 +90,6 @@ fn remux(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), Box<dyn
         if length == 0 {
             break;
         }
-        // Why clear rather than collect the whole output: the buffer keeps
-        // its capacity, so the packet writer writes each chunk without
-        // allocating.
         writer.write_all(&out)?;
         out.clear();
     }
