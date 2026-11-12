@@ -88,7 +88,11 @@ impl core::error::Error for Error {
 }
 
 /// Longest `adaptation_field_length` a Transport Packet can hold
-pub(crate) const MAX_ADAPTATION_FIELD_LENGTH: usize = 183;
+pub(super) const MAX_ADAPTATION_FIELD_LENGTH: usize = 183;
+
+/// Longest `adaptation_field_length` a Transport Packet that carries a
+/// payload can hold, one byte of payload at least following it (§2.4.3.5)
+pub(super) const MAX_ADAPTATION_FIELD_LENGTH_WITH_PAYLOAD: usize = MAX_ADAPTATION_FIELD_LENGTH - 1;
 
 /// Bytes a clock reference occupies: 33 bits of base, 6 reserved, 9 of extension
 const CLOCK_REFERENCE_LENGTH: usize = 6;

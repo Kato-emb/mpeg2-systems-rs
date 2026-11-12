@@ -5,21 +5,23 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use super::adaptation_field::{self, AdaptationField, MAX_ADAPTATION_FIELD_LENGTH};
+use super::adaptation_field::{
+    self, AdaptationField, MAX_ADAPTATION_FIELD_LENGTH, MAX_ADAPTATION_FIELD_LENGTH_WITH_PAYLOAD,
+};
 use super::{ContinuityCounter, Pid};
 use crate::field::{self, FieldReader, TwoBitFieldOutOfRange};
 #[cfg(feature = "alloc")]
 use crate::field::{FieldWriter, write_or_truncate};
 
 /// Bytes in a Transport Packet
-pub(crate) const PACKET_LENGTH: usize = 188;
+pub(super) const PACKET_LENGTH: usize = 188;
 
 /// Bytes in the header of a Transport Packet, `sync_byte` to `continuity_counter`
 #[cfg(feature = "alloc")]
-pub(crate) const HEADER_LENGTH: usize = 4;
+pub(super) const HEADER_LENGTH: usize = 4;
 
 /// Value of `sync_byte`
-pub(crate) const SYNC_BYTE: u8 = 0x47;
+pub(super) const SYNC_BYTE: u8 = 0x47;
 
 /// Failure to read or write a Transport Packet
 #[non_exhaustive]
@@ -395,7 +397,7 @@ impl<'input> TransportPacket<'input> {
                     == AdaptationFieldControl::ADAPTATION_FIELD_AND_PAYLOAD;
                 let adaptation_field_length = rest.first().map_or(0, |length| usize::from(*length));
                 let fits = if has_payload {
-                    adaptation_field_length < MAX_ADAPTATION_FIELD_LENGTH
+                    adaptation_field_length <= MAX_ADAPTATION_FIELD_LENGTH_WITH_PAYLOAD
                 } else {
                     adaptation_field_length == MAX_ADAPTATION_FIELD_LENGTH
                 };

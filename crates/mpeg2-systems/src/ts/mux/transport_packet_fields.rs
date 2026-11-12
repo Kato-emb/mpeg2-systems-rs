@@ -4,12 +4,7 @@
 use super::Error;
 use crate::time::ClockReference;
 use crate::ts::Pid;
-use crate::ts::adaptation_field::AdaptationField;
-
-/// Bytes the adaptation field of a Transport Packet with a payload takes at
-/// most: `adaptation_field_length` up to 182 (ISO/IEC 13818-1 §2.4.3.5), and
-/// the byte of `adaptation_field_length` itself
-const LONGEST_ADAPTATION_FIELD_WITH_PAYLOAD: usize = 183;
+use crate::ts::adaptation_field::{AdaptationField, MAX_ADAPTATION_FIELD_LENGTH_WITH_PAYLOAD};
 
 /// The fields of `transport_packet()` the caller sets on the Transport
 /// Packets of a PES packet a [`Muxer`](super::Muxer) carries
@@ -169,5 +164,5 @@ fn transport_private_data_limit(beside_pcr: bool) -> usize {
         transport_private_data: Some(&[]),
         ..AdaptationField::new()
     };
-    LONGEST_ADAPTATION_FIELD_WITH_PAYLOAD.saturating_sub(field.encoded_len())
+    MAX_ADAPTATION_FIELD_LENGTH_WITH_PAYLOAD.saturating_sub(field.adaptation_field_length())
 }
