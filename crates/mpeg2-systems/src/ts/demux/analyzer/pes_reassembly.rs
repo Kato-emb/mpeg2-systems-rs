@@ -8,7 +8,8 @@ use core::ops::Range;
 use super::continuity::Verdict;
 use crate::pes::{self, EncodedLen};
 use crate::ts::Pid;
-use crate::ts::demux::{Error, Event, Lent, Pending};
+use crate::ts::demux::pending::{Lent, Pending};
+use crate::ts::demux::{Error, Event};
 use crate::ts::packet::{PACKET_LENGTH, TransportPacket, TransportScramblingControl};
 
 /// Where a Transport Packet stands in its PID's sequence, as far as the PES

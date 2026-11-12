@@ -11,7 +11,8 @@ use alloc::collections::VecDeque;
 use core::mem;
 use core::ops::Range;
 
-use super::{Error, Event, Lent, Pending};
+use super::pending::{Lent, Pending};
+use super::{Error, Event};
 use crate::psi::TableId;
 use crate::psi::cat::CaSection;
 use crate::psi::pat::ProgramAssociationSection;

@@ -2,22 +2,22 @@
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
-use core::ops::Range;
 
 use crate::framing::{Framer, Next};
 use crate::pes::PesPacket;
 use crate::psi::section::Section;
 use crate::ts::Pid;
-use crate::ts::packet::TransportScramblingControl;
 
 mod analyzer;
 mod event;
 mod framer;
+mod pending;
 
 use analyzer::PacketAnalyzer;
 pub use event::{Error, Event};
 pub use framer::sync::PacketSize;
 use framer::{Output, TransportPackets};
+use pending::{Lent, Pending};
 
 /// Settings of a [`Demuxer`]
 ///
@@ -99,53 +99,6 @@ impl DemuxerConfig {
         self.subscribe_elementary_pids = subscribe_elementary_pids;
         self
     }
-}
-
-/// An event queued for [`Demuxer::poll_event`], holding the ranges of the
-/// bytes it lends rather than the bytes
-#[derive(Debug, Clone)]
-enum Pending {
-    /// An event that lends nothing
-    Ready(Event<'static>),
-    /// A range of the framer's buffer
-    Unsynchronized(Range<usize>),
-    /// A section read whole, without the body it lends
-    Section {
-        pid: Pid,
-        section: Section<'static>,
-        body: Lent,
-    },
-    /// The bytes of a PES packet that ended, read when polled
-    PesPacket {
-        pid: Pid,
-        bytes: Lent,
-        start_offset: u64,
-    },
-    /// A range of the PES reassembly buffer of `pid`: a PES packet whose
-    /// Transport Packets are scrambled
-    ScrambledPesPacket {
-        pid: Pid,
-        bytes: Range<usize>,
-        transport_scrambling_control: TransportScramblingControl,
-        start_offset: u64,
-    },
-    /// A range of the PES reassembly buffer of `pid`: a PES packet cut short
-    TruncatedPesPacket {
-        pid: Pid,
-        bytes: Range<usize>,
-        start_offset: u64,
-    },
-}
-
-/// Where the bytes a queued section or PES packet lends are
-#[derive(Debug, Clone)]
-enum Lent {
-    /// A range of the framer's buffer: the section or PES packet lay inside
-    /// one packet
-    Packet(Range<usize>),
-    /// A range of the section, or PES, reassembly buffer of the PID: the
-    /// section or PES packet crossed packets
-    Reassembled(Range<usize>),
 }
 
 /// Transport Stream demuxer, which takes input of any length and reports what

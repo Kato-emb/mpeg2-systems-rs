@@ -8,7 +8,8 @@ use core::ops::Range;
 use crate::psi::TableId;
 use crate::psi::section::PREFIX_LENGTH;
 use crate::ts::Pid;
-use crate::ts::demux::{Error, Event, Pending};
+use crate::ts::demux::pending::Pending;
+use crate::ts::demux::{Error, Event};
 
 /// How a packet's payload relates to sections, `pointer_field` included
 enum Unit<'payload> {
