@@ -265,7 +265,7 @@ fn frame(bytes: &[u8]) -> Result<(Language, &[u8]), Error> {
     let language_tag = reader.read_u8::<3>().map_err(field("language_tag"))?;
     // Why not keep the reserved bit: it is written '1'.
     reader.read_u8::<1>().map_err(field("language_tag"))?;
-    let dmf = Dmf(reader.read_u8::<4>().map_err(field("language_tag"))?);
+    let dmf = Dmf::from_4_bits(reader.read_u8::<4>().map_err(field("language_tag"))?);
     let dc = if matches!(dmf.get(), 0b1100..=0b1110) {
         Some(Dc::from(reader.read_u8::<8>().map_err(field("DC"))?))
     } else {
@@ -281,12 +281,12 @@ fn frame(bytes: &[u8]) -> Result<(Language, &[u8]), Error> {
         .read_bytes(reader.remaining_bytes())
         .unwrap_or_default();
     let mut language = Language::new(
-        LanguageTag(language_tag),
+        LanguageTag::from_3_bits(language_tag),
         dmf,
         code.try_into().unwrap_or_default(),
-        Format(format),
-        Tcs(tcs),
-        RollupMode(rollup_mode),
+        Format::from_4_bits(format),
+        Tcs::from_2_bits(tcs),
+        RollupMode::from_2_bits(rollup_mode),
     );
     language.dc = dc;
 

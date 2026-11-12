@@ -21,13 +21,18 @@ use crate::caption::ThreeBitFieldOutOfRange;
 /// ```
 #[doc(alias = "language_tag")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct LanguageTag(pub(super) u8);
+pub struct LanguageTag(u8);
 
 impl LanguageTag {
     /// Returns the 3 bits
     #[must_use]
     pub const fn get(self) -> u8 {
         self.0
+    }
+
+    /// Takes the 3 bits of a `language_tag` field, keeping only those bits
+    pub(super) const fn from_3_bits(value: u8) -> Self {
+        Self(value & 0b111)
     }
 }
 
@@ -89,7 +94,7 @@ impl From<u8> for Dc {
 /// assert_eq!(Format::try_from(16).map_err(FourBitFieldOutOfRange::value), Err(16));
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Format(pub(super) u8);
+pub struct Format(u8);
 
 impl Format {
     /// `'0000'`: horizontal writing in standard density
@@ -124,6 +129,11 @@ impl Format {
     pub const fn get(self) -> u8 {
         self.0
     }
+
+    /// Takes the 4 bits of a `Format` field, keeping only those bits
+    pub(super) const fn from_4_bits(value: u8) -> Self {
+        Self(value & 0b1111)
+    }
 }
 
 impl TryFrom<u8> for Format {
@@ -157,7 +167,7 @@ impl TryFrom<u8> for Format {
 /// ```
 #[doc(alias = "TCS")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Tcs(pub(super) u8);
+pub struct Tcs(u8);
 
 impl Tcs {
     /// `'00'`: the 8-unit code
@@ -169,6 +179,11 @@ impl Tcs {
     #[must_use]
     pub const fn get(self) -> u8 {
         self.0
+    }
+
+    /// Takes the 2 bits of a `TCS` field, keeping only those bits
+    pub(super) const fn from_2_bits(value: u8) -> Self {
+        Self(value & 0b11)
     }
 }
 
@@ -204,7 +219,7 @@ impl TryFrom<u8> for Tcs {
 /// ```
 #[doc(alias = "rollup_mode")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RollupMode(pub(super) u8);
+pub struct RollupMode(u8);
 
 impl RollupMode {
     /// `'00'`: the captions do not roll up
@@ -216,6 +231,11 @@ impl RollupMode {
     #[must_use]
     pub const fn get(self) -> u8 {
         self.0
+    }
+
+    /// Takes the 2 bits of a `rollup_mode` field, keeping only those bits
+    pub(super) const fn from_2_bits(value: u8) -> Self {
+        Self(value & 0b11)
     }
 }
 
@@ -229,5 +249,48 @@ impl TryFrom<u8> for RollupMode {
     /// [`TwoBitFieldOutOfRange`]: `value` is 4 or more.
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         TwoBitFieldOutOfRange::check(value).map(Self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Format, LanguageTag, RollupMode, Tcs};
+
+    #[test]
+    fn a_language_tag_from_3_bits_drops_the_bits_above_them() {
+        assert_eq!(
+            [
+                LanguageTag::from_3_bits(0b111),
+                LanguageTag::from_3_bits(0b1010)
+            ],
+            [LanguageTag(0b111), LanguageTag(0b010)]
+        );
+    }
+
+    #[test]
+    fn a_format_from_4_bits_drops_the_bits_above_them() {
+        assert_eq!(
+            [Format::from_4_bits(0b1111), Format::from_4_bits(0xa5)],
+            [Format(0b1111), Format(0b0101)]
+        );
+    }
+
+    #[test]
+    fn a_tcs_from_2_bits_drops_the_bits_above_them() {
+        assert_eq!(
+            [Tcs::from_2_bits(0b11), Tcs::from_2_bits(0b1110)],
+            [Tcs(0b11), Tcs(0b10)]
+        );
+    }
+
+    #[test]
+    fn a_rollup_mode_from_2_bits_drops_the_bits_above_them() {
+        assert_eq!(
+            [
+                RollupMode::from_2_bits(0b11),
+                RollupMode::from_2_bits(0b1110)
+            ],
+            [RollupMode(0b11), RollupMode(0b10)]
+        );
     }
 }

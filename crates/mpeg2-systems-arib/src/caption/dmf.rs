@@ -27,13 +27,18 @@ use mpeg2_systems::field::FourBitFieldOutOfRange;
 /// ```
 #[doc(alias("DMF", "display_mode"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Dmf(pub(crate) u8);
+pub struct Dmf(u8);
 
 impl Dmf {
     /// Returns the 4 bits
     #[must_use]
     pub const fn get(self) -> u8 {
         self.0
+    }
+
+    /// Takes the 4 bits of a `DMF` field, keeping only those bits
+    pub(crate) const fn from_4_bits(value: u8) -> Self {
+        Self(value & 0b1111)
     }
 }
 
@@ -47,5 +52,18 @@ impl TryFrom<u8> for Dmf {
     /// [`FourBitFieldOutOfRange`]: `value` is 16 or more.
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         FourBitFieldOutOfRange::check(value).map(Self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Dmf;
+
+    #[test]
+    fn a_dmf_from_4_bits_drops_the_bits_above_them() {
+        assert_eq!(
+            [Dmf::from_4_bits(0b1111), Dmf::from_4_bits(0xa5)],
+            [Dmf(0b1111), Dmf(0b0101)]
+        );
     }
 }
