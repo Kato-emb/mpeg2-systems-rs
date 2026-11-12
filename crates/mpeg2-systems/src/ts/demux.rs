@@ -15,7 +15,7 @@ mod pending;
 
 use analyzer::PacketAnalyzer;
 pub use event::{Error, Event};
-pub use framer::sync::PacketSize;
+pub use framer::PacketSize;
 use framer::{Output, TransportPackets};
 use pending::{Lent, Pending};
 
