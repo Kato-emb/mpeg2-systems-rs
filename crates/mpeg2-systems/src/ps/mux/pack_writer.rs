@@ -608,6 +608,22 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_padding_byte_other_than_0xff() {
+        assert_eq!(
+            written_after_a_byte(&PesPacket::new(StreamId::PADDING_STREAM, &[0xff, 0x00])),
+            (
+                Err(Error::PesPacket {
+                    error: pes::Error::Forbidden {
+                        field: "padding_byte",
+                        value: 0x00
+                    }
+                }),
+                vec![0x47]
+            )
+        );
+    }
+
+    #[test]
     fn rejects_a_timestamp_on_a_stream_that_carries_no_optional_header() {
         let mut packet = video_packet(Some(0), None, &[0x00]);
         packet.stream_id = StreamId::PADDING_STREAM;

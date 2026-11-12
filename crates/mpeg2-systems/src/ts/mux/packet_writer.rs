@@ -672,6 +672,29 @@ mod tests {
     }
 
     #[test]
+    fn a_padding_byte_other_than_0xff_is_refused_as_the_pes_packet_refuses_it() {
+        let mut out = vec![0x47];
+        let result = PacketWriter::new().write_pes_packet(
+            pid(0x100),
+            &PesPacket::new(StreamId::PADDING_STREAM, &[0xff, 0x00]),
+            None,
+            &mut out,
+        );
+        assert_eq!(
+            (result, out),
+            (
+                Err(Error::PesPacket {
+                    error: pes::Error::Forbidden {
+                        field: "padding_byte",
+                        value: 0x00
+                    }
+                }),
+                vec![0x47]
+            )
+        );
+    }
+
+    #[test]
     fn a_pes_packet_too_long_for_its_length_field_is_written_only_as_video_with_length_unspecified()
     {
         let payload = counting(70_000);

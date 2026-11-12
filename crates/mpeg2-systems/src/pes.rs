@@ -428,6 +428,8 @@ impl<'input> PesPacket<'input> {
     ///   that is not video.
     /// * [`TooLong`](Error::TooLong): the packet after `PES_packet_length` is
     ///   longer than 65535 bytes and its length is specified.
+    /// * [`Forbidden`](Error::Forbidden): the packet is of `padding_stream`
+    ///   and its payload holds a `padding_byte` other than 0xFF (§2.4.3.7).
     /// * Any error of [`OptionalHeader::write`].
     #[cfg(feature = "alloc")]
     pub fn write(&self, out: &mut Vec<u8>) -> Result<(), Error> {
@@ -452,6 +454,14 @@ impl<'input> PesPacket<'input> {
         if pes_packet_length == 0 && !self.stream_id.is_video() {
             return Err(Error::LengthUnspecified {
                 stream_id: self.stream_id,
+            });
+        }
+        if self.stream_id == StreamId::PADDING_STREAM
+            && let Some(&padding_byte) = self.payload.iter().find(|&&byte| byte != 0xff)
+        {
+            return Err(Error::Forbidden {
+                field: "padding_byte",
+                value: u32::from(padding_byte),
             });
         }
 
@@ -605,6 +615,29 @@ mod tests {
             ]
         );
         assert_eq!(written, []);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_padding_byte_other_than_0xff_is_refused_before_a_byte_is_written() {
+        let mut written = Vec::new();
+
+        assert_eq!(
+            PesPacket::new(StreamId::PADDING_STREAM, &[0xff, 0x00, 0xff]).write(&mut written),
+            Err(Error::Forbidden {
+                field: "padding_byte",
+                value: 0x00
+            })
+        );
+        assert_eq!(written, []);
+    }
+
+    #[test]
+    fn a_padding_byte_other_than_0xff_is_read_as_found() {
+        assert_eq!(
+            PesPacket::read(&[0x00, 0x00, 0x01, 0xbe, 0x00, 0x02, 0xff, 0x00]),
+            Ok(PesPacket::new(StreamId::PADDING_STREAM, &[0xff, 0x00]))
+        );
     }
 
     #[test]
