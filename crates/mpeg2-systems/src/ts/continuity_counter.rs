@@ -26,7 +26,7 @@ impl ContinuityCounter {
 
     /// Takes the 4 bits of a `continuity_counter` field, keeping only those
     /// bits
-    pub(super) const fn from_4_bits(value: u8) -> Self {
+    pub(super) const fn from_bits_truncate(value: u8) -> Self {
         Self(value & (Self::MODULUS - 1))
     }
 
@@ -113,11 +113,11 @@ mod tests {
     }
 
     #[test]
-    fn a_continuity_counter_from_4_bits_drops_the_bits_above_them() {
+    fn a_continuity_counter_keeps_only_the_low_4_bits_of_a_wider_value() {
         assert_eq!(
             [
-                ContinuityCounter::from_4_bits(0x0f),
-                ContinuityCounter::from_4_bits(0xf3)
+                ContinuityCounter::from_bits_truncate(0x0f),
+                ContinuityCounter::from_bits_truncate(0xf3)
             ],
             [ContinuityCounter(15), ContinuityCounter(3)]
         );

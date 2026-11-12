@@ -25,7 +25,7 @@ impl PesScramblingControl {
 
     /// Takes the 2 bits of a `PES_scrambling_control` field, keeping only
     /// those bits
-    pub(super) const fn from_2_bits(value: u8) -> Self {
+    pub(super) const fn from_bits_truncate(value: u8) -> Self {
         Self(value & 0b11)
     }
 }
@@ -48,11 +48,11 @@ mod tests {
     use super::PesScramblingControl;
 
     #[test]
-    fn a_pes_scrambling_control_from_2_bits_drops_the_bits_above_them() {
+    fn a_pes_scrambling_control_keeps_only_the_low_2_bits_of_a_wider_value() {
         assert_eq!(
             [
-                PesScramblingControl::from_2_bits(0b11),
-                PesScramblingControl::from_2_bits(0b1110)
+                PesScramblingControl::from_bits_truncate(0b11),
+                PesScramblingControl::from_bits_truncate(0b1110)
             ],
             [PesScramblingControl(0b11), PesScramblingControl(0b10)]
         );

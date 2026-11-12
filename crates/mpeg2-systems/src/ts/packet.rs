@@ -364,10 +364,10 @@ impl<'input> TransportPacket<'input> {
                 reader.read_bool()?,
                 reader.read_bool()?,
                 reader.read_bool()?,
-                Pid::from_13_bits(reader.read_u16::<13>()?),
+                Pid::from_bits_truncate(reader.read_u16::<13>()?),
                 TransportScramblingControl(reader.read_u8::<2>()?),
                 AdaptationFieldControl(reader.read_u8::<2>()?),
-                ContinuityCounter::from_4_bits(reader.read_u8::<4>()?),
+                ContinuityCounter::from_bits_truncate(reader.read_u8::<4>()?),
                 reader.read_bytes(reader.remaining_bytes())?,
             ))
         })();

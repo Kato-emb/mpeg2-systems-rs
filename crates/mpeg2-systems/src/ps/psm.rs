@@ -413,7 +413,7 @@ impl<'input> ProgramStreamMap<'input> {
         Ok(Self {
             current_next_indicator,
             single_extension_stream_flag,
-            program_stream_map_version: VersionNumber::from_5_bits(version),
+            program_stream_map_version: VersionNumber::from_bits_truncate(version),
             program_stream_info: DescriptorLoop::from(program_stream_info),
             elementary_streams: ElementaryStreamLoop(elementary_streams),
         })

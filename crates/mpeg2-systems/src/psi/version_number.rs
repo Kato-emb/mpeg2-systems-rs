@@ -40,7 +40,7 @@ impl VersionNumber {
     }
 
     /// Takes the 5 bits of a `version_number` field, keeping only those bits
-    pub(crate) const fn from_5_bits(value: u8) -> Self {
+    pub(crate) const fn from_bits_truncate(value: u8) -> Self {
         Self(value & (Self::MODULUS - 1))
     }
 
@@ -117,11 +117,11 @@ mod tests {
     }
 
     #[test]
-    fn a_version_number_from_5_bits_drops_the_bits_above_them() {
+    fn a_version_number_keeps_only_the_low_5_bits_of_a_wider_value() {
         assert_eq!(
             [
-                VersionNumber::from_5_bits(0x1f),
-                VersionNumber::from_5_bits(0xe4)
+                VersionNumber::from_bits_truncate(0x1f),
+                VersionNumber::from_bits_truncate(0xe4)
             ],
             [VersionNumber(31), VersionNumber(4)]
         );

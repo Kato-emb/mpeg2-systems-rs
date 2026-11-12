@@ -31,7 +31,7 @@ impl LanguageTag {
     }
 
     /// Takes the 3 bits of a `language_tag` field, keeping only those bits
-    pub(super) const fn from_3_bits(value: u8) -> Self {
+    pub(super) const fn from_bits_truncate(value: u8) -> Self {
         Self(value & 0b111)
     }
 }
@@ -131,7 +131,7 @@ impl Format {
     }
 
     /// Takes the 4 bits of a `Format` field, keeping only those bits
-    pub(super) const fn from_4_bits(value: u8) -> Self {
+    pub(super) const fn from_bits_truncate(value: u8) -> Self {
         Self(value & 0b1111)
     }
 }
@@ -182,7 +182,7 @@ impl Tcs {
     }
 
     /// Takes the 2 bits of a `TCS` field, keeping only those bits
-    pub(super) const fn from_2_bits(value: u8) -> Self {
+    pub(super) const fn from_bits_truncate(value: u8) -> Self {
         Self(value & 0b11)
     }
 }
@@ -234,7 +234,7 @@ impl RollupMode {
     }
 
     /// Takes the 2 bits of a `rollup_mode` field, keeping only those bits
-    pub(super) const fn from_2_bits(value: u8) -> Self {
+    pub(super) const fn from_bits_truncate(value: u8) -> Self {
         Self(value & 0b11)
     }
 }
@@ -257,38 +257,44 @@ mod tests {
     use super::{Format, LanguageTag, RollupMode, Tcs};
 
     #[test]
-    fn a_language_tag_from_3_bits_drops_the_bits_above_them() {
+    fn a_language_tag_keeps_only_the_low_3_bits_of_a_wider_value() {
         assert_eq!(
             [
-                LanguageTag::from_3_bits(0b111),
-                LanguageTag::from_3_bits(0b1010)
+                LanguageTag::from_bits_truncate(0b111),
+                LanguageTag::from_bits_truncate(0b1010)
             ],
             [LanguageTag(0b111), LanguageTag(0b010)]
         );
     }
 
     #[test]
-    fn a_format_from_4_bits_drops_the_bits_above_them() {
+    fn a_format_keeps_only_the_low_4_bits_of_a_wider_value() {
         assert_eq!(
-            [Format::from_4_bits(0b1111), Format::from_4_bits(0xa5)],
+            [
+                Format::from_bits_truncate(0b1111),
+                Format::from_bits_truncate(0xa5)
+            ],
             [Format(0b1111), Format(0b0101)]
         );
     }
 
     #[test]
-    fn a_tcs_from_2_bits_drops_the_bits_above_them() {
+    fn a_tcs_keeps_only_the_low_2_bits_of_a_wider_value() {
         assert_eq!(
-            [Tcs::from_2_bits(0b11), Tcs::from_2_bits(0b1110)],
+            [
+                Tcs::from_bits_truncate(0b11),
+                Tcs::from_bits_truncate(0b1110)
+            ],
             [Tcs(0b11), Tcs(0b10)]
         );
     }
 
     #[test]
-    fn a_rollup_mode_from_2_bits_drops_the_bits_above_them() {
+    fn a_rollup_mode_keeps_only_the_low_2_bits_of_a_wider_value() {
         assert_eq!(
             [
-                RollupMode::from_2_bits(0b11),
-                RollupMode::from_2_bits(0b1110)
+                RollupMode::from_bits_truncate(0b11),
+                RollupMode::from_bits_truncate(0b1110)
             ],
             [RollupMode(0b11), RollupMode(0b10)]
         );

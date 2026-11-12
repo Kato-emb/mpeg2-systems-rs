@@ -247,7 +247,10 @@ impl AdditionalAribCaptionInfo {
         };
         // Why not keep the 2 bits between DMF and Timing: they are Reserved
         // and written '11'.
-        Ok(Self::new(Dmf::from_4_bits(byte >> 4), Timing(byte & 0b11)))
+        Ok(Self::new(
+            Dmf::from_bits_truncate(byte >> 4),
+            Timing(byte & 0b11),
+        ))
     }
 
     /// Appends the information to `out`, its `Reserved` bits `'11'`

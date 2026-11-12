@@ -60,7 +60,7 @@ impl StreamId {
     }
 
     /// Takes the 8 bits of a `stream_id` field
-    pub(crate) const fn from_8_bits(value: u8) -> Self {
+    pub(crate) const fn from_bits_truncate(value: u8) -> Self {
         Self(value)
     }
 
@@ -111,7 +111,7 @@ impl StreamId {
 
 impl From<u8> for StreamId {
     fn from(value: u8) -> Self {
-        Self::from_8_bits(value)
+        Self::from_bits_truncate(value)
     }
 }
 

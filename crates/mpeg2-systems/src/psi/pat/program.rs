@@ -222,7 +222,7 @@ impl Iterator for ProgramIter<'_> {
             let pid = reader
                 .read_bits::<3>()
                 .and_then(|_| reader.read_u16::<13>())
-                .map(Pid::from_13_bits)
+                .map(Pid::from_bits_truncate)
                 .map_err(|error| Error::Field {
                     field: if program_number == 0 {
                         "network_PID"

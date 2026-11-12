@@ -41,8 +41,8 @@ impl Pid {
     }
 
     /// Takes the 13 bits of a `PID` field, keeping only those bits
-    pub(crate) const fn from_13_bits(value: u16) -> Self {
-        Self(value & Self::NULL.0)
+    pub(crate) const fn from_bits_truncate(value: u16) -> Self {
+        Self(value & 0x1fff)
     }
 
     /// Returns whether the PID is one Table 2-3 leaves free to assign, as a
@@ -112,9 +112,12 @@ mod tests {
         );
     }
     #[test]
-    fn a_pid_from_13_bits_drops_the_bits_above_them() {
+    fn a_pid_keeps_only_the_low_13_bits_of_a_wider_value() {
         assert_eq!(
-            [Pid::from_13_bits(0x1fff), Pid::from_13_bits(0xe010)],
+            [
+                Pid::from_bits_truncate(0x1fff),
+                Pid::from_bits_truncate(0xe010)
+            ],
             [Pid::NULL, Pid(0x0010)]
         );
     }

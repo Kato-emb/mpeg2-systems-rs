@@ -745,7 +745,7 @@ mod tests {
             &mut programs,
         )
         .unwrap();
-        let mut pat = ProgramAssociationSection::new(1, VersionNumber::from_5_bits(0));
+        let mut pat = ProgramAssociationSection::new(1, VersionNumber::from_bits_truncate(0));
         pat.programs = ProgramLoop::from(programs.as_slice());
         writer.write_program_association_section(&pat, out).unwrap();
         let mut streams = Vec::new();
@@ -757,7 +757,7 @@ mod tests {
             &mut streams,
         )
         .unwrap();
-        let mut pmt = TsProgramMapSection::new(1, VersionNumber::from_5_bits(0));
+        let mut pmt = TsProgramMapSection::new(1, VersionNumber::from_bits_truncate(0));
         pmt.pcr_pid = Some(pid(VIDEO_PID));
         pmt.elementary_streams = ElementaryStreamLoop::from(streams.as_slice());
         writer
@@ -1092,7 +1092,7 @@ mod tests {
     #[test]
     fn program_info_refused_leaves_the_muxer_as_it_was() {
         let broken = [0x05, 0x04, 0x00];
-        let mut pmt = TsProgramMapSection::new(1, VersionNumber::from_5_bits(0));
+        let mut pmt = TsProgramMapSection::new(1, VersionNumber::from_bits_truncate(0));
         pmt.program_info = broken.as_slice().into();
         let broken_error = pmt.write(&mut Vec::new()).unwrap_err();
         let past_the_limit = descriptors(1_009);
