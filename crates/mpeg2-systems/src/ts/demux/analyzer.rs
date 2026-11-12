@@ -13,25 +13,19 @@ use core::ops::Range;
 
 use super::pending::{Lent, Pending};
 use super::{Error, Event};
-use crate::psi::TableId;
-use crate::psi::cat::CaSection;
-use crate::psi::pat::ProgramAssociationSection;
-use crate::psi::pmt::TsProgramMapSection;
 use crate::psi::section::{PREFIX_LENGTH, SYNTAX_LENGTH, Section};
 use crate::ts::Pid;
 use crate::ts::packet::TransportPacket;
 
 mod continuity;
 mod pes_reassembly;
-mod program_map_routes;
 mod section_reassembly;
-mod version_gate;
+mod tables;
 
 use continuity::{ContinuityTracker, Verdict};
 use pes_reassembly::{PesReassembly, Sequence};
-use program_map_routes::ProgramMapRoutes;
 use section_reassembly::{Completed, SectionReassembler, SectionReassembly};
-use version_gate::{Admission, TableSection, VersionGate};
+use tables::{Followed, Tables};
 
 /// Continuity, section reassembly and table version state of the PIDs a
 /// demuxer follows
@@ -47,50 +41,12 @@ pub(super) struct PacketAnalyzer {
     pes: PesReassembly,
 }
 
-/// What the analyzer knows of the PAT, PMTs and CAT on air
-#[derive(Debug, Clone)]
-struct Tables {
-    routes: ProgramMapRoutes,
-    gate: VersionGate,
-}
-
-/// A table whose sections are reported typed
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Typed {
-    ProgramAssociation,
-    TsProgramMap,
-    ConditionalAccess,
-}
-
-impl Tables {
-    /// Returns the table a section read on `pid` is reported as, if typed
-    fn typed(&self, pid: Pid, section: &Section<'_>) -> Option<Typed> {
-        match (pid, section.table_id) {
-            (Pid::PAT, TableId::PROGRAM_ASSOCIATION) => Some(Typed::ProgramAssociation),
-            (Pid::CAT, TableId::CONDITIONAL_ACCESS) => Some(Typed::ConditionalAccess),
-            (Pid::PAT | Pid::CAT, _) => None,
-            // Why type a PMT section that lacks the syntax on a program map
-            // PID: it then fails as a PMT section and is reported as an
-            // error, rather than passing as a section of another table.
-            (_, TableId::TS_PROGRAM_MAP) => (self.routes.follows(pid)
-                && section
-                    .syntax
-                    .is_none_or(|syntax| self.routes.names(pid, syntax.table_id_extension)))
-            .then_some(Typed::TsProgramMap),
-            _ => None,
-        }
-    }
-}
-
 impl PacketAnalyzer {
     pub(super) const fn new(pes_buffer_limit: usize) -> Self {
         Self {
             continuity: ContinuityTracker::new(),
             sections: SectionReassembly::new(),
-            tables: Tables {
-                routes: ProgramMapRoutes::new(),
-                gate: VersionGate::new(),
-            },
+            tables: Tables::new(),
             pes: PesReassembly::new(pes_buffer_limit),
         }
     }
@@ -109,7 +65,7 @@ impl PacketAnalyzer {
 
     pub(super) fn unsubscribe_sections(&mut self, pid: Pid, pending: &mut VecDeque<Pending>) {
         self.sections
-            .unsubscribe(pid, self.tables.routes.carries_psi(pid), pending);
+            .unsubscribe(pid, self.tables.carries_psi(pid), pending);
     }
 
     /// Returns the bytes of a [`Lent::Reassembled`] range of a PES packet on
@@ -145,7 +101,7 @@ impl PacketAnalyzer {
     /// Returns the event of a section read whole on `pid`, typed as it was
     /// when analyzed
     pub(super) fn section_event<'a>(&self, pid: Pid, section: &Section<'a>) -> Event<'a> {
-        event_of(pid, section, self.tables.typed(pid, section))
+        self.tables.event(pid, section)
     }
 
     /// Returns the bytes of a [`Lent::Reassembled`] range of `pid`
@@ -210,7 +166,7 @@ impl PacketAnalyzer {
                 // Why not keep the PAT's reassembler in place while it
                 // pushes: the program maps a PAT names are added to the
                 // sections reassembled as its sections are read. Putting it
-                // back in the entry, which the routes always keep, allocates
+                // back in the entry, which the PAT PID always keeps, allocates
                 // nothing.
                 let mut reassembler =
                     mem::replace(self.sections.for_psi(pid), SectionReassembler::new());
@@ -253,8 +209,8 @@ impl PacketAnalyzer {
 /// buffer, to the reassembler of its PID, and queues the sections it
 /// completes
 ///
-/// With `program_maps`, the packet is on the PAT PID, and the routes follow
-/// the program maps its sections name in the sections reassembled.
+/// With `program_maps`, the packet is on the PAT PID: the tables follow the
+/// program maps its sections name, and so do the sections reassembled.
 fn reassemble(
     reassembler: &mut SectionReassembler,
     tables: &mut Tables,
@@ -277,38 +233,9 @@ fn reassemble(
                     return;
                 }
             };
-            let typed = tables.typed(pid, &section);
-            if let (Some(typed), Some(syntax)) = (typed, section.syntax) {
-                // Why not take a section with current_next_indicator '0' as a
-                // change: it announces the next table, and the table in force
-                // stays until that version comes with the indicator set
-                // (§2.4.4.5).
-                if !syntax.current_next_indicator {
-                    return;
-                }
-                let table_section = match typed {
-                    Typed::ProgramAssociation => TableSection::ProgramAssociation {
-                        transport_stream_id: syntax.table_id_extension,
-                        section_number: syntax.section_number,
-                    },
-                    Typed::TsProgramMap => TableSection::TsProgramMap {
-                        pid,
-                        program_number: syntax.table_id_extension,
-                        section_number: syntax.section_number,
-                    },
-                    Typed::ConditionalAccess => TableSection::ConditionalAccess {
-                        section_number: syntax.section_number,
-                    },
-                };
-                // Why gate on the syntax before the typed conversion: a
-                // resend, by far the most common section, then costs no
-                // conversion; a section that fails the conversion is
-                // reported once per version, like one that passes.
-                if tables.gate.admit(table_section, syntax.version_number) == Admission::Resent {
-                    return;
-                }
-            }
-            let event = event_of(pid, &section, typed);
+            let Some(event) = tables.admit(pid, &section) else {
+                return;
+            };
             if let Event::Error(error) = event {
                 pending.push_back(Pending::Ready(Event::Error(error)));
                 return;
@@ -316,7 +243,17 @@ fn reassemble(
             if let (Event::ProgramAssociationSection(pat), Some(program_maps)) =
                 (&event, program_maps.as_deref_mut())
             {
-                tables.routes.follow(pat, program_maps, &mut tables.gate);
+                let followed = tables.follow(pat);
+                if followed != Followed::Repeated {
+                    for pid in tables::program_map_pids(pat) {
+                        program_maps.for_psi(pid);
+                    }
+                }
+                // Why stop reassembling only once a version is whole: until
+                // then, the programs of the previous version stay named.
+                if followed == Followed::Whole {
+                    program_maps.retain(|pid| tables.carries_psi(pid));
+                }
             }
             let header_length = if section.syntax.is_some() {
                 PREFIX_LENGTH.saturating_add(SYNTAX_LENGTH)
@@ -342,30 +279,6 @@ fn reassemble(
             });
         },
     );
-}
-
-/// Returns the event of a section read whole on `pid`, typed as `typed`
-/// says, or failed if it cannot be
-fn event_of<'a>(pid: Pid, section: &Section<'a>, typed: Option<Typed>) -> Event<'a> {
-    match typed {
-        Some(Typed::ProgramAssociation) => ProgramAssociationSection::try_from(section)
-            .map_or_else(
-                |error| Event::Error(Error::ProgramAssociationSection { error }),
-                Event::ProgramAssociationSection,
-            ),
-        Some(Typed::TsProgramMap) => TsProgramMapSection::try_from(section).map_or_else(
-            |error| Event::Error(Error::TsProgramMapSection { pid, error }),
-            |section| Event::TsProgramMapSection { pid, section },
-        ),
-        Some(Typed::ConditionalAccess) => CaSection::try_from(section).map_or_else(
-            |error| Event::Error(Error::CaSection { error }),
-            Event::CaSection,
-        ),
-        None => Event::Section {
-            pid,
-            section: section.clone(),
-        },
-    }
 }
 
 #[cfg(test)]

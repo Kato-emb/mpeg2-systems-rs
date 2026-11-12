@@ -65,9 +65,42 @@ fn a_pat_across_packets_names_its_program_maps() {
     assert_eq!(followed, [&[0x0000][..], &pids].concat());
 }
 
+#[test]
+fn a_whole_pat_version_stops_reassembling_only_the_program_maps_it_no_longer_names() {
+    let versions = [
+        section_packet(0x0000, 0, &pat_section(0, &[(1, 0x0100), (2, 0x0200)])),
+        section_packet(0x0000, 1, &pat_section(1, &[(2, 0x0200), (3, 0x0300)])),
+        section_packet(0x0000, 2, &pat_section_of(2, (0, 1), &[(4, 0x0400)])),
+    ];
+    let mut demuxer = Demuxer::new(DemuxerConfig::default());
+    let mut stream = behind_null_packets(&[]);
+    let mut followed = Vec::new();
+    for packet in versions {
+        stream.extend(packet);
+        events_of(&mut demuxer, &stream);
+        stream.clear();
+        followed.push(
+            demuxer
+                .analyzer
+                .sections
+                .pids()
+                .map(Pid::get)
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert_eq!(
+        followed,
+        [
+            vec![0x0000, 0x0100, 0x0200],
+            vec![0x0000, 0x0200, 0x0300],
+            vec![0x0000, 0x0200, 0x0300, 0x0400],
+        ]
+    );
+}
+
 /// Every event the demuxer gives for `stream`, as `Debug` prints it, so the
 /// events can outlive their borrow of the demuxer
-fn events_of(demuxer: &mut Demuxer, stream: &[u8]) -> Vec<String> {
+pub(super) fn events_of(demuxer: &mut Demuxer, stream: &[u8]) -> Vec<String> {
     demuxer.handle_input(stream);
     drained(demuxer)
 }
@@ -128,13 +161,17 @@ fn section_of_table(
     bytes
 }
 
-fn pat_section(version_number: u8, programs: &[(u16, u16)]) -> Vec<u8> {
+pub(super) fn pat_section(version_number: u8, programs: &[(u16, u16)]) -> Vec<u8> {
     pat_section_of(version_number, (0, 0), programs)
 }
 
 /// A PAT section as [`pat_section`] makes, `section_number` and
 /// `last_section_number` given
-fn pat_section_of(version_number: u8, numbers: (u8, u8), programs: &[(u16, u16)]) -> Vec<u8> {
+pub(super) fn pat_section_of(
+    version_number: u8,
+    numbers: (u8, u8),
+    programs: &[(u16, u16)],
+) -> Vec<u8> {
     let mut body = Vec::new();
     for (program_number, pid) in programs {
         body.extend_from_slice(&program_number.to_be_bytes());
@@ -143,7 +180,11 @@ fn pat_section_of(version_number: u8, numbers: (u8, u8), programs: &[(u16, u16)]
     section_of_table(0x00, 0x0001, version_number, numbers, &body)
 }
 
-fn pmt_section(program_number: u16, version_number: u8, streams: &[(u8, u16)]) -> Vec<u8> {
+pub(super) fn pmt_section(
+    program_number: u16,
+    version_number: u8,
+    streams: &[(u8, u16)],
+) -> Vec<u8> {
     let mut body = vec![0xE1, 0x01, 0xF0, 0x00];
     for (stream_type, pid) in streams {
         body.push(*stream_type);
@@ -158,7 +199,7 @@ fn cat_section(version_number: u8, descriptors: &[u8]) -> Vec<u8> {
 }
 
 /// A packet that starts `section` on `pid`
-fn section_packet(pid: u16, continuity_counter: u8, section: &[u8]) -> Vec<u8> {
+pub(super) fn section_packet(pid: u16, continuity_counter: u8, section: &[u8]) -> Vec<u8> {
     packet(
         pid,
         true,
@@ -168,7 +209,7 @@ fn section_packet(pid: u16, continuity_counter: u8, section: &[u8]) -> Vec<u8> {
 }
 
 /// Null packets enough to acquire the grid, then `packets`
-fn behind_null_packets(packets: &[Vec<u8>]) -> Vec<u8> {
+pub(super) fn behind_null_packets(packets: &[Vec<u8>]) -> Vec<u8> {
     let mut stream = Vec::new();
     for _ in 0..5 {
         stream.extend(packet(0x1FFF, false, 0, &[]));
@@ -493,24 +534,6 @@ fn a_pmt_that_cannot_be_read_is_reported_once_per_version() {
             }))
         ]
     );
-}
-
-// Why not test through poll_event: the version memory changes no event, only
-// the memory the demuxer holds.
-#[test]
-fn the_version_memory_holds_no_more_pmts_than_the_pat_names() {
-    let pat = pat_section(0, &[(1, 0x0100)]);
-    let mut packets = vec![section_packet(0x0000, 0, &pat)];
-    for (program_number, continuity_counter) in (1_u16..=300).zip((0_u8..16).cycle()) {
-        packets.push(section_packet(
-            0x0100,
-            continuity_counter,
-            &pmt_section(program_number, 0, &[]),
-        ));
-    }
-    let mut demuxer = Demuxer::new(DemuxerConfig::default());
-    events_of(&mut demuxer, &behind_null_packets(&packets));
-    assert_eq!(demuxer.analyzer.tables.gate.len(), 2);
 }
 
 #[test]
