@@ -5,6 +5,12 @@
 //! cargo run --example ps_remux -- <in.ps> <out.ps>
 //! ```
 //!
+//! The output is written through [`PackWriter`], which writes each value
+//! given as it is, so the input's packs, SCRs and system headers are carried
+//! over. [`Muxer`](mpeg2_systems::ps::mux::Muxer) instead makes the packs,
+//! the SCRs, the system header and the program stream map of its own; the
+//! `ts_to_ps` example multiplexes with it.
+//!
 //! Each event lends what it reports from the demuxer: the pack writer takes
 //! the pack header, the map or the PES packet while the event is alive, and
 //! the event is dropped before the next poll.

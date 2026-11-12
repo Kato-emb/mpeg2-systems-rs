@@ -270,7 +270,8 @@
 //!
 //! The programs `examples/` holds count the PES packets of a stream, write one
 //! back through the packetizing layer, and multiplex the PES packets of a
-//! Program Stream into a Transport Stream through the multiplexing layer:
+//! Program Stream into a Transport Stream, or of a Transport Stream into a
+//! Program Stream, through the multiplexing layer:
 //! `cargo run --example ts_demux -- <file>`.
 //!
 //! # Modules
