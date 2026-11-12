@@ -488,6 +488,8 @@ impl<'input> PesPacket<'input> {
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "alloc")]
+    use alloc::vec;
+    #[cfg(feature = "alloc")]
     use alloc::vec::Vec;
 
     use super::{EncodedLen, Error, OptionalHeader, PesPacket, StreamId};
@@ -619,17 +621,17 @@ mod tests {
 
     #[cfg(feature = "alloc")]
     #[test]
-    fn a_padding_byte_other_than_0xff_is_refused_before_a_byte_is_written() {
-        let mut written = Vec::new();
+    fn a_padding_byte_other_than_0xff_is_refused_by_the_first_one_before_a_byte_is_written() {
+        let mut written = vec![0x47];
 
         assert_eq!(
-            PesPacket::new(StreamId::PADDING_STREAM, &[0xff, 0x00, 0xff]).write(&mut written),
+            PesPacket::new(StreamId::PADDING_STREAM, &[0xff, 0x01, 0x02]).write(&mut written),
             Err(Error::Forbidden {
                 field: "padding_byte",
-                value: 0x00
+                value: 0x01
             })
         );
-        assert_eq!(written, []);
+        assert_eq!(written, [0x47]);
     }
 
     #[test]
