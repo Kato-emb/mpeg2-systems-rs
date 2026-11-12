@@ -265,22 +265,10 @@ fn reassemble(
     pending: &mut VecDeque<Pending>,
 ) {
     let pid = packet.pid;
-    match verdict {
-        Verdict::InOrder => {}
-        // Why not reassemble a duplicate: its payload repeats bytes already
-        // gathered, so the same section would complete twice.
-        Verdict::Duplicate => return,
-        // Why drop the section in flight, on a packet without payload too:
-        // after lost bytes or a splice, the bytes gathered and those that
-        // follow belong to different sections.
-        Verdict::Broken { .. } | Verdict::Excused => reassembler.discard_in_flight(),
-    }
-    let Some(payload) = packet.payload else {
-        return;
-    };
     reassembler.push(
+        verdict,
         packet.payload_unit_start_indicator,
-        payload,
+        packet.payload,
         &mut |completed, section_bytes| {
             let section = match Section::read(section_bytes) {
                 Ok(section) => section,

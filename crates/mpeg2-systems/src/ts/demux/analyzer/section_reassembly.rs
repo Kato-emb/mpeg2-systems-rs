@@ -5,6 +5,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use super::continuity::Verdict;
 use crate::psi::TableId;
 use crate::psi::section::PREFIX_LENGTH;
 use crate::ts::Pid;
@@ -212,30 +213,46 @@ impl SectionReassembler {
     }
 
     /// Returns the bytes of a [`Completed::Reassembled`] section
-    pub(super) fn section(&self, range: Range<usize>) -> &[u8] {
+    fn section(&self, range: Range<usize>) -> &[u8] {
         self.buffer.get(range).unwrap_or_default()
     }
 
     #[cfg(test)]
-    pub(super) fn buffer_len(&self) -> usize {
+    fn buffer_len(&self) -> usize {
         self.buffer.len()
     }
 
     /// Drops the section in flight
-    pub(super) fn discard_in_flight(&mut self) {
+    fn discard_in_flight(&mut self) {
         self.buffer.truncate(self.in_flight_start);
     }
 
-    /// Takes the payload of a packet of the PID, and calls `completed` with
-    /// each section it completes, in order, and where it lies
+    /// Takes a packet of the PID, which `verdict` places in its sequence,
+    /// and calls `completed` with each section its payload completes, in
+    /// order, and where it lies
     ///
-    /// The sections the previous push completed are dropped first.
+    /// The sections the previous push completed are dropped first, unless
+    /// the packet is a duplicate.
     pub(super) fn push(
         &mut self,
+        verdict: Verdict,
         payload_unit_start_indicator: bool,
-        payload: &[u8],
+        payload: Option<&[u8]>,
         completed: &mut impl FnMut(Completed, &[u8]),
     ) {
+        match verdict {
+            Verdict::InOrder => {}
+            // Why not reassemble a duplicate: its payload repeats bytes
+            // already gathered, so the same section would complete twice.
+            Verdict::Duplicate => return,
+            // Why drop the section in flight, on a packet without payload
+            // too: after lost bytes or a splice, the bytes gathered and those
+            // that follow belong to different sections.
+            Verdict::Broken { .. } | Verdict::Excused => self.discard_in_flight(),
+        }
+        let Some(payload) = payload else {
+            return;
+        };
         self.buffer.drain(..self.in_flight_start);
         self.in_flight_start = 0;
         match unit_of(payload_unit_start_indicator, payload) {

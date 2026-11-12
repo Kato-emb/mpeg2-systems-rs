@@ -34,9 +34,14 @@ fn push_all(payloads: &[(bool, Vec<u8>)]) -> Vec<Vec<Vec<u8>>> {
         .iter()
         .map(|(payload_unit_start_indicator, payload)| {
             let mut sections = Vec::new();
-            reassembler.push(*payload_unit_start_indicator, payload, &mut |_, section| {
-                sections.push(section.to_vec());
-            });
+            reassembler.push(
+                Verdict::InOrder,
+                *payload_unit_start_indicator,
+                Some(payload),
+                &mut |_, section| {
+                    sections.push(section.to_vec());
+                },
+            );
             sections
         })
         .collect()
@@ -173,7 +178,12 @@ fn a_section_inside_one_payload_is_not_copied() {
     let mut reassembler = SectionReassembler::new();
     let payload = unit_start(&[], &[first.clone(), second.clone()].concat());
     let mut lent = Vec::new();
-    reassembler.push(true, &payload, &mut |completed, _| lent.push(completed));
+    reassembler.push(
+        Verdict::InOrder,
+        true,
+        Some(&payload),
+        &mut |completed, _| lent.push(completed),
+    );
     assert_eq!(
         (lent, reassembler.buffer.capacity()),
         (
@@ -192,11 +202,17 @@ fn a_section_across_packets_is_lent_from_the_buffer_until_the_next_push() {
     let after = section(0x02, &[0xBB; 5]);
     let (head, tail) = bytes.split_at(10);
     let mut reassembler = SectionReassembler::new();
-    reassembler.push(true, &unit_start(&[], head), &mut |_, _| {});
+    reassembler.push(
+        Verdict::InOrder,
+        true,
+        Some(&unit_start(&[], head)),
+        &mut |_, _| {},
+    );
     let mut lent = Vec::new();
     reassembler.push(
+        Verdict::InOrder,
         true,
-        &unit_start(tail, &after),
+        Some(&unit_start(tail, &after)),
         &mut |completed, section| {
             lent.push((completed, section.to_vec()));
         },
@@ -208,7 +224,7 @@ fn a_section_across_packets_is_lent_from_the_buffer_until_the_next_push() {
             (Completed::InPayload(1 + tail.len()), after.clone()),
         ]
     );
-    reassembler.push(false, &[], &mut |_, _| {});
+    reassembler.push(Verdict::InOrder, false, Some(&[]), &mut |_, _| {});
     assert_eq!(reassembler, SectionReassembler::new());
 }
 
@@ -224,11 +240,17 @@ fn completed_across_packets_with_one_in_flight(
     let (head, tail) = bytes.split_at(10);
     reassembly.subscribe(pid);
     let reassembler = reassembly.reassembler_mut(pid).unwrap();
-    reassembler.push(true, &unit_start(&[], head), &mut |_, _| {});
+    reassembler.push(
+        Verdict::InOrder,
+        true,
+        Some(&unit_start(&[], head)),
+        &mut |_, _| {},
+    );
     let mut lent = Vec::new();
     reassembler.push(
+        Verdict::InOrder,
         true,
-        &unit_start(tail, in_flight.split_at(50).0),
+        Some(&unit_start(tail, in_flight.split_at(50).0)),
         &mut |completed, _| lent.push(completed),
     );
     (bytes, lent)
@@ -268,8 +290,9 @@ fn the_sections_kept_by_discarding_in_flight_leave_the_next_section_of_the_pid_a
         [(true, unit_start(&[], head)), (false, tail.to_vec())]
     {
         reassembler.push(
+            Verdict::InOrder,
             payload_unit_start_indicator,
-            &payload,
+            Some(&payload),
             &mut |at, section| {
                 completed.push((at, section.to_vec()));
             },
@@ -281,5 +304,42 @@ fn the_sections_kept_by_discarding_in_flight_leave_the_next_section_of_the_pid_a
             vec![(Completed::Reassembled(0), next.clone())],
             Some(next.len())
         )
+    );
+}
+
+/// The sections a continuation of `tail` completes after `head` started one,
+/// with a packet `between` them that the counter places as `verdict`
+fn completed_after(verdict: Verdict, between: Option<&[u8]>) -> Vec<Vec<u8>> {
+    let bytes = section(0x02, &[0xAA; 30]);
+    let (head, tail) = bytes.split_at(10);
+    let mut reassembler = SectionReassembler::new();
+    reassembler.push(
+        Verdict::InOrder,
+        true,
+        Some(&unit_start(&[], head)),
+        &mut |_, _| {},
+    );
+    reassembler.push(verdict, false, between, &mut |_, _| {});
+    let mut completed = Vec::new();
+    reassembler.push(Verdict::InOrder, false, Some(tail), &mut |_, section| {
+        completed.push(section.to_vec());
+    });
+    completed
+}
+
+#[test]
+fn a_gap_in_the_counter_drops_the_section_in_flight_even_without_payload() {
+    assert_eq!(
+        completed_after(Verdict::Excused, None),
+        Vec::<Vec<u8>>::new()
+    );
+}
+
+#[test]
+fn a_duplicate_packet_adds_nothing_to_the_section_in_flight() {
+    let bytes = section(0x02, &[0xAA; 30]);
+    assert_eq!(
+        completed_after(Verdict::Duplicate, Some(&[0xBB; 10])),
+        [bytes]
     );
 }
