@@ -142,7 +142,8 @@ default, brings its writers and the `alloc` feature of `mpeg2-systems`.
   `ps_remux` does the same for a Program Stream (`PackWriter`).
 - `cargo run --example ps_to_ts -- <in> <out>` reads a Program
   Stream and multiplexes its PES packets into a Transport Stream through the
-  multiplexing layer (`Muxer`).
+  multiplexing layer (`Muxer`); `ts_to_ps` does the same from a Transport
+  Stream into a Program Stream.
 - Fixtures: streams FFmpeg wrote, under `crates/mpeg2-systems/tests/fixtures/`,
   and an ARIB caption stream of TSDuck's tables and hand-built PES packets,
   under `crates/mpeg2-systems-arib/tests/fixtures/`.

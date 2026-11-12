@@ -5,6 +5,12 @@
 //! cargo run --example ts_remux -- <in.ts> <out.ts>
 //! ```
 //!
+//! The output is written through [`PacketWriter`], which writes each value
+//! given as it is, so the input's PCRs and the sections the crate does not
+//! interpret are carried over. [`Muxer`](mpeg2_systems::ts::mux::Muxer)
+//! instead makes the PSI and the PCRs of its own; the `ps_to_ts` example
+//! multiplexes with it.
+//!
 //! The demuxer subscribes itself to the elementary streams the PMTs name.
 //! Each event lends what it reports from the demuxer: the packet writer takes
 //! the section or the PES packet while the event is alive, and it is dropped
