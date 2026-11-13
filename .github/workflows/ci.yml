@@ -39,7 +39,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo fmt --manifest-path benches/Cargo.toml --check
       - run: cargo fmt --manifest-path fuzz/Cargo.toml --check
-      - uses: crate-ci/typos@4c8b7f51ca60df14e3c5ca82770dfbbe6c3dae85 # v1.52.0
+      - uses: crate-ci/typos@276087d9a4f06398b3e04825487805e2d7375888 # v1.52.2
       # A TODO/FIXME must carry an issue link or owner: `TODO(#12):`, `TODO(name):`, or a URL.
       - name: Forbid bare TODO/FIXME markers
         run: |
@@ -65,7 +65,7 @@ jobs:
         with:
           toolchain: stable
           components: clippy
-      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         timeout-minutes: 5
         with:
           tool: cargo-hack
@@ -92,7 +92,7 @@ jobs:
         with:
           toolchain: stable
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         timeout-minutes: 5
         with:
           tool: nextest,cargo-llvm-cov
@@ -136,7 +136,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         timeout-minutes: 5
         with:
           tool: nextest
@@ -234,7 +234,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: nightly-2026-10-13
-      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         timeout-minutes: 5
         with:
           tool: cargo-binstall
@@ -319,7 +319,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         timeout-minutes: 5
         with:
           tool: cargo-deny
