@@ -121,7 +121,8 @@ pub fn mux_pes_packets(writer: &mut PacketWriter, access_unit: &[u8], out: &mut 
 /// measure.
 #[must_use]
 pub fn registered_muxer() -> Muxer {
-    let mut muxer = Muxer::new(MuxerConfig::new(Duration::from_millis(700))).expect("the default settings are taken");
+    let mut muxer = Muxer::new(MuxerConfig::new(Duration::from_millis(700)))
+        .expect("the default settings are taken");
     let pid = |value| Pid::try_from(value).expect("a PID");
     muxer
         .add_program(1, pid(0x1000))
@@ -174,7 +175,10 @@ pub fn multiplex_pes_packets(
 /// measure.
 #[must_use]
 pub fn registered_program_stream_muxer() -> ps::mux::Muxer {
-    registered_program_stream_muxer_of(ps::mux::MuxerConfig::new(25_200, Duration::from_millis(700)))
+    registered_program_stream_muxer_of(ps::mux::MuxerConfig::new(
+        25_200,
+        Duration::from_millis(700),
+    ))
 }
 
 /// Returns a Program Stream muxer of `config` with its video stream of

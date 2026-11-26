@@ -113,7 +113,8 @@ fn a_pass_over_an_input_allocates_nothing_once_the_buffers_have_grown() {
     allocations.push(("pes packets", ACCESS_UNIT_LENGTH, "ps muxer", counted));
     none.push(("pes packets", ACCESS_UNIT_LENGTH, "ps muxer", 0));
     let mut muxer = registered_program_stream_muxer_of(
-        ps::mux::MuxerConfig::new(25_200, Duration::from_millis(700)).with_header_interval(Duration::ZERO),
+        ps::mux::MuxerConfig::new(25_200, Duration::from_millis(700))
+            .with_header_interval(Duration::ZERO),
     );
     let mut first_dts = 90_000;
     let counted = allocations_once_grown(&ALLOCATOR, || {
@@ -132,8 +133,9 @@ fn a_pass_over_an_input_allocates_nothing_once_the_buffers_have_grown() {
         "ps muxer, headers each",
         0,
     ));
-    let mut muxer =
-        registered_program_stream_muxer_of(ps::mux::MuxerConfig::new(25_200, Duration::from_millis(700)).with_fixed_rate(true));
+    let mut muxer = registered_program_stream_muxer_of(
+        ps::mux::MuxerConfig::new(25_200, Duration::from_millis(700)).with_fixed_rate(true),
+    );
     let mut first_dts = 90_000;
     let counted = allocations_once_grown(&ALLOCATOR, || {
         multiplex_program_stream_pes_packets(&mut muxer, &access_unit, first_dts, &mut out);
