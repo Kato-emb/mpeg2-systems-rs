@@ -2,6 +2,7 @@
 //! fails
 
 use core::fmt;
+use core::time::Duration;
 
 use super::csps::DecoderBufferBound;
 use crate::pes::extension::PStdBuffer;
@@ -53,6 +54,12 @@ pub enum Error {
     ProgramMuxRate {
         /// The `program_mux_rate` set
         program_mux_rate: u32,
+    },
+    /// The `mux_delay` set is longer than the 1 s a byte may wait in the
+    /// P-STD before it is decoded (ISO/IEC 13818-1 §2.5.2.3)
+    MuxDelay {
+        /// The `mux_delay` set
+        mux_delay: Duration,
     },
     /// The `pack_size` set cannot hold a pack header, the shortest PES packet
     /// header and a byte of payload, or in a CSPS at a fixed rate the
@@ -239,6 +246,9 @@ impl fmt::Display for Error {
                 formatter,
                 "program_mux_rate {program_mux_rate} is outside 1 to 2^22 - 1"
             ),
+            Self::MuxDelay { mux_delay } => {
+                write!(formatter, "mux_delay {mux_delay:?} is longer than 1 s")
+            }
             Self::PackSize { pack_size } => write!(
                 formatter,
                 "pack_size {pack_size} is shorter than the shortest pack"
@@ -405,6 +415,7 @@ impl core::error::Error for Error {
             Self::StreamId { .. }
             | Self::LengthUnspecified { .. }
             | Self::ProgramMuxRate { .. }
+            | Self::MuxDelay { .. }
             | Self::PackSize { .. }
             | Self::PackLength { .. }
             | Self::StreamInUse { .. }

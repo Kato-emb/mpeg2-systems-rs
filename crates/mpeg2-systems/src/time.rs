@@ -191,6 +191,19 @@ pub(crate) struct SystemTimeClock(u64);
 #[cfg(feature = "alloc")]
 pub(crate) const SYSTEM_CLOCK_FREQUENCY: u64 = 27_000_000;
 
+/// The longest a byte may wait in the buffers of the system target decoder
+/// before it is decoded, ISO/IEC 13818-1 §2.4.2.6 and §2.5.2.3, but for still
+/// picture video and ISO/IEC 14496 streams
+#[cfg(feature = "alloc")]
+const LONGEST_DECODER_DELAY: Duration = Duration::from_secs(1);
+
+/// Returns whether a muxer may send a PES packet `mux_delay` before it is
+/// decoded: no longer than [`LONGEST_DECODER_DELAY`]
+#[cfg(feature = "alloc")]
+pub(crate) fn is_mux_delay_allowed(mux_delay: Duration) -> bool {
+    mux_delay <= LONGEST_DECODER_DELAY
+}
+
 #[cfg(feature = "alloc")]
 impl SystemTimeClock {
     /// Ticks of the STC in one tick of the 90 kHz clock of PTS and DTS

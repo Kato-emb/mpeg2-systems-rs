@@ -4,15 +4,16 @@ use core::time::Duration;
 
 /// Settings of a [`Muxer`](super::Muxer)
 ///
-/// [`MuxerConfig::new`] gives the default of each setting but the
-/// multiplex rate; change the fields of the value it returns.
+/// [`MuxerConfig::new`] takes the multiplex rate and `mux_delay`, which the
+/// specification leaves to the caller, and gives the default of each other
+/// setting; change the fields of the value it returns.
 ///
 /// ```
 /// use core::time::Duration;
 /// use mpeg2_systems::ps::mux::MuxerConfig;
 ///
-/// // 1 260 000 bytes a second
-/// let config = MuxerConfig::new(25_200).with_mux_delay(Duration::from_millis(500));
+/// // 1 260 000 bytes a second, each PES packet at most 0.5 s before its time
+/// let config = MuxerConfig::new(25_200, Duration::from_millis(500)).with_pack_size(2_324);
 /// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -31,13 +32,18 @@ pub struct MuxerConfig {
     /// §2.7.1 allows from one SCR to the next, whatever `pack_size`.
     pub pack_size: usize,
     /// The longest time the first pack of a PES packet arrives before its
-    /// DTS, or its PTS when it has no DTS (0.7 s by default)
+    /// DTS, or its PTS when it has no DTS
+    ///
+    /// [`Muxer::new`](super::Muxer::new) takes up to 1 s, the longest a byte
+    /// may wait in the P-STD before it is decoded (ISO/IEC 13818-1 §2.5.2.3);
+    /// the longer waits that section allows still picture video and ISO/IEC
+    /// 14496 streams are not taken.
     ///
     /// The SCR of the pack is that time less `mux_delay`, or later where the
     /// packs before it are still arriving or the input buffer of its stream
-    /// in the P-STD has no room for it yet. Any value is taken; a PES packet
-    /// that would not arrive in full within it is refused, as every PES
-    /// packet with a payload is at 0.
+    /// in the P-STD has no room for it yet. A PES packet that would not
+    /// arrive in full within it is refused, as every PES packet with a
+    /// payload is at 0.
     pub mux_delay: Duration,
     /// The most bytes the output held for
     /// [`Muxer::poll_output`](super::Muxer::poll_output) may grow to (4 MiB by
@@ -107,13 +113,14 @@ pub struct MuxerConfig {
 }
 
 impl MuxerConfig {
-    /// Returns the default settings, at the `program_mux_rate` given
+    /// Returns the settings of `program_mux_rate` and `mux_delay`, and the
+    /// default of each other setting
     #[must_use]
-    pub const fn new(program_mux_rate: u32) -> Self {
+    pub const fn new(program_mux_rate: u32, mux_delay: Duration) -> Self {
         Self {
             program_mux_rate,
             pack_size: 2048,
-            mux_delay: Duration::from_millis(700),
+            mux_delay,
             buffer_limit: 4 * 1024 * 1024,
             header_interval: Duration::MAX,
             fixed_rate: false,
@@ -125,13 +132,6 @@ impl MuxerConfig {
     #[must_use]
     pub const fn with_pack_size(mut self, pack_size: usize) -> Self {
         self.pack_size = pack_size;
-        self
-    }
-
-    /// Returns the value with the given `mux_delay`
-    #[must_use]
-    pub const fn with_mux_delay(mut self, mux_delay: Duration) -> Self {
-        self.mux_delay = mux_delay;
         self
     }
 

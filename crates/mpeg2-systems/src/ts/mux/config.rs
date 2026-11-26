@@ -4,14 +4,16 @@ use core::time::Duration;
 
 /// Settings of a [`Muxer`](super::Muxer)
 ///
-/// [`MuxerConfig::new`] gives the default of each setting; change the fields
-/// of the value it returns.
+/// [`MuxerConfig::new`] takes `mux_delay`, which the specification leaves to
+/// the caller, and gives the default of each other setting; change the
+/// fields of the value it returns.
 ///
 /// ```
 /// use core::time::Duration;
 /// use mpeg2_systems::ts::mux::MuxerConfig;
 ///
-/// let config = MuxerConfig::new()
+/// // Each PES packet at most 0.5 s before its time
+/// let config = MuxerConfig::new(Duration::from_millis(500))
 ///     .with_transport_stream_id(0x7fe0)
 ///     .with_pcr_interval(Duration::from_millis(30));
 /// ```
@@ -35,7 +37,12 @@ pub struct MuxerConfig {
     /// 0.1 s (ISO/IEC 13818-1 §2.7.2, §2.4.2.3 equation 2-5).
     pub pcr_interval: Duration,
     /// Offset subtracted from a PES packet's DTS, or its PTS when it has no
-    /// DTS, to obtain the desired PCR (0.7 s by default)
+    /// DTS, to obtain the desired PCR
+    ///
+    /// [`Muxer::new`](super::Muxer::new) takes up to 1 s, the longest a byte
+    /// may wait in the T-STD before it is decoded (ISO/IEC 13818-1 §2.4.2.6);
+    /// the longer waits that section allows still picture video and ISO/IEC
+    /// 14496 streams are not taken.
     ///
     /// The PCR does not go back, so a PES packet given after one of a later
     /// DTS on another stream may arrive after a later PCR.
@@ -50,18 +57,15 @@ pub struct MuxerConfig {
 }
 
 impl MuxerConfig {
-    /// Returns the default settings
+    /// Returns the settings of `mux_delay`, and the default of each other
+    /// setting
     #[must_use]
-    #[expect(
-        clippy::new_without_default,
-        reason = "the specification sets no default, which Default would claim"
-    )]
-    pub const fn new() -> Self {
+    pub const fn new(mux_delay: Duration) -> Self {
         Self {
             transport_stream_id: 1,
             psi_interval: Duration::from_millis(100),
             pcr_interval: Duration::from_millis(40),
-            mux_delay: Duration::from_millis(700),
+            mux_delay,
             buffer_limit: 4 * 1024 * 1024,
         }
     }
@@ -87,13 +91,6 @@ impl MuxerConfig {
         self
     }
 
-    /// Returns the value with the given `mux_delay`
-    #[must_use]
-    pub const fn with_mux_delay(mut self, mux_delay: Duration) -> Self {
-        self.mux_delay = mux_delay;
-        self
-    }
-
     /// Returns the value with the given `buffer_limit`
     #[must_use]
     pub const fn with_buffer_limit(mut self, buffer_limit: usize) -> Self {
@@ -110,18 +107,16 @@ mod tests {
 
     #[test]
     fn a_config_built_from_new_and_every_with_method_equals_one_with_every_field_assigned() {
-        let mut assigned = MuxerConfig::new();
+        let mut assigned = MuxerConfig::new(Duration::from_millis(500));
         assigned.transport_stream_id = 0x7fe0;
         assigned.psi_interval = Duration::from_millis(50);
         assigned.pcr_interval = Duration::from_millis(30);
-        assigned.mux_delay = Duration::from_millis(500);
         assigned.buffer_limit = 1024;
 
-        let built = MuxerConfig::new()
+        let built = MuxerConfig::new(Duration::from_millis(500))
             .with_transport_stream_id(0x7fe0)
             .with_psi_interval(Duration::from_millis(50))
             .with_pcr_interval(Duration::from_millis(30))
-            .with_mux_delay(Duration::from_millis(500))
             .with_buffer_limit(1024);
 
         assert_eq!(built, assigned);

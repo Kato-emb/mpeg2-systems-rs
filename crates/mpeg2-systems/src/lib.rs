@@ -112,6 +112,7 @@
 //! ```
 //! # #[cfg(feature = "alloc")]
 //! # {
+//! use core::time::Duration;
 //! use std::io::Write;
 //!
 //! use mpeg2_systems::pes::{OptionalHeader, PesPacket, StreamId};
@@ -128,7 +129,7 @@
 //! ) -> Result<(), Box<dyn std::error::Error>> {
 //!     // Register the program and its streams before the first PES packet
 //!     let (video, audio) = (Pid::try_from(0x0100)?, Pid::try_from(0x0101)?);
-//!     let mut muxer = Muxer::new(MuxerConfig::new())?;
+//!     let mut muxer = Muxer::new(MuxerConfig::new(Duration::from_millis(700)))?;
 //!     muxer.add_program(1, Pid::try_from(0x1000)?)?;
 //!     muxer.add_stream(1, ElementaryStream::new(StreamType::AVC_VIDEO, video))?;
 //!     muxer.add_stream(1, ElementaryStream::new(StreamType::ISO_IEC_13818_7_AUDIO, audio))?;
